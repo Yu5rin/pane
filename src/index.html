@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pane</title>
+<script>
+  try {
+    var dark = matchMedia("(prefers-color-scheme: dark)").matches;
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+  } catch (e) {}
+</script>
+<link rel="stylesheet" href="style.css">
+<style>
+  /* Phase 1 動作確認用の最小レイアウト。第10.4節の画面構成は後フェーズで実装する。 */
+  html, body { height: 100%; margin: 0; }
+  body { display: flex; flex-direction: column; background: var(--paper); color: var(--ink); font-family: var(--font-body); }
+  #titlebar { display: flex; align-items: center; gap: 10px; padding: 0 10px; height: 32px; border-bottom: 1px solid var(--rule); font-size: 13px; flex: none; }
+  #titlebar .filename { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #titlebar .dot { color: var(--accent); visibility: hidden; }
+  #titlebar.dirty .dot { visibility: visible; }
+  #titlebar button { border: none; background: transparent; color: var(--ink-mute); font: inherit; cursor: pointer; padding: 4px 8px; border-radius: 6px; }
+  #titlebar button:hover { color: var(--ink); background: var(--accent-soft); }
+  #cm-host { flex: 1; min-height: 0; overflow: hidden; }
+  #statusbar { display: flex; gap: 16px; padding: 0 10px; height: 24px; align-items: center; border-top: 1px solid var(--rule); font-size: 11px; color: var(--ink-mute); flex: none; font-family: var(--font-mono); }
+</style>
+</head>
+<body>
+  <div id="titlebar">
+    <span class="filename" id="filename">無題</span>
+    <span class="dot" id="dirty-dot">&#9679;</span>
+    <button id="btn-open" type="button">開く</button>
+    <button id="btn-save" type="button">保存</button>
+    <button id="btn-save-as" type="button">名前を付けて保存</button>
+    <button id="btn-theme" type="button">テーマ切替</button>
+  </div>
+  <div id="cm-host"></div>
+  <div id="statusbar">
+    <span id="status-mode">Markdown</span>
+    <span id="status-count">0文字</span>
+  </div>
+  <input id="file-input" type="file" accept=".md,.markdown,.mdown,.txt" hidden>
+  <script type="module" src="main.js"></script>
+</body>
+</html>
