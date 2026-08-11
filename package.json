@@ -1,0 +1,31 @@
+{
+  "name": "pane",
+  "version": "0.1.0",
+  "description": "Pane - マークダウン対応メモ帳",
+  "private": true,
+  "scripts": {
+    "build:editor": "node scripts/build-editor.js && esbuild src/editor.src.js --bundle --format=esm --splitting --outdir=dist"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Yu5rin/pane.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "UNLICENSED",
+  "bugs": {
+    "url": "https://github.com/Yu5rin/pane/issues"
+  },
+  "homepage": "https://github.com/Yu5rin/pane#readme",
+  "dependencies": {
+    "@codemirror/commands": "^6.10.4",
+    "@codemirror/lang-markdown": "^6.5.0",
+    "@codemirror/language": "^6.12.4",
+    "@codemirror/state": "^6.7.1",
+    "@codemirror/view": "^6.43.6",
+    "@lezer/markdown": "^1.7.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.2"
+  }
+}
