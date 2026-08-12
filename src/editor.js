@@ -4,7 +4,7 @@
 import { EditorView, keymap, Decoration, ViewPlugin, WidgetType } from "@codemirror/view";
 import { EditorState, Compartment, StateEffect, StateField } from "@codemirror/state";
 import { markdown } from "@codemirror/lang-markdown";
-import { Strikethrough } from "@lezer/markdown";
+import { Strikethrough, Table } from "@lezer/markdown";
 import { defaultKeymap, history, historyKeymap, indentWithTab, insertNewline, undo, redo, moveLineUp, moveLineDown, copyLineDown, deleteLine } from "@codemirror/commands";
 import { syntaxTree } from "@codemirror/language";
 
@@ -74,11 +74,67 @@ const livePreview = ViewPlugin.fromClass(class {
     const { state } = view;
     const marks = [];
     const quotedLines = new Set();
+    const seenFences = new Set();
+    const seenTables = new Set();
     const tree = syntaxTree(state);
     for (const { from, to } of view.visibleRanges) {
       tree.iterate({ from, to, enter: (node) => {
         const name = node.name, nf = node.from, nt = node.to;
         const live = cursorInside(view, nf, nt);
+        if (name === "FencedCode") {
+          // コードフェンス検出: 構文木のFencedCodeノードを可視範囲だけ辿る(全行走査はしない)
+          if (seenFences.has(nf)) return false; // visibleRangesの重複区間での二重処理を防ぐ
+          seenFences.add(nf);
+          if (node.node.getChildren("CodeMark").length < 2) return false; // 未終端(閉じフェンス無し)は装飾しない
+          const open = state.doc.lineAt(nf);
+          const close = state.doc.lineAt(Math.max(nf, nt - 1));
+          const blockLive = cursorInside(view, open.from, close.to);
+          marks.push({ from: open.from, to: close.to, deco: Decoration.mark({ class: "tok-codeblock" }) });
+          // 行全体を塗るブロック背景(行デコレーション)。開始行にコピー用マーカーを付与。
+          for (let ln = open.number; ln <= close.number; ln++) {
+            const l = state.doc.line(ln);
+            const cls = "cm-codeblock-line" + (ln === open.number ? " cm-cb-first" : "") + (ln === close.number ? " cm-cb-last" : "")
+              + (!blockLive && (ln === open.number || ln === close.number) ? " cm-cb-fence-hidden" : ""); // 記号を隠している時だけフェンス行を圧縮
+            marks.push({ from: l.from, to: l.from, deco: Decoration.line({ class: cls }), line: true });
+          }
+          // コピーボタンを開始フェンス行の行末にwidgetで配置(行デコレーションとは位置/sideが異なるため競合しない)
+          if (open.number + 1 <= close.number - 1 || close.number > open.number) {
+            const codeText = state.sliceDoc(
+              state.doc.line(Math.min(open.number + 1, close.number)).from,
+              close.from > 0 ? close.from - 1 : close.from
+            );
+            marks.push({ from: open.to, to: open.to, deco: Decoration.widget({ widget: new CodeCopyWidget(codeText), side: 1 }) });
+          }
+          if (!blockLive) {
+            // フェンス行の```記号のみ隠す(改行は含めない。ViewPluginでは改行をreplaceできない)
+            if (open.from < open.to) marks.push({ from: open.from, to: open.to, deco: Decoration.replace({}) });
+            if (close.from < close.to) marks.push({ from: close.from, to: close.to, deco: Decoration.replace({}) });
+          }
+          return false; // CodeMark/CodeInfo/CodeTextの子ノードへは降りない
+        }
+        if (name === "Table") {
+          // 表の行装飾: 構文木のTable/TableHeader/TableDelimiter/TableRowを可視範囲だけ辿る(全行走査はしない)
+          if (seenTables.has(nf)) return false;
+          seenTables.add(nf);
+          const t = node.node;
+          const header = t.getChild("TableHeader");
+          if (header) {
+            const hl = state.doc.lineAt(header.from);
+            marks.push({ from: hl.from, to: hl.from, deco: Decoration.line({ class: "cm-table-row cm-table-header" }), line: true });
+          }
+          const delim = t.getChild("TableDelimiter");
+          if (delim) {
+            const dl = state.doc.lineAt(delim.from);
+            const sepLive = cursorInside(view, dl.from, dl.to + 1);
+            if (!sepLive) marks.push({ from: dl.from, to: dl.to, deco: Decoration.replace({}) });
+            else marks.push({ from: dl.from, to: dl.to, deco: Decoration.mark({ class: "tok-table-sep" }) });
+          }
+          for (const row of t.getChildren("TableRow")) {
+            const rl = state.doc.lineAt(row.from);
+            marks.push({ from: rl.from, to: rl.from, deco: Decoration.line({ class: "cm-table-row" }), line: true });
+          }
+          return false; // TableCell等の子ノードへは降りない
+        }
         if (name === "StrongEmphasis" || name === "Emphasis") {
           const cls = name === "StrongEmphasis" ? "tok-bold" : "tok-italic";
           const mlen = name === "StrongEmphasis" ? 2 : 1;
@@ -155,55 +211,11 @@ const livePreview = ViewPlugin.fromClass(class {
         }
         let hm; const re = /==([^=\n]+)==/g;
         while ((hm = re.exec(line.text))) { const hf = line.from + hm.index, ht = hf + hm[0].length; marks.push({ from: hf, to: ht, deco: Decoration.mark({ class: "tok-mark" }) }); if (!cursorInside(view, hf, ht)) { marks.push({ from: hf, to: hf + 2, deco: Decoration.replace({}) }); marks.push({ from: ht - 2, to: ht, deco: Decoration.replace({}) }); } }
+        // リスト系の折り返し行を1行目のテキスト開始位置に揃える(ハンギングインデント)
+        const hang = line.text.match(/^(\s*)(?:[-*+]\s+\[[ xX]\]\s?|[-*+]\s|\d+\.\s)/);
+        if (hang) marks.push({ from: line.from, to: line.from, deco: Decoration.line({ attributes: { class: "cm-hang", style: `--hang:${hang[0].length}ch` } }), line: true });
         if (line.to + 1 > to) break;
         pos = line.to + 1;
-      }
-    }
-    {
-      const fences = [];
-      for (let i = 1; i <= state.doc.lines; i++) { const ln = state.doc.line(i); if (/^```/.test(ln.text)) fences.push(ln); }
-      for (let i = 0; i + 1 < fences.length; i += 2) {
-        const open = fences[i], close = fences[i + 1];
-        const blockLive = cursorInside(view, open.from, close.to);
-        marks.push({ from: open.from, to: close.to, deco: Decoration.mark({ class: "tok-codeblock" }) });
-        // 行全体を塗るブロック背景(行デコレーション)。開始行にコピー用マーカーを付与。
-        for (let ln = open.number; ln <= close.number; ln++) {
-          const l = state.doc.line(ln);
-          const cls = "cm-codeblock-line" + (ln === open.number ? " cm-cb-first" : "") + (ln === close.number ? " cm-cb-last" : "")
-            + (!blockLive && (ln === open.number || ln === close.number) ? " cm-cb-fence-hidden" : ""); // 記号を隠している時だけフェンス行を圧縮
-          marks.push({ from: l.from, to: l.from, deco: Decoration.line({ class: cls }), line: true });
-        }
-        // コピーボタンを開始フェンス行の行末にwidgetで配置(行デコレーションとは位置/sideが異なるため競合しない)
-        if (open.number + 1 <= close.number - 1 || close.number > open.number) {
-          const codeText = state.sliceDoc(
-            state.doc.line(Math.min(open.number + 1, close.number)).from,
-            close.from > 0 ? close.from - 1 : close.from
-          );
-          marks.push({ from: open.to, to: open.to, deco: Decoration.widget({ widget: new CodeCopyWidget(codeText), side: 1 }) });
-        }
-
-        if (!blockLive) {
-          // フェンス行の```記号のみ隠す(改行は含めない。ViewPluginでは改行をreplaceできない)
-          if (open.from < open.to) marks.push({ from: open.from, to: open.to, deco: Decoration.replace({}) });
-          if (close.from < close.to) marks.push({ from: close.from, to: close.to, deco: Decoration.replace({}) });
-        }
-      }
-    }
-    for (let i = 1; i <= state.doc.lines; i++) {
-      const ln = state.doc.line(i);
-      const isSep = /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(ln.text) && ln.text.includes("-") && ln.text.includes("|");
-      const isRow = /^\s*\|.*\|\s*$/.test(ln.text) && !isSep;
-      if (isSep) {
-        const sepLive = cursorInside(view, ln.from, ln.to + 1);
-        if (!sepLive) marks.push({ from: ln.from, to: ln.to, deco: Decoration.replace({}) });
-        else marks.push({ from: ln.from, to: ln.to, deco: Decoration.mark({ class: "tok-table-sep" }) });
-      } else if (isRow) {
-        // 表の行: 罫線区切りが直前/直後にあるものだけ(表として扱う)
-        const prev = i > 1 ? state.doc.line(i - 1).text : "";
-        const next = i < state.doc.lines ? state.doc.line(i + 1).text : "";
-        const sepRe = /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/;
-        const isHeader = sepRe.test(next);
-        marks.push({ from: ln.from, to: ln.from, deco: Decoration.line({ class: "cm-table-row" + (isHeader ? " cm-table-header" : "") }), line: true });
       }
     }
     const ranges = marks.filter(m => m.from < m.to || m.deco.spec.widget || m.line).map(m => m.deco.range(m.from, m.to));
@@ -237,32 +249,42 @@ function handleEnter(view) {
 
 // 本体向けAPI: エディタを生成して操作関数を返す
 // ---- Markdownテーブル ----
-const isTableLine = (t) => /^\s*\|/.test(t);
-const isSepLine = (t) => /^\s*\|?[\s:\-|]+$/.test(t) && t.includes("-");
 function splitCells(t) {
   let s = t.trim();
   if (s.startsWith("|")) s = s.slice(1);
   if (s.endsWith("|")) s = s.slice(0, -1);
   return s.split("|").map(c => c.trim());
 }
-// ドキュメント内の全テーブルを行走査で検出
-function findTables(state) {
-  const out = [];
-  let ln = 1;
-  while (ln < state.doc.lines) {
-    const l1 = state.doc.line(ln), l2 = state.doc.line(ln + 1);
-    if (isTableLine(l1.text) && !isSepLine(l1.text) && isTableLine(l2.text) && isSepLine(l2.text)) {
-      let end = ln + 1;
-      while (end + 1 <= state.doc.lines && isTableLine(state.doc.line(end + 1).text) && !isSepLine(state.doc.line(end + 1).text)) end++;
-      const lines = []; for (let i = ln; i <= end; i++) lines.push(state.doc.line(i).text);
-      const aligns = splitCells(lines[1]).map(c => c.startsWith(":") && c.endsWith(":") ? "center" : c.endsWith(":") ? "right" : c.startsWith(":") ? "left" : null);
-      out.push({ from: l1.from, to: state.doc.line(end).to, startLine: ln, endLine: end,
-                 header: splitCells(lines[0]), aligns, body: lines.slice(2).map(splitCells) });
-      ln = end + 1; continue;
-    }
-    ln++;
-  }
-  return out;
+// 構文木のTableノード(from/toを持つオブジェクト)から表データを組み立てる
+function tableFromNode(state, node) {
+  const startLine = state.doc.lineAt(node.from).number;
+  const endLine = state.doc.lineAt(Math.max(node.from, node.to - 1)).number;
+  const lines = []; for (let i = startLine; i <= endLine; i++) lines.push(state.doc.line(i).text);
+  const aligns = splitCells(lines[1]).map(c => c.startsWith(":") && c.endsWith(":") ? "center" : c.endsWith(":") ? "right" : c.startsWith(":") ? "left" : null);
+  return { from: state.doc.line(startLine).from, to: state.doc.line(endLine).to, startLine, endLine,
+           header: splitCells(lines[0]), aligns, body: lines.slice(2).map(splitCells) };
+}
+// カーソル位置を含むTableノードを探す(親を辿るだけでO(木の深さ)。全行走査はしない)
+function tableNodeAt(state, pos) {
+  let node = syntaxTree(state).resolveInner(pos, 1);
+  while (node && node.name !== "Table") node = node.parent;
+  return node;
+}
+// Table を含みうるノード(表を持てないノードへは降りずに枝刈りする)
+const TABLE_CONTAINER_NAMES = new Set(["Document", "Blockquote", "BulletList", "OrderedList", "ListItem"]);
+// ドキュメント内のTableノードをすべて取得する(表ウィジェットの描画に使う)。
+// 正規表現による行走査ではなく構文木を辿るため、表を含みえないノード(段落・見出し・
+// コードブロック等)へは降りずに打ち切る。表の描画はブロック装飾(block: true)であり
+// CodeMirrorの制約上StateFieldからしか提供できないため、view.visibleRangesは使えない。
+function findAllTables(state) {
+  const tables = [];
+  syntaxTree(state).iterate({
+    enter: (node) => {
+      if (node.name === "Table") { tables.push(tableFromNode(state, node)); return false; }
+      if (!TABLE_CONTAINER_NAMES.has(node.name)) return false;
+    },
+  });
+  return tables;
 }
 const dispW = (s) => [...s].reduce((n, ch) => n + (ch.codePointAt(0) > 0xFF ? 2 : 1), 0); // 表示幅(全角=2)
 function padCell(s, w, align) {
@@ -315,7 +337,10 @@ function selectCell(view, t, rowIdx, c) {
   view.dispatch({ selection: { anchor: p.from, head: p.to }, effects: EditorView.scrollIntoView(p.from, { y: "nearest" }) });
   view.focus();
 }
-function tableAt(state, pos) { return findTables(state).find(x => pos >= x.from && pos <= x.to); }
+function tableAt(state, pos) {
+  const node = tableNodeAt(state, pos);
+  return node ? tableFromNode(state, node) : undefined;
+}
 function mutateTable(view, pos, fn) {
   const t = tableAt(view.state, pos);
   if (!t) return;
@@ -381,7 +406,8 @@ class TableWidget extends WidgetType {
     return wrap;
   }
 }
-// フォーカス状態をStateに反映(キーボードを閉じたら表を描画するため)
+// フォーカス状態をStateに反映(表ウィジェットの装飾はブロック装飾のためStateFieldからしか
+// 提供できず、view.hasFocusを直接読めない。キーボードを閉じたら表を描画するために必要)
 const focusEffect = StateEffect.define();
 const focusField = StateField.define({ create: () => false, update: (v, tr) => { for (const ef of tr.effects) if (ef.is(focusEffect)) v = ef.value; return v; } });
 const focusNotifier = EditorView.focusChangeEffect.of((state, focusing) => focusEffect.of(focusing));
@@ -394,7 +420,7 @@ function buildTableDeco(state) {
   const decos = [];
   const focused = state.field(focusField, false) ?? false;
   const sel = state.selection.main;
-  for (const t of findTables(state)) {
+  for (const t of findAllTables(state)) {
     if (focused && sel.from <= t.to && sel.to >= t.from) continue; // 編集モード(生テキスト)
     decos.push(Decoration.replace({ widget: new TableWidget(t), block: true }).range(t.from, t.to));
   }
@@ -462,16 +488,8 @@ function collectHits(state) {
   }
   return hits.sort((a, b) => a[0] - b[0]);
 }
-// リスト系の折り返し行を1行目のテキスト開始位置に揃える(ハンギングインデント)
-const hangingIndent = EditorView.decorations.compute(["doc"], (state) => {
-  const decos = [];
-  for (let ln = 1; ln <= state.doc.lines; ln++) {
-    const line = state.doc.line(ln);
-    const m = line.text.match(/^(\s*)(?:[-*+]\s+\[[ xX]\]\s?|[-*+]\s|\d+\.\s)/);
-    if (m) decos.push(Decoration.line({ attributes: { class: "cm-hang", style: `--hang:${m[0].length}ch` } }).range(line.from));
-  }
-  return Decoration.set(decos);
-});
+// リスト系の折り返し行のハンギングインデント(1行目のテキスト開始位置に揃える)は
+// livePreviewのbuild()内(可視範囲の行走査)でcm-hangクラスとして付与している。
 const searchHighlight = EditorView.decorations.compute([searchTermsField, "doc", "selection"], (state) => {
   const hits = collectHits(state);
   if (!hits.length) return Decoration.none;
@@ -513,11 +531,11 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
           ...defaultKeymap.filter(k => k.key !== "Enter"),
           ...historyKeymap,
         ]),
-        markdown({ extensions: [Strikethrough] }),
+        markdown({ extensions: [Strikethrough, Table] }),
         EditorView.lineWrapping,
         livePreview,
         editable.of(EditorView.editable.of(true)),
-        searchTermsField, searchHighlight, hangingIndent,
+        searchTermsField, searchHighlight,
         focusField, focusNotifier, tableField, tableAutoFormat,
         EditorView.updateListener.of((u) => {
           if (u.docChanged && onChange) onChange(view.state.doc.toString());
