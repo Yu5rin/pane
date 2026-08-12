@@ -51,6 +51,11 @@ if (bridge) {
   bridge.postMessage({ type: "ready" });
 }
 
+function setReadOnly(readOnly) {
+  editor.setEditable(!readOnly);
+  titlebar.classList.toggle("readonly", !!readOnly);
+}
+
 function handleHostMessage(msg) {
   switch (msg?.type) {
     case "file-opened":
@@ -58,6 +63,7 @@ function handleHostMessage(msg) {
       setName(msg.fileName);
       currentEncoding = msg.encoding;
       currentLineEnding = msg.lineEnding;
+      setReadOnly(msg.readOnly);
       setDirty(false);
       updateCount();
       updateStatusMeta();
@@ -67,6 +73,7 @@ function handleHostMessage(msg) {
       setName("無題");
       currentEncoding = null;
       currentLineEnding = null;
+      setReadOnly(false);
       setDirty(false);
       updateCount();
       updateStatusMeta();
@@ -76,10 +83,15 @@ function handleHostMessage(msg) {
         setName(msg.fileName);
         currentEncoding = msg.encoding;
         currentLineEnding = msg.lineEnding;
+        setReadOnly(false);
         setDirty(false);
         updateStatusMeta();
       }
       // キャンセル・失敗時はダーティ状態を維持する(msg.errorがあれば将来トースト表示等に使う)
+      break;
+    case "request-text":
+      // 自動保存(仕様書 N-06): C#側は本文を持たないため、要求されたら都度返す。
+      bridge?.postMessage({ type: "text-response", text: editor.getValue() });
       break;
   }
 }
@@ -162,6 +174,12 @@ document.getElementById("btn-theme").addEventListener("click", () => {
   const cur = document.documentElement.dataset.theme;
   document.documentElement.dataset.theme = cur === "dark" ? "light" : "dark";
 });
+// 設定ダイアログはC#側のネイティブウィンドウで表示する(Phase 3時点の最小実装、Phase 8で置き換え)。
+const btnSettings = document.getElementById("btn-settings");
+if (btnSettings) {
+  btnSettings.hidden = !bridge;
+  btnSettings.addEventListener("click", () => bridge?.postMessage({ type: "open-settings" }));
+}
 
 window.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
