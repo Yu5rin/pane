@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Pane</RootNamespace>
+    <AssemblyName>Pane</AssemblyName>
+    <ApplicationIcon>Assets\Pane.ico</ApplicationIcon>
+
+    <!-- Windowsデスクトップワークロードが無い環境(Linux/mac上のCIやこのリポジトリの
+         開発環境)でもビルド検証できるようにする。Windows上のビルドには影響しない。 -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+
+    <!-- self-contained・単一exe出力(仕様書 第7章・第8.1節) -->
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Shift_JIS(コードページ932)を扱うために必要。.NETは既定でANSI系コードページを
+         同梱しないため、起動時に CodePagesEncodingProvider を登録する(Program.cs参照)。 -->
+    <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Assets\Pane.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>
