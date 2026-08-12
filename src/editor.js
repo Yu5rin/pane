@@ -1,11 +1,12 @@
 // Pane ライブプレビューエディタ (CodeMirror 6)
 // index.html から createEditor() で生成し、返り値のAPIで操作する。
-import { EditorView, keymap, Decoration, ViewPlugin, WidgetType } from "https://esm.sh/@codemirror/view@6";
-import { EditorState, Compartment, StateEffect, StateField } from "https://esm.sh/@codemirror/state@6";
-import { markdown } from "https://esm.sh/@codemirror/lang-markdown@6";
-import { Strikethrough } from "https://esm.sh/@lezer/markdown@1";
-import { defaultKeymap, history, historyKeymap, indentWithTab, insertNewline, undo, redo, moveLineUp, moveLineDown, copyLineDown, deleteLine } from "https://esm.sh/@codemirror/commands@6";
-import { syntaxTree } from "https://esm.sh/@codemirror/language@6";
+// 依存はすべてesbuildでビルド成果物(dist/)に同梱する。実行時に外部CDNへは一切到達しない。
+import { EditorView, keymap, Decoration, ViewPlugin, WidgetType } from "@codemirror/view";
+import { EditorState, Compartment, StateEffect, StateField } from "@codemirror/state";
+import { markdown } from "@codemirror/lang-markdown";
+import { Strikethrough } from "@lezer/markdown";
+import { defaultKeymap, history, historyKeymap, indentWithTab, insertNewline, undo, redo, moveLineUp, moveLineDown, copyLineDown, deleteLine } from "@codemirror/commands";
+import { syntaxTree } from "@codemirror/language";
 
 // カーソル/選択がこの範囲に触れているか。フォーカスがなければ常に装飾。
 function cursorInside(view, from, to) {
