@@ -1,19 +1,28 @@
-// Pane 単体動作確認用エントリポイント(Phase 1)。
-// ファイルの開閉は File API / File System Access API による仮実装。
-// Phase 2 で C#(WebView2)側の実装に置き換える。
+// Pane エントリポイント。
+// WebView2(window.chrome.webview)が使える場合はpostMessageブリッジでC#側に
+// ファイルの開閉・保存を委譲する(Phase 2、仕様書 第7章)。
+// 使えない場合(単体のブラウザで動作確認する場合)は File System Access API /
+// File API による仮実装にフォールバックする(Phase 1からの経路をそのまま維持)。
 import { createEditor } from "./editor.js";
 
 const host = document.getElementById("cm-host");
 const titlebar = document.getElementById("titlebar");
 const filenameEl = document.getElementById("filename");
 const statusCount = document.getElementById("status-count");
+const statusEncoding = document.getElementById("status-encoding");
+const statusLineEnding = document.getElementById("status-line-ending");
 const fileInput = document.getElementById("file-input");
 
-let currentHandle = null;
+const bridge = window.chrome?.webview ?? null;
+
+let currentHandle = null; // File System Access API(ブラウザ単体時のみ使用)
 let currentName = "無題";
+let currentEncoding = null;
+let currentLineEnding = null;
 
 function setDirty(v) {
   titlebar.classList.toggle("dirty", v);
+  bridge?.postMessage({ type: "dirty", value: v });
 }
 function setName(name) {
   currentName = name;
@@ -21,6 +30,10 @@ function setName(name) {
 }
 function updateCount() {
   statusCount.textContent = `${editor.getValue().length}文字`;
+}
+function updateStatusMeta() {
+  statusEncoding.textContent = currentEncoding ?? "";
+  statusLineEnding.textContent = currentLineEnding ?? "";
 }
 
 const editor = createEditor(host, {
@@ -30,8 +43,52 @@ const editor = createEditor(host, {
   },
 });
 updateCount();
+updateStatusMeta();
+
+// ---- WebView2ブリッジ(Phase 2) ----
+if (bridge) {
+  bridge.addEventListener("message", (e) => handleHostMessage(e.data));
+  bridge.postMessage({ type: "ready" });
+}
+
+function handleHostMessage(msg) {
+  switch (msg?.type) {
+    case "file-opened":
+      editor.setValue(msg.text);
+      setName(msg.fileName);
+      currentEncoding = msg.encoding;
+      currentLineEnding = msg.lineEnding;
+      setDirty(false);
+      updateCount();
+      updateStatusMeta();
+      break;
+    case "new-document":
+      editor.setValue("");
+      setName("無題");
+      currentEncoding = null;
+      currentLineEnding = null;
+      setDirty(false);
+      updateCount();
+      updateStatusMeta();
+      break;
+    case "save-result":
+      if (msg.ok) {
+        setName(msg.fileName);
+        currentEncoding = msg.encoding;
+        currentLineEnding = msg.lineEnding;
+        setDirty(false);
+        updateStatusMeta();
+      }
+      // キャンセル・失敗時はダーティ状態を維持する(msg.errorがあれば将来トースト表示等に使う)
+      break;
+  }
+}
 
 async function openFile() {
+  if (bridge) {
+    bridge.postMessage({ type: "open" });
+    return;
+  }
   if (window.showOpenFilePicker) {
     let handles;
     try {
@@ -66,6 +123,10 @@ fileInput.addEventListener("change", async () => {
 
 async function saveFile(forcePicker) {
   const text = editor.getValue();
+  if (bridge) {
+    bridge.postMessage({ type: "save", text, saveAs: !!forcePicker });
+    return;
+  }
   if (window.showSaveFilePicker) {
     if (!currentHandle || forcePicker) {
       try {
