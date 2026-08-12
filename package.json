@@ -4,7 +4,8 @@
   "description": "Pane - マークダウン対応メモ帳",
   "private": true,
   "scripts": {
-    "build:editor": "node scripts/build-editor.js && esbuild src/editor.src.js --bundle --format=esm --splitting --outdir=dist"
+    "build": "node scripts/build.js",
+    "dev": "node scripts/build.js --serve"
   },
   "repository": {
     "type": "git",
