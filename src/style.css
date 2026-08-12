@@ -107,33 +107,11 @@ html[data-theme="dark"] .btn.primary { color: #0E1513; }
 .icon-btn { display: inline-flex; align-items: center; justify-content: center; gap: 4px; }
 .icon-btn svg { display: block; }
 
-/* 分割ボタン(新規メモ+テンプレート) */
-.split-btn { display: flex; width: 100%; }
-.split-btn #btn-new { flex: 1; border-radius: var(--radius) 0 0 var(--radius); }
-.split-btn .split-caret { border-radius: 0 var(--radius) var(--radius) 0; border-left: 1px solid rgba(255,255,255,.3); padding: 9px 12px; }
-
-/* 認証画面 */
-.auth-view { min-height: 100dvh; display: grid; place-items: center; padding: 24px; background: var(--paper); }
-.auth-card { width: min(400px, 100%); background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 32px 28px; box-shadow: var(--shadow-card); }
-.auth-logo { font-size: 20px; font-weight: 600; letter-spacing: .01em; }
-.auth-lead { color: var(--ink-sub); margin: 6px 0 22px; font-size: 13px; }
-.field { display: block; margin-bottom: 14px; }
-.field span { display: block; font-size: 12px; color: var(--ink-sub); margin-bottom: 4px; }
-.field input { width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; font-size: 15px; background: var(--input-bg); transition: border-color .15s; }
-.field input:focus { border-color: var(--accent); outline: none; }
-.auth-actions { display: flex; gap: 10px; margin-top: 20px; }
-.auth-actions .btn { flex: 1; padding-block: 11px; }
-.auth-message { min-height: 1.4em; font-size: 13px; color: var(--pending); margin: 14px 0 0; }
-.link-btn { background: none; border: none; padding: 0; margin-top: 14px; font-size: 12px; color: var(--accent); text-decoration: underline; }
-
 /* ヘッダー(濃色・PWAタイトルバーと統一) */
 .topbar { display: flex; justify-content: space-between; align-items: center; padding: 9px 16px; background: var(--topbar); color: var(--topbar-ink); position: sticky; top: 0; z-index: 10; }
 .app-name { font-weight: 600; letter-spacing: .01em; }
 .topbar-left, .topbar-right { display: flex; align-items: center; gap: 10px; }
 .topbar .btn { background: transparent; border-color: rgba(255,255,255,.28); color: var(--topbar-ink); }
-.sync-status { color: var(--status-ok); }
-.sync-status.offline { color: var(--danger); }
-.sync-status.pending { color: var(--status-pend); }
 
 /* レイアウト */
 .layout { display: grid; grid-template-columns: var(--list-w, 320px) 6px 1fr; height: calc(var(--vvh, 100dvh) - 45px); }
@@ -146,44 +124,6 @@ html[data-theme="dark"] .btn.primary { color: #0E1513; }
 .resize-handle:active { background: var(--accent-soft); }
 .list-pane { border-right: 1px solid var(--line); background: var(--surface); display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
 
-/* 一覧ツール */
-.list-tools { padding: 12px; display: grid; gap: 8px; border-bottom: 1px solid var(--line); position: relative; }
-#search-box { border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; font-size: 14px; background: var(--input-bg); width: 100%; transition: border-color .15s; }
-#search-box:focus { border-color: var(--accent); outline: none; }
-.list-pane.trash .split-btn, .list-pane.trash .tag-bar { display: none; }
-
-/* サイドバーのフッター */
-.list-footer { display: flex; align-items: center; gap: 4px; border-top: 1px solid var(--line); padding: 6px 10px; }
-.foot-btn { background: none; border: none; color: var(--ink-sub); font-size: 12px; padding: 6px 8px; border-radius: 6px; }
-.foot-hint { margin-left: auto; color: var(--ink-sub); opacity: .7; }
-
-/* テンプレートメニュー */
-.template-menu { position: absolute; top: calc(100% - 6px); left: 12px; right: 12px; z-index: 30; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow-pop); padding: 6px; }
-.template-menu ul { list-style: none; margin: 0; padding: 0; max-height: 40dvh; overflow-y: auto; }
-.template-menu li { display: flex; align-items: center; }
-.tpl-use { flex: 1; text-align: left; background: none; border: none; padding: 9px 10px; border-radius: 8px; font-size: 13px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tpl-del { background: none; border: none; color: var(--ink-sub); padding: 6px 10px; font-size: 14px; border-radius: 8px; }
-.tpl-empty { padding: 10px 12px; color: var(--ink-sub); font-size: 12px; }
-
-/* タグ */
-.tag-bar { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 12px 0; }
-
-/* メモ一覧 */
-.memo-list { list-style: none; margin: 8px 0 0; padding: 0 8px 16px; overflow-y: auto; flex: 1; }
-.memo-item { border: 1px solid transparent; border-left: 3px solid transparent; border-radius: 10px; padding: 11px 13px; cursor: pointer; transition: background .12s, border-color .12s; }
-.memo-item.active { background: var(--accent-soft); border-left-color: var(--accent); }
-.memo-item.pending { border-left-color: var(--pending); }
-.memo-item-title { font-weight: 600; font-size: 14.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 1px; }
-.pin-star { width: 13px; height: 13px; vertical-align: -1px; margin-right: 5px; fill: var(--accent); }
-.memo-item-preview { font-size: 12.5px; color: var(--ink-sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.4; }
-.memo-item-meta { font-family: var(--font-mono); font-size: 11px; color: var(--ink-sub); margin-top: 2px; }
-.list-empty { color: var(--ink-sub); font-size: 13px; text-align: center; padding: 32px 16px; }
-
-/* ゴミ箱 */
-.trash-item { cursor: default; }
-.trash-actions { display: flex; gap: 6px; margin-top: 8px; }
-.tpl-mark { font-size: 10px; color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 0 4px; margin-right: 6px; vertical-align: 1px; }
-
 /* エディタ */
 .editor-pane { overflow: hidden; display: flex; background: var(--paper); }
 .editor-empty { margin: auto; color: var(--ink-sub); font-size: 14px; padding: 24px; text-align: center; }
@@ -195,9 +135,7 @@ html[data-theme="dark"] .btn.primary { color: #0E1513; }
 .save-status { color: var(--ink-sub); }
 .save-status.pending { color: var(--pending); }
 .memo-title { border: none; background: transparent; font-size: 28px; font-weight: 700; letter-spacing: -.01em; padding: 4px 0 8px; width: 100%; line-height: 1.4; flex: none; min-height: calc(1.4em + 12px); text-overflow: ellipsis; }
-.memo-tags { border: none; border-bottom: 1px solid var(--line); background: transparent; padding: 6px 0 8px; width: 100%; color: var(--accent); }
-.memo-title:focus, .memo-tags:focus, .memo-content:focus { outline: none; }
-.memo-tags:focus { border-bottom-color: var(--accent); }
+.memo-title:focus, .memo-content:focus { outline: none; }
 .memo-content { flex: 1; border: none; background: transparent; resize: none; font-size: 15px; line-height: 1.85; padding: 8px 0; width: 100%; min-height: 0; }
 
 /* ピン留めボタン(SVG星) */
@@ -273,8 +211,6 @@ html[data-theme="dark"] mark { background: #8A7A2E; }
 /* モバイル: サイドバードロワー */
 .drawer-scrim { position: fixed; inset: 0; z-index: 44; background: rgba(10,14,16,.45); animation: scrim-in .25s ease; }
 @keyframes scrim-in { from { opacity: 0; } to { opacity: 1; } }
-.memo-item.swipe-pin { background: var(--accent-soft); }
-.memo-item.swipe-del { background: var(--danger-soft); }
 
 /* ツールバー設定リスト */
 .opt-row { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 12px; }
@@ -340,7 +276,6 @@ html[data-theme="dark"] mark { background: #8A7A2E; }
   .memo-title { font-size: 20px; }
   .btn { min-height: 34px; }
   .md-toolbar button { height: 32px; min-width: 34px; }
-  .list-footer { padding-bottom: calc(6px + env(safe-area-inset-bottom)); }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -404,10 +339,6 @@ html[data-theme="dark"] .tok-mark { background: #8A7A2E; color: #F2EFDF; }
 .btn.ghost:hover { background: var(--accent-soft); border-color: var(--accent-soft); color: var(--accent); }
 .btn.danger:hover { background: var(--danger-soft); border-color: var(--danger-soft); }
 .topbar .btn:hover { background: rgba(255,255,255,.14); border-color: rgba(255,255,255,.4); color: #fff; }
-.foot-btn:hover { background: var(--accent-soft); color: var(--accent); }
-.tpl-use:hover { background: var(--accent-soft); color: var(--accent); }
-.tpl-del:hover { color: var(--danger); background: var(--danger-soft); }
-.memo-item:hover { background: var(--paper); }
 .md-toolbar button:hover { background: var(--accent-soft); color: var(--accent); }
 #palette-list li:hover { background: var(--paper); }
 .settings-close:hover { background: var(--paper); color: var(--ink); }
@@ -415,9 +346,6 @@ html[data-theme="dark"] .tok-mark { background: #8A7A2E; color: #F2EFDF; }
 .ctx-menu button.danger:hover { background: var(--danger-soft); color: var(--danger); }
 .resize-handle:hover { background: var(--accent-soft); }
 }
-
-/* 検索ヒットのハイライト */
-.memo-item mark { background: var(--accent-soft); color: var(--accent); border-radius: 3px; padding: 0 1px; }
 
 /* ドロワー表示中はMdツールバーを重ねない(下部ボタンが隠れる) */
 body:has(.list-pane.drawer-open) .mobile-bar { display: none !important; }
@@ -459,13 +387,7 @@ html[data-theme="dark"] .cm-table th { background: rgba(61,193,181,.14); }
 .cm-table th:hover > .tbl-ctls::before { content: ""; position: absolute; left: -6px; right: -6px; top: -4px; bottom: -6px; z-index: -1; }
 .cm-table tr:hover > td:first-child > .tbl-row-ctls::before { content: ""; position: absolute; top: -6px; bottom: -6px; left: -4px; right: -8px; z-index: -1; }
 
-/* ---- アーカイブ ---- */
-.foot-btn.icon-btn { display: inline-flex; align-items: center; justify-content: center; padding: 6px; }
-.foot-sep { flex: 1; } /* ゴミ箱/アーカイブ と 書き出し/取り込み を左右に分ける */
-#btn-archive.btn-archive-on { color: var(--accent); }
 /* アーカイブ閲覧モード: 編集UIを隠して読み取り専用を明示 */
 .layout.readonly .memo-title { pointer-events: none; }
 .layout.readonly #btn-delete, .layout.readonly #btn-save-template, .layout.readonly .mobile-bar { display: none !important; }
 .layout.readonly .editor::before { content: "アーカイブ（閲覧のみ）"; display: block; font-size: 12px; color: var(--ink-sub); background: var(--accent-soft); border-radius: 6px; padding: 4px 10px; margin-bottom: 10px; align-self: flex-start; }
-.list-pane.archive .list-footer #btn-archive-nav { color: var(--accent); }
-.list-pane.trash .list-footer #btn-trash { color: var(--accent); }
