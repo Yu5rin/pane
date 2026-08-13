@@ -43,7 +43,6 @@ export function buildCommands(ctx) {
     { id: "file.exportPdf", menu: "File", label: "エクスポート: PDF", run: app((c) => c.actions.exportAs("pdf")) },
     { id: "file.exportHtml", menu: "File", label: "エクスポート: HTML", run: app((c) => c.actions.exportAs("html")) },
     { id: "file.exportHtmlPlain", menu: "File", label: "エクスポート: HTML(スタイルなし)", run: app((c) => c.actions.exportAs("html-plain")) },
-    { id: "file.exportPng", menu: "File", label: "エクスポート: 画像(PNG)", run: app((c) => c.actions.exportAs("png")) },
     { id: "file.exportWord", menu: "File", label: "エクスポート: Word", run: app((c) => c.actions.exportAs("docx")), enabled: () => ctx.getState().pandocAvailable, note: "Pandoc未導入" },
     { id: "file.exportEpub", menu: "File", label: "エクスポート: EPUB", run: app((c) => c.actions.exportAs("epub")), enabled: () => ctx.getState().pandocAvailable, note: "Pandoc未導入", separatorAfter: true },
     { id: "file.print", menu: "File", label: "印刷", shortcut: `${MOD}+Alt+P`, run: app((c) => c.actions.print()), separatorAfter: true },
