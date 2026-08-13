@@ -251,4 +251,27 @@ internal static class TextFileService
         LineEndingKind.Mixed => "混在",
         _ => kind.ToString(),
     };
+
+    /// <summary>
+    /// AppSettings.DefaultEncoding("utf8"|"utf8bom"|"shiftjis"|"utf16le")をFileEncodingKindへ変換する。
+    /// 未知の値はUtf8として扱う(AppSettings側のsetterで既に正規化されているはずだが、念のため)。
+    /// 新規文書作成時の既定エンコーディングに使う(仕様書 保存と復元 defaultEncoding)。
+    /// </summary>
+    internal static FileEncodingKind ParseEncodingKey(string key) => key switch
+    {
+        "utf8bom" => FileEncodingKind.Utf8Bom,
+        "shiftjis" => FileEncodingKind.ShiftJis,
+        "utf16le" => FileEncodingKind.Utf16Le,
+        _ => FileEncodingKind.Utf8,
+    };
+
+    /// <summary>
+    /// AppSettings.DefaultLineEnding("crlf"|"lf")をLineEndingKindへ変換する。
+    /// 未知の値はCrlfとして扱う。新規文書作成時の既定改行コードに使う(仕様書 defaultLineEnding)。
+    /// </summary>
+    internal static LineEndingKind ParseLineEndingKey(string key) => key switch
+    {
+        "lf" => LineEndingKind.Lf,
+        _ => LineEndingKind.Crlf,
+    };
 }

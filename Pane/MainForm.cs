@@ -36,6 +36,9 @@ internal sealed class MainForm : Form
 
     private readonly WebView2 _webView = new();
     private readonly string? _initialPath;
+    /// <summary>起動時の動作(startupBehavior)が"customFolder"のときに読み込むフォルダ。
+    /// <see cref="PaneApplicationContext"/> から渡される。</summary>
+    private readonly string? _initialFolderPath;
     private readonly AutoSaveSnapshot? _recoverFrom;
     private readonly DroppedFileContent? _droppedFile;
     private readonly Action<string?>? _requestNewWindow;
@@ -84,6 +87,11 @@ internal sealed class MainForm : Form
     /// <summary>ConfirmDiscardDirtyAsyncを通過した後、確認を再表示せずにClose()を通すためのフラグ。</summary>
     private bool _forceClose;
 
+    /// <summary>タイトルバーの配色(案A): JS側("titlebar-color"メッセージ)から届いた実際の描画色。
+    /// 未受信の間はnullのままで、その場合<see cref="WindowChrome"/>側の既定色(案B)が使われる。</summary>
+    private string? _titlebarBackgroundOverride;
+    private string? _titlebarForegroundOverride;
+
     /// <summary>自動保存スナップショットの識別子。ウィンドウごとに一意。</summary>
     public Guid WindowId { get; } = Guid.NewGuid();
 
@@ -98,9 +106,11 @@ internal sealed class MainForm : Form
         Action<DroppedFileContent>? requestNewWindowWithContent = null,
         Action<MainForm>? requestSwitchDocument = null,
         Action<MainForm>? requestBroadcastSettings = null,
-        DroppedFileContent? droppedFile = null)
+        DroppedFileContent? droppedFile = null,
+        string? initialFolderPath = null)
     {
         _initialPath = initialPath;
+        _initialFolderPath = initialFolderPath;
         _recoverFrom = recoverFrom;
         _droppedFile = droppedFile;
         _requestNewWindow = requestNewWindow;
@@ -162,6 +172,42 @@ internal sealed class MainForm : Form
             _watcher?.Dispose();
         };
     }
+
+    /// <summary>
+    /// ウィンドウのネイティブハンドルが生成された直後(タイトルバーの配色を反映できる最初のタイミング)。
+    /// この時点ではまだJS側からの実描画色(titlebar-color)は届いていないため、案B(既定色)で塗る。
+    /// </summary>
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        ApplyTitleBarTheme();
+    }
+
+    /// <summary>
+    /// タイトルバー(ネイティブキャプション)の配色を現在の設定に合わせて塗り直す。
+    /// 呼び出しタイミング: (1)ウィンドウ生成直後(<see cref="OnHandleCreated"/>)、
+    /// (2)JS側からのテーマ変更("set-theme")受信時、(3)設定の再配信(<see cref="PostCapabilities"/>)。
+    /// 実際の色は案B(既定の代表色)でまず決め、JS側から届いた実描画色(<see cref="_titlebarBackgroundOverride"/>等)
+    /// があればそちらで上書きする。<see cref="WindowChrome"/>側で例外はすべて握りつぶされるため、
+    /// ここから先で失敗してもアプリは落ちない。
+    /// </summary>
+    private void ApplyTitleBarTheme() => ApplyTitleBarTheme(SettingsService.Load());
+
+    private void ApplyTitleBarTheme(AppSettings settings)
+    {
+        if (!IsHandleCreated) return;
+        bool isDark = ResolveIsDarkTheme(settings.Theme);
+        WindowChrome.ApplyTheme(Handle, isDark, _titlebarBackgroundOverride, _titlebarForegroundOverride);
+    }
+
+    /// <summary>設定の"theme"("system"/"light"/"dark")を実際のダーク/ライト判定に解決する。
+    /// "system"のときはWindowsのアプリ配色設定(レジストリ)に従う。想定外の値もsystem扱い。</summary>
+    private static bool ResolveIsDarkTheme(string theme) => theme switch
+    {
+        "dark" => true,
+        "light" => false,
+        _ => WindowChrome.IsSystemDarkTheme(),
+    };
 
     /// <summary>
     /// 未保存の変更がある場合、閉じる・新規作成・別のファイルを開く等、現在の文書を
@@ -304,7 +350,10 @@ internal sealed class MainForm : Form
                 else if (_droppedFile is not null) OpenDroppedContent(_droppedFile.Name, _droppedFile.Bytes);
                 else if (_initialPath is not null) OpenFile(_initialPath);
                 else OpenNewDocument();
-                _autoSaveTimer.Start();
+                // startupBehaviorが"customFolder"のとき、PaneApplicationContextから渡されたフォルダを
+                // サイドバーへ読み込む(仕様書 一般 startupFolderPath)。自動保存タイマーの起動可否・間隔は
+                // PostCapabilities内のApplyAutoSaveSettingsで設定済み(autoSaveEnabled=falseなら動かさない)。
+                if (_initialFolderPath is not null) _ = LoadFolderAsync(_initialFolderPath);
                 break;
             case "open":
                 // 新規作成・開くは現在のウィンドウを置き換えず、常に新しいウィンドウで開く。
@@ -348,7 +397,7 @@ internal sealed class MainForm : Form
                 _ = HandlePrintRequestAsync();
                 break;
             case "open-devtools":
-                _webView.CoreWebView2.OpenDevToolsWindow();
+                HandleOpenDevToolsRequest();
                 break;
             case "open-default-apps-settings":
                 OpenDefaultAppsSettings();
@@ -372,7 +421,18 @@ internal sealed class MainForm : Form
                 if (root.TryGetProperty("theme", out JsonElement themeProp))
                 {
                     SaveTheme(themeProp.GetString() ?? "system");
+                    ApplyTitleBarTheme(); // テーマ変更を即座にタイトルバーへも反映する
                 }
+                break;
+            case "titlebar-color":
+                // 案A: JS側から実際の描画色(--paper/--inkの計算結果)が届いた場合の受け口。
+                // { type: "titlebar-color", background: "#RRGGBB", foreground: "#RRGGBB" }
+                string? titlebarBackground = root.TryGetProperty("background", out JsonElement tbBgProp) ? tbBgProp.GetString() : null;
+                string? titlebarForeground = root.TryGetProperty("foreground", out JsonElement tbFgProp) ? tbFgProp.GetString() : null;
+                Logger.Write($"titlebar-color受信: background={titlebarBackground ?? "(なし)"}, foreground={titlebarForeground ?? "(なし)"}");
+                if (!string.IsNullOrWhiteSpace(titlebarBackground)) _titlebarBackgroundOverride = titlebarBackground;
+                if (!string.IsNullOrWhiteSpace(titlebarForeground)) _titlebarForegroundOverride = titlebarForeground;
+                ApplyTitleBarTheme();
                 break;
             case "set-font-size":
                 if (root.TryGetProperty("size", out JsonElement sizeProp) && sizeProp.ValueKind == JsonValueKind.Number)
@@ -419,6 +479,18 @@ internal sealed class MainForm : Form
                 break;
             case "remember-file-mode":
                 HandleRememberFileModeRequest(root);
+                break;
+            case "clear-recent-files":
+                HandleClearRecentFilesRequest();
+                break;
+            case "clear-per-file-modes":
+                HandleClearPerFileModesRequest();
+                break;
+            case "open-settings-file":
+                OpenSettingsFileInExplorer();
+                break;
+            case "reset-settings":
+                HandleResetSettingsRequest();
                 break;
         }
     }
@@ -513,10 +585,13 @@ internal sealed class MainForm : Form
         string? targetPath = _currentPath;
         if (saveAs || targetPath is null)
         {
+            string defaultExt = SettingsService.Load().DefaultFileExtension;
             using var dialog = new SaveFileDialog
             {
-                Filter = "Markdown (*.md)|*.md|テキスト (*.txt)|*.txt|すべてのファイル (*.*)|*.*",
-                FileName = _currentPath is null ? "無題.md" : Path.GetFileName(_currentPath),
+                Filter = BuildSaveFilter(defaultExt),
+                FilterIndex = 1,
+                DefaultExt = defaultExt,
+                FileName = _currentPath is null ? $"無題.{defaultExt}" : Path.GetFileName(_currentPath),
             };
             if (_currentPath is not null)
             {
@@ -558,6 +633,25 @@ internal sealed class MainForm : Form
             CompleteSave(ok: false);
             PostToWeb(new { type = "save-result", ok = false, error = ex.Message });
         }
+    }
+
+    /// <summary>
+    /// 「名前を付けて保存」ダイアログのフィルタ文字列を組み立てる。設定の既定拡張子
+    /// (defaultFileExtension)を先頭に置き、"md"/"txt"であれば重複を避けて他方も候補に加える。
+    /// </summary>
+    private static string BuildSaveFilter(string defaultExt)
+    {
+        var parts = new List<string> { $"{defaultExt.ToUpperInvariant()} (*.{defaultExt})|*.{defaultExt}" };
+        if (!string.Equals(defaultExt, "md", StringComparison.OrdinalIgnoreCase))
+        {
+            parts.Add("Markdown (*.md)|*.md");
+        }
+        if (!string.Equals(defaultExt, "txt", StringComparison.OrdinalIgnoreCase))
+        {
+            parts.Add("テキスト (*.txt)|*.txt");
+        }
+        parts.Add("すべてのファイル (*.*)|*.*");
+        return string.Join("|", parts);
     }
 
     /// <summary>ConfirmDiscardDirtyAsyncが保存完了を待っていれば、その結果を通知する。</summary>
@@ -871,9 +965,12 @@ internal sealed class MainForm : Form
 
     private void OpenNewDocument()
     {
+        // 新規文書の既定エンコーディング・改行コードは設定(defaultEncoding/defaultLineEnding)に従う
+        // (仕様書 保存と復元)。未設定時はTextFileService側の既定でUTF-8 BOMなし・CRLFになる。
+        AppSettings settings = SettingsService.Load();
         _currentPath = null;
-        _currentEncoding = FileEncodingKind.Utf8; // 既定: UTF-8 BOMなし(仕様書 第6.1節)
-        _currentLineEnding = LineEndingKind.Crlf;
+        _currentEncoding = TextFileService.ParseEncodingKey(settings.DefaultEncoding);
+        _currentLineEnding = TextFileService.ParseLineEndingKey(settings.DefaultLineEnding);
         _hasTrailingNewline = true;
         _isReadOnly = false;
         StopWatching();
@@ -986,6 +1083,30 @@ internal sealed class MainForm : Form
     }
 
     // ---- 自動保存(仕様書 N-06) ----
+
+    /// <summary>
+    /// 設定(autoSaveEnabled / autoSaveIntervalSeconds)を自動保存タイマーへ反映する。
+    /// 設定変更時に動作中のタイマーへ即座に反映するため、PostCapabilities(設定読み込み・
+    /// 全ウィンドウへの再配信のたび)から必ず呼ぶ。既定30秒(AutoSaveIntervalMs)は
+    /// このメソッドが一度も呼ばれる前(コンストラクタ直後)の暫定値として使うのみ。
+    /// </summary>
+    private void ApplyAutoSaveSettings(AppSettings settings)
+    {
+        int intervalMs = settings.AutoSaveIntervalSeconds * 1000;
+        if (_autoSaveTimer.Interval != intervalMs)
+        {
+            _autoSaveTimer.Interval = intervalMs;
+        }
+
+        if (settings.AutoSaveEnabled)
+        {
+            if (!_autoSaveTimer.Enabled) _autoSaveTimer.Start();
+        }
+        else if (_autoSaveTimer.Enabled)
+        {
+            _autoSaveTimer.Stop();
+        }
+    }
 
     private void RequestAutoSaveSnapshot()
     {
@@ -1147,6 +1268,9 @@ internal sealed class MainForm : Form
         settings.SuperSubscriptEnabled = dialog.SuperSubscriptEnabled;
         settings.HighlightEnabled = dialog.HighlightEnabled;
         settings.InlineMathEnabled = dialog.InlineMathEnabled;
+        // 旧WinForms設定画面はON/OFFの単一チェックボックスのみのため、3値のMathAutoNumberへは
+        // "off"/"all"の二値でのみ対応する("ams"はHTML製設定画面からのみ選べる)。
+        settings.MathAutoNumber = dialog.MathAutoNumberEnabled ? "all" : "off";
         settings.MathAutoNumberEnabled = dialog.MathAutoNumberEnabled;
         settings.DefaultCopyFormat = dialog.DefaultCopyFormat;
         SettingsService.Save(settings);
@@ -1159,47 +1283,136 @@ internal sealed class MainForm : Form
     }
 
     /// <summary>
-    /// マークダウン記法拡張のON/OFF(仕様書 第2.10節 C-01)・最近使ったファイル(F-09)・
-    /// Pandoc導入状況・既定コピー形式をJS側へ伝える。起動時("ready"受信直後)、設定画面でOKが
-    /// 押されるたび、最近使ったファイルが更新されるたびに送る。
+    /// 設定のうちJS側(main.js / editor.js / sidebar.js等)で効かせる項目をまとめて伝える
+    /// (docs/設定項目一覧.md「送受信の約束」)。一覧系(installedFonts等)は含めない。
+    /// 起動時("ready"受信直後)、設定画面で保存されるたび、最近使ったファイルが更新されるたびに送る。
+    /// あわせて、設定を読み込んだこのタイミングで自動保存タイマーへも反映する
+    /// (<see cref="ApplyAutoSaveSettings"/>)。
     /// <see cref="PaneApplicationContext"/> が全ウィンドウへ再送する際にも呼ぶため internal。
     /// </summary>
     internal void PostCapabilities()
     {
         AppSettings settings = SettingsService.Load();
+        ApplyAutoSaveSettings(settings);
+        ApplyTitleBarTheme(settings); // 設定の再配信(テーマ変更含む)のたびにタイトルバーも塗り直す
         PostToWeb(new
         {
             type = "apply-settings",
-            calloutsEnabled = settings.CalloutsEnabled,
-            superSubEnabled = settings.SuperSubscriptEnabled,
-            highlightEnabled = settings.HighlightEnabled,
-            inlineMathEnabled = settings.InlineMathEnabled,
-            mathAutoNumberEnabled = settings.MathAutoNumberEnabled,
-            defaultCopyFormat = settings.DefaultCopyFormat,
+
+            // ---- 一般 ----
+            showStatusBar = settings.ShowStatusBar,
+            showOutlineByDefault = settings.ShowOutlineByDefault,
+            collapsibleOutline = settings.CollapsibleOutline,
+            zoomWithCtrlWheel = settings.ZoomWithCtrlWheel,
+            displayMode = settings.DisplayMode,
             recentFiles = settings.RecentFiles,
-            pandocAvailable = DetectPandocAvailable(),
             theme = settings.Theme,
-            editorFontSize = settings.EditorFontSize,
-            // ---- ここから仕様書 第2.10節 C-01〜C-14のうちJS側の描画に関わる項目 ----
-            strictMode = settings.StrictMode,
-            codeBlockLineNumbers = settings.CodeBlockLineNumbers,
-            autoPairing = settings.AutoPairing,
-            showWordCount = settings.ShowWordCount,
-            editorFontFamily = settings.EditorFontFamily,
-            editorMonospaceFontFamily = settings.EditorMonospaceFontFamily,
-            customCssPath = settings.CustomCssPath,
-            customCss = ReadCustomCss(settings.CustomCssPath),
-            lightTheme = settings.LightTheme,
-            darkTheme = settings.DarkTheme,
-            keyBindings = settings.KeyBindings,
+
+            // ---- 保存と復元 ----
+            saveWithoutAskingOnSwitch = settings.SaveWithoutAskingOnSwitch,
             defaultEncoding = settings.DefaultEncoding,
             defaultLineEnding = settings.DefaultLineEnding,
-            displayMode = settings.DisplayMode,
-            // 拡張子ごとの既定モード上書き・ファイル単位の手動モード記憶(仕様書 第1章)。
+
+            // ---- 編集 ----
+            indentSizeOnSave = settings.IndentSizeOnSave,
+            codeIndentSize = settings.CodeIndentSize,
+            codeAutoWrap = settings.CodeAutoWrap,
+            shiftTabAutoIndent = settings.ShiftTabAutoIndent,
+            autoPairing = settings.AutoPairing,
+            autoPairMarkdown = settings.AutoPairMarkdown,
+            emojiAutocomplete = settings.EmojiAutocomplete,
+            liveRenderingShowSourceOnFocus = settings.LiveRenderingShowSourceOnFocus,
+            defaultCopyFormat = settings.DefaultCopyFormat,
+            copyWholeLineWhenNoSelection = settings.CopyWholeLineWhenNoSelection,
+            typewriterKeepCaretCentered = settings.TypewriterKeepCaretCentered,
+            spellCheckEnabled = settings.SpellCheckEnabled,
+            spellCheckAutoCorrect = settings.SpellCheckAutoCorrect,
+            readingSpeedWpm = settings.ReadingSpeedWpm,
+            autoDetectMode = settings.AutoDetectMode,
             fileModeOverrides = settings.FileModeOverrides,
             perFileModes = settings.PerFileModes,
-            // 編集モードの自動判定設定。"off"|"suggest"|"standard"|"aggressive"。
-            autoDetectMode = settings.AutoDetectMode,
+
+            // ---- Markdown: 記法サポート ----
+            inlineMathEnabled = settings.InlineMathEnabled,
+            codeBlockMathEnabled = settings.CodeBlockMathEnabled,
+            superSubscriptEnabled = settings.SuperSubscriptEnabled,
+            highlightEnabled = settings.HighlightEnabled,
+            diagramsEnabled = settings.DiagramsEnabled,
+            autoLinksEnabled = settings.AutoLinksEnabled,
+            calloutsEnabled = settings.CalloutsEnabled,
+
+            // ---- Markdown: 記法の書き方 ----
+            strictMode = settings.StrictMode,
+            headingStyle = settings.HeadingStyle,
+            unorderedListMarker = settings.UnorderedListMarker,
+            orderedListMarker = settings.OrderedListMarker,
+            codeBlockLineNumbers = settings.CodeBlockLineNumbers,
+            mathAutoNumber = settings.GetEffectiveMathAutoNumber(),
+            chapterLevelInOutline = settings.ChapterLevelInOutline,
+            defaultCodeLanguage = settings.DefaultCodeLanguage,
+            defaultCodeLanguageApplyWhen = settings.DefaultCodeLanguageApplyWhen,
+
+            // ---- Markdown: 空白と改行 ----
+            whitespaceWhenWriting = settings.WhitespaceWhenWriting,
+            whitespaceOnExport = settings.WhitespaceOnExport,
+
+            // ---- Markdown: スマート置換 ----
+            smartQuotes = settings.SmartQuotes,
+            smartDashes = settings.SmartDashes,
+            recognizeUnicodePunctuation = settings.RecognizeUnicodePunctuation,
+
+            // ---- 画像 ----
+            imageInsertAction = settings.ImageInsertAction,
+            imageCustomFolder = settings.ImageCustomFolder,
+            imageApplyToLocal = settings.ImageApplyToLocal,
+            imageApplyToOnline = settings.ImageApplyToOnline,
+            imagePreferRelativePath = settings.ImagePreferRelativePath,
+            imageAddDotSlash = settings.ImageAddDotSlash,
+            imageAutoEscapeUrl = settings.ImageAutoEscapeUrl,
+
+            // ---- エクスポート・印刷 ----
+            exportPaperSize = settings.ExportPaperSize,
+            exportCustomWidthMm = settings.ExportCustomWidthMm,
+            exportCustomHeightMm = settings.ExportCustomHeightMm,
+            exportOrientation = settings.ExportOrientation,
+            exportMarginTopMm = settings.ExportMarginTopMm,
+            exportMarginBottomMm = settings.ExportMarginBottomMm,
+            exportMarginLeftMm = settings.ExportMarginLeftMm,
+            exportMarginRightMm = settings.ExportMarginRightMm,
+            exportHeaderText = settings.ExportHeaderText,
+            exportFooterText = settings.ExportFooterText,
+            exportPageBreakBetweenTopHeadings = settings.ExportPageBreakBetweenTopHeadings,
+            exportIncludeOutline = settings.ExportIncludeOutline,
+            exportOutlineWidthPx = settings.ExportOutlineWidthPx,
+            exportAppendHead = settings.ExportAppendHead,
+            exportAppendBody = settings.ExportAppendBody,
+            exportDefaultFolder = settings.ExportDefaultFolder,
+            exportCustomFolder = settings.ExportCustomFolder,
+            exportAfter = settings.ExportAfter,
+            exportShowSaveDialog = settings.ExportShowSaveDialog,
+            exportMathAs = settings.ExportMathAs,
+            exportReadYamlFrontMatter = settings.ExportReadYamlFrontMatter,
+            pandocAvailable = DetectPandocAvailable(),
+
+            // ---- 外観 ----
+            lightTheme = settings.LightTheme,
+            darkTheme = settings.DarkTheme,
+            useSeparateThemeInDarkMode = settings.UseSeparateThemeInDarkMode,
+            customCssPath = settings.CustomCssPath,
+            customCss = ReadCustomCss(settings.CustomCssPath),
+            editorFontFamily = settings.EditorFontFamily,
+            editorMonospaceFontFamily = settings.EditorMonospaceFontFamily,
+            editorFontSize = settings.EditorFontSize,
+            editorLineHeight = settings.EditorLineHeight,
+            editorMaxWidthPx = settings.EditorMaxWidthPx,
+            showWordCount = settings.ShowWordCount,
+
+            // ---- キーボード ----
+            keyBindings = settings.KeyBindings,
+
+            // ---- 詳細(サイドバーのファイルツリー表示に関わる部分のみ。enableDebugはC#専用のため含めない) ----
+            showHiddenFilesInTree = settings.ShowHiddenFilesInTree,
+            fileTreePatterns = settings.FileTreePatterns,
         });
     }
 
@@ -1238,11 +1451,11 @@ internal sealed class MainForm : Form
     }
 
     /// <summary>
-    /// { type: "get-settings" } への応答。設定画面(後続、HTML製)が全項目を読み込むための経路。
-    /// apply-settingsが「JS側の描画に必要な差分」だけを送るのに対し、こちらは仕様書 第2.10節
-    /// C-01〜C-14に相当する設定項目をすべて1つのオブジェクトにまとめて返す。
-    /// ファイル関連付け可能な拡張子一覧(FileTypes.generated.cs)は別エージェントが生成中で
-    /// 未確定のため、今回は含めない(後続作業で接続する)。
+    /// { type: "get-settings" } への応答。設定画面(HTML製)が全項目を読み込むための経路。
+    /// apply-settingsが「JS側の描画に必要な項目」だけを送るのに対し、こちらは
+    /// docs/設定項目一覧.md に載っている全項目を1つのオブジェクトにまとめて返す。
+    /// あわせて installedFonts / monospaceFonts / pandocAvailable / settingsFilePath を含める
+    /// (「送受信の約束」)。
     /// </summary>
     private void PostSettingsSnapshot()
     {
@@ -1250,41 +1463,142 @@ internal sealed class MainForm : Form
         PostToWeb(new
         {
             type = "settings",
-            displayMode = settings.DisplayMode,
+
+            // ---- 一般 ----
             startupBehavior = settings.StartupBehavior,
-            fileAssociationEnabled = settings.FileAssociationEnabled,
-            associatedExtensions = settings.AssociatedExtensions,
+            startupFolderPath = settings.StartupFolderPath,
+            quitOnLastWindowClosed = settings.QuitOnLastWindowClosed,
             preloadOnStartup = settings.PreloadOnStartup,
-            calloutsEnabled = settings.CalloutsEnabled,
+            showStatusBar = settings.ShowStatusBar,
+            showOutlineByDefault = settings.ShowOutlineByDefault,
+            collapsibleOutline = settings.CollapsibleOutline,
+            recordRecentFiles = settings.RecordRecentFiles,
+            zoomWithCtrlWheel = settings.ZoomWithCtrlWheel,
+            displayMode = settings.DisplayMode,
+
+            // ---- 保存と復元 ----
+            autoSaveEnabled = settings.AutoSaveEnabled,
+            autoSaveIntervalSeconds = settings.AutoSaveIntervalSeconds,
+            recoverUnsavedDrafts = settings.RecoverUnsavedDrafts,
+            saveWithoutAskingOnSwitch = settings.SaveWithoutAskingOnSwitch,
+            defaultEncoding = settings.DefaultEncoding,
+            defaultLineEnding = settings.DefaultLineEnding,
+            defaultFileExtension = settings.DefaultFileExtension,
+
+            // ---- 編集 ----
+            indentSizeOnSave = settings.IndentSizeOnSave,
+            codeIndentSize = settings.CodeIndentSize,
+            codeAutoWrap = settings.CodeAutoWrap,
+            shiftTabAutoIndent = settings.ShiftTabAutoIndent,
+            autoPairing = settings.AutoPairing,
+            autoPairMarkdown = settings.AutoPairMarkdown,
+            emojiAutocomplete = settings.EmojiAutocomplete,
+            liveRenderingShowSourceOnFocus = settings.LiveRenderingShowSourceOnFocus,
+            defaultCopyFormat = settings.DefaultCopyFormat,
+            copyWholeLineWhenNoSelection = settings.CopyWholeLineWhenNoSelection,
+            typewriterKeepCaretCentered = settings.TypewriterKeepCaretCentered,
+            spellCheckEnabled = settings.SpellCheckEnabled,
+            spellCheckAutoCorrect = settings.SpellCheckAutoCorrect,
+            readingSpeedWpm = settings.ReadingSpeedWpm,
+            autoDetectMode = settings.AutoDetectMode,
+            fileModeOverrides = settings.FileModeOverrides,
+            perFileModes = settings.PerFileModes,
+
+            // ---- Markdown: 記法サポート ----
+            inlineMathEnabled = settings.InlineMathEnabled,
+            codeBlockMathEnabled = settings.CodeBlockMathEnabled,
             superSubscriptEnabled = settings.SuperSubscriptEnabled,
             highlightEnabled = settings.HighlightEnabled,
-            inlineMathEnabled = settings.InlineMathEnabled,
-            mathAutoNumberEnabled = settings.MathAutoNumberEnabled,
-            defaultCopyFormat = settings.DefaultCopyFormat,
-            theme = settings.Theme,
-            editorFontSize = settings.EditorFontSize,
+            diagramsEnabled = settings.DiagramsEnabled,
+            autoLinksEnabled = settings.AutoLinksEnabled,
+            calloutsEnabled = settings.CalloutsEnabled,
+
+            // ---- Markdown: 記法の書き方 ----
             strictMode = settings.StrictMode,
+            headingStyle = settings.HeadingStyle,
+            unorderedListMarker = settings.UnorderedListMarker,
+            orderedListMarker = settings.OrderedListMarker,
             codeBlockLineNumbers = settings.CodeBlockLineNumbers,
-            autoPairing = settings.AutoPairing,
+            mathAutoNumber = settings.GetEffectiveMathAutoNumber(),
+            chapterLevelInOutline = settings.ChapterLevelInOutline,
+            defaultCodeLanguage = settings.DefaultCodeLanguage,
+            defaultCodeLanguageApplyWhen = settings.DefaultCodeLanguageApplyWhen,
+
+            // ---- Markdown: 空白と改行 ----
+            whitespaceWhenWriting = settings.WhitespaceWhenWriting,
+            whitespaceOnExport = settings.WhitespaceOnExport,
+
+            // ---- Markdown: スマート置換 ----
+            smartQuotes = settings.SmartQuotes,
+            smartDashes = settings.SmartDashes,
+            recognizeUnicodePunctuation = settings.RecognizeUnicodePunctuation,
+
+            // ---- 画像 ----
+            imageInsertAction = settings.ImageInsertAction,
+            imageCustomFolder = settings.ImageCustomFolder,
+            imageApplyToLocal = settings.ImageApplyToLocal,
+            imageApplyToOnline = settings.ImageApplyToOnline,
+            imagePreferRelativePath = settings.ImagePreferRelativePath,
+            imageAddDotSlash = settings.ImageAddDotSlash,
+            imageAutoEscapeUrl = settings.ImageAutoEscapeUrl,
+
+            // ---- エクスポート・印刷 ----
+            exportPaperSize = settings.ExportPaperSize,
+            exportCustomWidthMm = settings.ExportCustomWidthMm,
+            exportCustomHeightMm = settings.ExportCustomHeightMm,
+            exportOrientation = settings.ExportOrientation,
+            exportMarginTopMm = settings.ExportMarginTopMm,
+            exportMarginBottomMm = settings.ExportMarginBottomMm,
+            exportMarginLeftMm = settings.ExportMarginLeftMm,
+            exportMarginRightMm = settings.ExportMarginRightMm,
+            exportHeaderText = settings.ExportHeaderText,
+            exportFooterText = settings.ExportFooterText,
+            exportPageBreakBetweenTopHeadings = settings.ExportPageBreakBetweenTopHeadings,
+            exportIncludeOutline = settings.ExportIncludeOutline,
+            exportOutlineWidthPx = settings.ExportOutlineWidthPx,
+            exportAppendHead = settings.ExportAppendHead,
+            exportAppendBody = settings.ExportAppendBody,
+            exportDefaultFolder = settings.ExportDefaultFolder,
+            exportCustomFolder = settings.ExportCustomFolder,
+            exportAfter = settings.ExportAfter,
+            exportShowSaveDialog = settings.ExportShowSaveDialog,
+            exportMathAs = settings.ExportMathAs,
+            exportReadYamlFrontMatter = settings.ExportReadYamlFrontMatter,
+
+            // ---- 外観 ----
+            theme = settings.Theme,
             lightTheme = settings.LightTheme,
             darkTheme = settings.DarkTheme,
+            useSeparateThemeInDarkMode = settings.UseSeparateThemeInDarkMode,
             customCssPath = settings.CustomCssPath,
             editorFontFamily = settings.EditorFontFamily,
             editorMonospaceFontFamily = settings.EditorMonospaceFontFamily,
+            editorFontSize = settings.EditorFontSize,
+            editorLineHeight = settings.EditorLineHeight,
+            editorMaxWidthPx = settings.EditorMaxWidthPx,
             showWordCount = settings.ShowWordCount,
+
+            // ---- ファイルの関連付け ----
+            associatedExtensions = settings.AssociatedExtensions,
+            fileAssociationEnabled = settings.FileAssociationEnabled,
+            explorerNewMenuEnabled = settings.ExplorerNewMenuEnabled,
+
+            // ---- キーボード ----
             keyBindings = settings.KeyBindings,
-            defaultEncoding = settings.DefaultEncoding,
-            defaultLineEnding = settings.DefaultLineEnding,
-            pandocAvailable = DetectPandocAvailable(),
-            // 拡張子ごとの既定モード上書き(仕様書 第1章)。設定画面での編集対象。
-            fileModeOverrides = settings.FileModeOverrides,
-            // 編集モードの自動判定設定。"off"|"suggest"|"standard"|"aggressive"。
-            autoDetectMode = settings.AutoDetectMode,
+
+            // ---- 詳細 ----
+            enableDebug = settings.EnableDebug,
+            showHiddenFilesInTree = settings.ShowHiddenFilesInTree,
+            fileTreePatterns = settings.FileTreePatterns,
+
+            // ---- 送受信の約束: settingsにのみ含める一覧系・環境情報 ----
             // インストール済みフォント一覧(設定画面のフォント選択ドロップダウン用)。
             // 数百件になりうるため、設定画面を開いたとき(get-settings)にのみ送る
             // (全ウィンドウへ毎回配信するapply-settingsには含めない)。
             installedFonts = FontService.AllFamilies,
             monospaceFonts = FontService.MonospaceFamilies,
+            pandocAvailable = DetectPandocAvailable(),
+            settingsFilePath = SettingsService.SettingsFilePath,
         });
     }
 
@@ -1292,7 +1606,9 @@ internal sealed class MainForm : Form
     /// { type: "save-settings", settings: {...} } を受け取り、含まれている項目だけを
     /// AppSettingsへ反映して保存する。JS側の設定画面は段階的に実装される想定のため、
     /// 一部項目しか送られてこなくても他の項目を壊さないよう「含まれていれば上書き」とする。
-    /// 保存後、ファイル関連付け・スタートアップ登録の差分適用と、全ウィンドウへの再配信を行う。
+    /// 知らないキーは無視し、不正な値(列挙値・数値範囲)はAppSettings側のsetterが既定値へ倒す。
+    /// 保存後、ファイル関連付け・スタートアップ登録・エクスプローラー新規作成メニューの差分適用と、
+    /// 全ウィンドウへの再配信を行う。
     /// </summary>
     private void HandleSaveSettingsRequest(JsonElement root)
     {
@@ -1305,50 +1621,49 @@ internal sealed class MainForm : Form
         AppSettings settings = SettingsService.Load();
         IReadOnlyCollection<string> previousExtensions = settings.GetEffectiveAssociatedExtensions();
         bool previousPreload = settings.PreloadOnStartup;
+        bool previousExplorerNewMenuEnabled = settings.ExplorerNewMenuEnabled;
 
-        if (TryGetString(s, "displayMode", out string displayMode)) settings.DisplayMode = displayMode;
+        // ---- 一般 ----
         if (TryGetString(s, "startupBehavior", out string startupBehavior)) settings.StartupBehavior = startupBehavior;
+        if (s.TryGetProperty("startupFolderPath", out JsonElement startupFolderProp))
+        {
+            settings.StartupFolderPath = startupFolderProp.ValueKind == JsonValueKind.String ? startupFolderProp.GetString() : null;
+        }
+        if (TryGetBool(s, "quitOnLastWindowClosed", out bool quitOnLastWindowClosed)) settings.QuitOnLastWindowClosed = quitOnLastWindowClosed;
         if (TryGetBool(s, "preloadOnStartup", out bool preloadOnStartup)) settings.PreloadOnStartup = preloadOnStartup;
-        if (TryGetBool(s, "calloutsEnabled", out bool calloutsEnabled)) settings.CalloutsEnabled = calloutsEnabled;
-        if (TryGetBool(s, "superSubscriptEnabled", out bool superSub)) settings.SuperSubscriptEnabled = superSub;
-        if (TryGetBool(s, "highlightEnabled", out bool highlightEnabled)) settings.HighlightEnabled = highlightEnabled;
-        if (TryGetBool(s, "inlineMathEnabled", out bool inlineMathEnabled)) settings.InlineMathEnabled = inlineMathEnabled;
-        if (TryGetBool(s, "mathAutoNumberEnabled", out bool mathAutoNumberEnabled)) settings.MathAutoNumberEnabled = mathAutoNumberEnabled;
-        if (TryGetString(s, "defaultCopyFormat", out string defaultCopyFormat)) settings.DefaultCopyFormat = defaultCopyFormat;
-        // AppSettings.AutoDetectMode のsetterが不正値を"standard"へ正規化するため、ここでは
-        // 受け取った文字列をそのまま代入すればよい。
-        if (TryGetString(s, "autoDetectMode", out string autoDetectMode)) settings.AutoDetectMode = autoDetectMode;
-        if (TryGetString(s, "theme", out string theme) && theme is "light" or "dark" or "system") settings.Theme = theme;
-        if (TryGetInt(s, "editorFontSize", out int editorFontSize) && editorFontSize is >= 8 and <= 40) settings.EditorFontSize = editorFontSize;
-        if (TryGetBool(s, "strictMode", out bool strictMode)) settings.StrictMode = strictMode;
-        if (TryGetBool(s, "codeBlockLineNumbers", out bool codeBlockLineNumbers)) settings.CodeBlockLineNumbers = codeBlockLineNumbers;
-        if (TryGetBool(s, "autoPairing", out bool autoPairing)) settings.AutoPairing = autoPairing;
-        if (TryGetString(s, "lightTheme", out string lightTheme)) settings.LightTheme = lightTheme;
-        if (TryGetString(s, "darkTheme", out string darkTheme)) settings.DarkTheme = darkTheme;
-        if (s.TryGetProperty("customCssPath", out JsonElement cssProp))
-        {
-            settings.CustomCssPath = cssProp.ValueKind == JsonValueKind.String ? cssProp.GetString() : null;
-        }
-        if (s.TryGetProperty("editorFontFamily", out JsonElement fontFamilyProp))
-        {
-            settings.EditorFontFamily = fontFamilyProp.ValueKind == JsonValueKind.String ? fontFamilyProp.GetString() : null;
-        }
-        if (s.TryGetProperty("editorMonospaceFontFamily", out JsonElement monoFontFamilyProp))
-        {
-            settings.EditorMonospaceFontFamily = monoFontFamilyProp.ValueKind == JsonValueKind.String ? monoFontFamilyProp.GetString() : null;
-        }
-        if (TryGetBool(s, "showWordCount", out bool showWordCount)) settings.ShowWordCount = showWordCount;
-        if (s.TryGetProperty("keyBindings", out JsonElement keyBindingsProp) && keyBindingsProp.ValueKind == JsonValueKind.Object)
-        {
-            var keyBindings = new Dictionary<string, string>();
-            foreach (JsonProperty prop in keyBindingsProp.EnumerateObject())
-            {
-                if (prop.Value.ValueKind == JsonValueKind.String) keyBindings[prop.Name] = prop.Value.GetString() ?? "";
-            }
-            settings.KeyBindings = keyBindings;
-        }
+        if (TryGetBool(s, "showStatusBar", out bool showStatusBar)) settings.ShowStatusBar = showStatusBar;
+        if (TryGetBool(s, "showOutlineByDefault", out bool showOutlineByDefault)) settings.ShowOutlineByDefault = showOutlineByDefault;
+        if (TryGetBool(s, "collapsibleOutline", out bool collapsibleOutline)) settings.CollapsibleOutline = collapsibleOutline;
+        if (TryGetBool(s, "recordRecentFiles", out bool recordRecentFiles)) settings.RecordRecentFiles = recordRecentFiles;
+        if (TryGetBool(s, "zoomWithCtrlWheel", out bool zoomWithCtrlWheel)) settings.ZoomWithCtrlWheel = zoomWithCtrlWheel;
+        if (TryGetString(s, "displayMode", out string displayMode)) settings.DisplayMode = displayMode;
+
+        // ---- 保存と復元 ----
+        if (TryGetBool(s, "autoSaveEnabled", out bool autoSaveEnabled)) settings.AutoSaveEnabled = autoSaveEnabled;
+        if (TryGetInt(s, "autoSaveIntervalSeconds", out int autoSaveIntervalSeconds)) settings.AutoSaveIntervalSeconds = autoSaveIntervalSeconds;
+        if (TryGetBool(s, "recoverUnsavedDrafts", out bool recoverUnsavedDrafts)) settings.RecoverUnsavedDrafts = recoverUnsavedDrafts;
+        if (TryGetBool(s, "saveWithoutAskingOnSwitch", out bool saveWithoutAskingOnSwitch)) settings.SaveWithoutAskingOnSwitch = saveWithoutAskingOnSwitch;
         if (TryGetString(s, "defaultEncoding", out string defaultEncoding)) settings.DefaultEncoding = defaultEncoding;
         if (TryGetString(s, "defaultLineEnding", out string defaultLineEnding)) settings.DefaultLineEnding = defaultLineEnding;
+        if (TryGetString(s, "defaultFileExtension", out string defaultFileExtension)) settings.DefaultFileExtension = defaultFileExtension;
+
+        // ---- 編集 ----
+        if (TryGetInt(s, "indentSizeOnSave", out int indentSizeOnSave)) settings.IndentSizeOnSave = indentSizeOnSave;
+        if (TryGetInt(s, "codeIndentSize", out int codeIndentSize)) settings.CodeIndentSize = codeIndentSize;
+        if (TryGetBool(s, "codeAutoWrap", out bool codeAutoWrap)) settings.CodeAutoWrap = codeAutoWrap;
+        if (TryGetBool(s, "shiftTabAutoIndent", out bool shiftTabAutoIndent)) settings.ShiftTabAutoIndent = shiftTabAutoIndent;
+        if (TryGetBool(s, "autoPairing", out bool autoPairing)) settings.AutoPairing = autoPairing;
+        if (TryGetBool(s, "autoPairMarkdown", out bool autoPairMarkdown)) settings.AutoPairMarkdown = autoPairMarkdown;
+        if (TryGetString(s, "emojiAutocomplete", out string emojiAutocomplete)) settings.EmojiAutocomplete = emojiAutocomplete;
+        if (TryGetBool(s, "liveRenderingShowSourceOnFocus", out bool liveRenderingShowSourceOnFocus)) settings.LiveRenderingShowSourceOnFocus = liveRenderingShowSourceOnFocus;
+        if (TryGetString(s, "defaultCopyFormat", out string defaultCopyFormat)) settings.DefaultCopyFormat = defaultCopyFormat;
+        if (TryGetBool(s, "copyWholeLineWhenNoSelection", out bool copyWholeLineWhenNoSelection)) settings.CopyWholeLineWhenNoSelection = copyWholeLineWhenNoSelection;
+        if (TryGetBool(s, "typewriterKeepCaretCentered", out bool typewriterKeepCaretCentered)) settings.TypewriterKeepCaretCentered = typewriterKeepCaretCentered;
+        if (TryGetBool(s, "spellCheckEnabled", out bool spellCheckEnabled)) settings.SpellCheckEnabled = spellCheckEnabled;
+        if (TryGetBool(s, "spellCheckAutoCorrect", out bool spellCheckAutoCorrect)) settings.SpellCheckAutoCorrect = spellCheckAutoCorrect;
+        if (TryGetInt(s, "readingSpeedWpm", out int readingSpeedWpm)) settings.ReadingSpeedWpm = readingSpeedWpm;
+        // AppSettingsの各setterが不正値を既定値へ正規化するため、ここでは受け取った値をそのまま代入すればよい。
+        if (TryGetString(s, "autoDetectMode", out string autoDetectMode)) settings.AutoDetectMode = autoDetectMode;
         if (s.TryGetProperty("fileModeOverrides", out JsonElement fileModeOverridesProp) && fileModeOverridesProp.ValueKind == JsonValueKind.Object)
         {
             // キー(拡張子)は先頭ドットを除いて小文字へ正規化し、値が3種以外のものは捨てる。
@@ -1364,16 +1679,122 @@ internal sealed class MainForm : Form
             }
             settings.FileModeOverrides = overrides;
         }
+        // perFileModesは設定画面のUIには出さない(remember-file-modeメッセージ経由でのみ更新する)ため、
+        // save-settingsからは受け取っても意図的に無視する(資料の「JS main.js(UIには出さない)」に対応)。
 
-        List<string>? desiredExtensions = null;
-        if (s.TryGetProperty("associatedExtensions", out JsonElement extProp) && extProp.ValueKind == JsonValueKind.Array)
+        // ---- Markdown: 記法サポート ----
+        if (TryGetBool(s, "inlineMathEnabled", out bool inlineMathEnabled)) settings.InlineMathEnabled = inlineMathEnabled;
+        if (TryGetBool(s, "codeBlockMathEnabled", out bool codeBlockMathEnabled)) settings.CodeBlockMathEnabled = codeBlockMathEnabled;
+        if (TryGetBool(s, "superSubscriptEnabled", out bool superSub)) settings.SuperSubscriptEnabled = superSub;
+        if (TryGetBool(s, "highlightEnabled", out bool highlightEnabled)) settings.HighlightEnabled = highlightEnabled;
+        if (TryGetBool(s, "diagramsEnabled", out bool diagramsEnabled)) settings.DiagramsEnabled = diagramsEnabled;
+        if (TryGetBool(s, "autoLinksEnabled", out bool autoLinksEnabled)) settings.AutoLinksEnabled = autoLinksEnabled;
+        if (TryGetBool(s, "calloutsEnabled", out bool calloutsEnabled)) settings.CalloutsEnabled = calloutsEnabled;
+
+        // ---- Markdown: 記法の書き方 ----
+        if (TryGetBool(s, "strictMode", out bool strictMode)) settings.StrictMode = strictMode;
+        if (TryGetString(s, "headingStyle", out string headingStyle)) settings.HeadingStyle = headingStyle;
+        if (TryGetString(s, "unorderedListMarker", out string unorderedListMarker)) settings.UnorderedListMarker = unorderedListMarker;
+        if (TryGetString(s, "orderedListMarker", out string orderedListMarker)) settings.OrderedListMarker = orderedListMarker;
+        if (TryGetBool(s, "codeBlockLineNumbers", out bool codeBlockLineNumbers)) settings.CodeBlockLineNumbers = codeBlockLineNumbers;
+        if (TryGetString(s, "mathAutoNumber", out string mathAutoNumber))
         {
-            desiredExtensions = extProp.EnumerateArray()
-                .Where(e => e.ValueKind == JsonValueKind.String)
-                .Select(e => e.GetString() ?? "")
-                .Where(e => e.Length > 0)
-                .ToList();
+            settings.MathAutoNumber = mathAutoNumber;
+            // 旧・単一bool設定(MathAutoNumberEnabled)を新しい値と食い違わないよう同期しておく。
+            // こうしないと、次回起動時にGetEffectiveMathAutoNumberの移行判定
+            // (「MathAutoNumberEnabled=trueなのにMathAutoNumberが既定値のまま」)が誤発火し、
+            // 新しい設定画面で明示的に"off"へ戻したはずが復活してしまう。
+            settings.MathAutoNumberEnabled = settings.MathAutoNumber != "off";
         }
+        if (TryGetInt(s, "chapterLevelInOutline", out int chapterLevelInOutline)) settings.ChapterLevelInOutline = chapterLevelInOutline;
+        if (TryGetString(s, "defaultCodeLanguage", out string defaultCodeLanguage)) settings.DefaultCodeLanguage = defaultCodeLanguage;
+        if (TryGetString(s, "defaultCodeLanguageApplyWhen", out string defaultCodeLanguageApplyWhen)) settings.DefaultCodeLanguageApplyWhen = defaultCodeLanguageApplyWhen;
+
+        // ---- Markdown: 空白と改行 ----
+        if (TryGetString(s, "whitespaceWhenWriting", out string whitespaceWhenWriting)) settings.WhitespaceWhenWriting = whitespaceWhenWriting;
+        if (TryGetString(s, "whitespaceOnExport", out string whitespaceOnExport)) settings.WhitespaceOnExport = whitespaceOnExport;
+
+        // ---- Markdown: スマート置換 ----
+        if (TryGetString(s, "smartQuotes", out string smartQuotes)) settings.SmartQuotes = smartQuotes;
+        if (TryGetString(s, "smartDashes", out string smartDashes)) settings.SmartDashes = smartDashes;
+        if (TryGetBool(s, "recognizeUnicodePunctuation", out bool recognizeUnicodePunctuation)) settings.RecognizeUnicodePunctuation = recognizeUnicodePunctuation;
+
+        // ---- 画像 ----
+        if (TryGetString(s, "imageInsertAction", out string imageInsertAction)) settings.ImageInsertAction = imageInsertAction;
+        if (TryGetString(s, "imageCustomFolder", out string imageCustomFolder)) settings.ImageCustomFolder = imageCustomFolder;
+        if (TryGetBool(s, "imageApplyToLocal", out bool imageApplyToLocal)) settings.ImageApplyToLocal = imageApplyToLocal;
+        if (TryGetBool(s, "imageApplyToOnline", out bool imageApplyToOnline)) settings.ImageApplyToOnline = imageApplyToOnline;
+        if (TryGetBool(s, "imagePreferRelativePath", out bool imagePreferRelativePath)) settings.ImagePreferRelativePath = imagePreferRelativePath;
+        if (TryGetBool(s, "imageAddDotSlash", out bool imageAddDotSlash)) settings.ImageAddDotSlash = imageAddDotSlash;
+        if (TryGetBool(s, "imageAutoEscapeUrl", out bool imageAutoEscapeUrl)) settings.ImageAutoEscapeUrl = imageAutoEscapeUrl;
+
+        // ---- エクスポート・印刷 ----
+        if (TryGetString(s, "exportPaperSize", out string exportPaperSize)) settings.ExportPaperSize = exportPaperSize;
+        if (TryGetInt(s, "exportCustomWidthMm", out int exportCustomWidthMm)) settings.ExportCustomWidthMm = exportCustomWidthMm;
+        if (TryGetInt(s, "exportCustomHeightMm", out int exportCustomHeightMm)) settings.ExportCustomHeightMm = exportCustomHeightMm;
+        if (TryGetString(s, "exportOrientation", out string exportOrientation)) settings.ExportOrientation = exportOrientation;
+        if (TryGetInt(s, "exportMarginTopMm", out int exportMarginTopMm)) settings.ExportMarginTopMm = exportMarginTopMm;
+        if (TryGetInt(s, "exportMarginBottomMm", out int exportMarginBottomMm)) settings.ExportMarginBottomMm = exportMarginBottomMm;
+        if (TryGetInt(s, "exportMarginLeftMm", out int exportMarginLeftMm)) settings.ExportMarginLeftMm = exportMarginLeftMm;
+        if (TryGetInt(s, "exportMarginRightMm", out int exportMarginRightMm)) settings.ExportMarginRightMm = exportMarginRightMm;
+        if (TryGetString(s, "exportHeaderText", out string exportHeaderText)) settings.ExportHeaderText = exportHeaderText;
+        if (TryGetString(s, "exportFooterText", out string exportFooterText)) settings.ExportFooterText = exportFooterText;
+        if (TryGetBool(s, "exportPageBreakBetweenTopHeadings", out bool exportPageBreak)) settings.ExportPageBreakBetweenTopHeadings = exportPageBreak;
+        if (TryGetBool(s, "exportIncludeOutline", out bool exportIncludeOutline)) settings.ExportIncludeOutline = exportIncludeOutline;
+        if (TryGetInt(s, "exportOutlineWidthPx", out int exportOutlineWidthPx)) settings.ExportOutlineWidthPx = exportOutlineWidthPx;
+        if (TryGetString(s, "exportAppendHead", out string exportAppendHead)) settings.ExportAppendHead = exportAppendHead;
+        if (TryGetString(s, "exportAppendBody", out string exportAppendBody)) settings.ExportAppendBody = exportAppendBody;
+        if (TryGetString(s, "exportDefaultFolder", out string exportDefaultFolder)) settings.ExportDefaultFolder = exportDefaultFolder;
+        if (TryGetString(s, "exportCustomFolder", out string exportCustomFolder)) settings.ExportCustomFolder = exportCustomFolder;
+        if (TryGetString(s, "exportAfter", out string exportAfter)) settings.ExportAfter = exportAfter;
+        if (TryGetBool(s, "exportShowSaveDialog", out bool exportShowSaveDialog)) settings.ExportShowSaveDialog = exportShowSaveDialog;
+        if (TryGetString(s, "exportMathAs", out string exportMathAs)) settings.ExportMathAs = exportMathAs;
+        if (TryGetBool(s, "exportReadYamlFrontMatter", out bool exportReadYamlFrontMatter)) settings.ExportReadYamlFrontMatter = exportReadYamlFrontMatter;
+
+        // ---- 外観 ----
+        if (TryGetString(s, "theme", out string theme)) settings.Theme = theme;
+        if (TryGetString(s, "lightTheme", out string lightTheme)) settings.LightTheme = lightTheme;
+        if (TryGetString(s, "darkTheme", out string darkTheme)) settings.DarkTheme = darkTheme;
+        if (TryGetBool(s, "useSeparateThemeInDarkMode", out bool useSeparateThemeInDarkMode)) settings.UseSeparateThemeInDarkMode = useSeparateThemeInDarkMode;
+        if (s.TryGetProperty("customCssPath", out JsonElement cssProp))
+        {
+            settings.CustomCssPath = cssProp.ValueKind == JsonValueKind.String ? cssProp.GetString() : null;
+        }
+        if (s.TryGetProperty("editorFontFamily", out JsonElement fontFamilyProp))
+        {
+            settings.EditorFontFamily = fontFamilyProp.ValueKind == JsonValueKind.String ? fontFamilyProp.GetString() : null;
+        }
+        if (s.TryGetProperty("editorMonospaceFontFamily", out JsonElement monoFontFamilyProp))
+        {
+            settings.EditorMonospaceFontFamily = monoFontFamilyProp.ValueKind == JsonValueKind.String ? monoFontFamilyProp.GetString() : null;
+        }
+        if (TryGetInt(s, "editorFontSize", out int editorFontSize)) settings.EditorFontSize = editorFontSize;
+        if (TryGetDouble(s, "editorLineHeight", out double editorLineHeight)) settings.EditorLineHeight = editorLineHeight;
+        if (TryGetInt(s, "editorMaxWidthPx", out int editorMaxWidthPx)) settings.EditorMaxWidthPx = editorMaxWidthPx;
+        if (TryGetBool(s, "showWordCount", out bool showWordCount)) settings.ShowWordCount = showWordCount;
+
+        // ---- キーボード ----
+        if (s.TryGetProperty("keyBindings", out JsonElement keyBindingsProp) && keyBindingsProp.ValueKind == JsonValueKind.Object)
+        {
+            var keyBindings = new Dictionary<string, string>();
+            foreach (JsonProperty prop in keyBindingsProp.EnumerateObject())
+            {
+                if (prop.Value.ValueKind == JsonValueKind.String) keyBindings[prop.Name] = prop.Value.GetString() ?? "";
+            }
+            settings.KeyBindings = keyBindings;
+        }
+
+        // ---- 詳細 ----
+        if (TryGetBool(s, "enableDebug", out bool enableDebug)) settings.EnableDebug = enableDebug;
+        if (TryGetBool(s, "showHiddenFilesInTree", out bool showHiddenFilesInTree)) settings.ShowHiddenFilesInTree = showHiddenFilesInTree;
+        List<string>? fileTreePatterns = TryGetStringList(s, "fileTreePatterns");
+        if (fileTreePatterns is not null) settings.FileTreePatterns = fileTreePatterns;
+
+        // ---- ファイルの関連付け ----
+        List<string>? desiredExtensions = TryGetStringList(s, "associatedExtensions");
+        bool? desiredExplorerNewMenuEnabled = TryGetBool(s, "explorerNewMenuEnabled", out bool explorerNewMenuEnabled)
+            ? explorerNewMenuEnabled
+            : null;
 
         // 例外はここで握りつぶさずログへ残し、JS側へも結果を通知する(呼び出し元がエラー表示できるように)。
         string? errorMessage = null;
@@ -1396,6 +1817,25 @@ internal sealed class MainForm : Form
             catch (Exception ex)
             {
                 errorMessage = $"ファイルの関連付け設定を変更できませんでした。{ex.Message}";
+            }
+        }
+
+        if (desiredExplorerNewMenuEnabled is bool wantsExplorerNewMenu)
+        {
+            settings.ExplorerNewMenuEnabled = wantsExplorerNewMenu;
+        }
+        if (settings.ExplorerNewMenuEnabled != previousExplorerNewMenuEnabled)
+        {
+            try
+            {
+                ShellNewService.Apply(settings.ExplorerNewMenuEnabled);
+            }
+            catch (Exception ex)
+            {
+                // ShellNewService側で既にLogger.WriteException済み。
+                errorMessage = errorMessage is null
+                    ? $"エクスプローラーの「新規作成」メニューを変更できませんでした。{ex.Message}"
+                    : $"{errorMessage}\nエクスプローラーの「新規作成」メニューを変更できませんでした。{ex.Message}";
             }
         }
 
@@ -1544,6 +1984,30 @@ internal sealed class MainForm : Form
         return false;
     }
 
+    private static bool TryGetDouble(JsonElement obj, string name, out double value)
+    {
+        if (obj.TryGetProperty(name, out JsonElement prop) && prop.ValueKind == JsonValueKind.Number &&
+            prop.TryGetDouble(out double parsed))
+        {
+            value = parsed;
+            return true;
+        }
+        value = 0;
+        return false;
+    }
+
+    /// <summary>文字列の配列プロパティを読み取る。プロパティが無い・配列でない場合はnullを返す
+    /// (「送られてこなければ既存の値を変更しない」という既存の挙動に合わせるため)。</summary>
+    private static List<string>? TryGetStringList(JsonElement obj, string name)
+    {
+        if (!obj.TryGetProperty(name, out JsonElement prop) || prop.ValueKind != JsonValueKind.Array) return null;
+        return prop.EnumerateArray()
+            .Where(e => e.ValueKind == JsonValueKind.String)
+            .Select(e => e.GetString() ?? "")
+            .Where(e => e.Length > 0)
+            .ToList();
+    }
+
     /// <summary>テーマ切替(仕様書 第10.2節)の手動選択を永続化する。"system"ならOS設定に追従したまま何もしない。</summary>
     private static void SaveTheme(string theme)
     {
@@ -1562,10 +2026,12 @@ internal sealed class MainForm : Form
         SettingsService.Save(settings);
     }
 
-    /// <summary>最近使ったファイル一覧(仕様書 F-09)を更新する。先頭が最新、重複除去、最大10件。</summary>
+    /// <summary>最近使ったファイル一覧(仕様書 F-09)を更新する。先頭が最新、重複除去、最大10件。
+    /// recordRecentFilesがfalseの場合は記録しない。</summary>
     private static void AddRecentFile(string path)
     {
         AppSettings settings = SettingsService.Load();
+        if (!settings.RecordRecentFiles) return;
         settings.RecentFiles.RemoveAll(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase));
         settings.RecentFiles.Insert(0, path);
         if (settings.RecentFiles.Count > 10)
@@ -1573,6 +2039,92 @@ internal sealed class MainForm : Form
             settings.RecentFiles.RemoveRange(10, settings.RecentFiles.Count - 10);
         }
         SettingsService.Save(settings);
+    }
+
+    /// <summary>{ type: "clear-recent-files" } を受け取り、最近使ったファイルの履歴を消去する。</summary>
+    private void HandleClearRecentFilesRequest()
+    {
+        AppSettings settings = SettingsService.Load();
+        settings.RecentFiles.Clear();
+        SettingsService.Save(settings);
+        Logger.Write("clear-recent-files: 最近使ったファイルの履歴を消去した");
+
+        if (_requestBroadcastSettings is not null) _requestBroadcastSettings(this);
+        else PostCapabilities();
+    }
+
+    /// <summary>{ type: "clear-per-file-modes" } を受け取り、ファイル単位の編集モード記憶を消去する。</summary>
+    private void HandleClearPerFileModesRequest()
+    {
+        AppSettings settings = SettingsService.Load();
+        settings.PerFileModes = new Dictionary<string, string>();
+        SettingsService.Save(settings);
+        Logger.Write("clear-per-file-modes: ファイル単位の編集モード記憶を消去した");
+
+        if (_requestBroadcastSettings is not null) _requestBroadcastSettings(this);
+        else PostCapabilities();
+    }
+
+    /// <summary>{ type: "open-settings-file" } を受け取り、設定ファイルをエクスプローラーで
+    /// 選択状態にして開く。</summary>
+    private static void OpenSettingsFileInExplorer()
+    {
+        try
+        {
+            string path = SettingsService.SettingsFilePath;
+            using var proc = Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{path}\"") { UseShellExecute = true });
+            Logger.Write($"open-settings-file: エクスプローラーで設定ファイルを選択表示した: {path}");
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException("open-settings-file失敗", ex);
+        }
+    }
+
+    /// <summary>
+    /// { type: "reset-settings" } を受け取り、AppSettingsを新規インスタンス(=すべて既定値)で
+    /// 置き換えて保存する。ウィンドウ位置・サイズと開いていたファイルパス(OpenFilePaths)は
+    /// ユーザーが今開いているものを壊さないよう保持する。保存後、全ウィンドウへ再配信し、
+    /// この要求元のウィンドウには設定画面用のsettingsスナップショットも改めて送る。
+    /// </summary>
+    private void HandleResetSettingsRequest()
+    {
+        AppSettings current = SettingsService.Load();
+        var fresh = new AppSettings
+        {
+            WindowX = current.WindowX,
+            WindowY = current.WindowY,
+            WindowWidth = current.WindowWidth,
+            WindowHeight = current.WindowHeight,
+            OpenFilePaths = current.OpenFilePaths,
+        };
+        SettingsService.Save(fresh);
+        Logger.Write("reset-settings: 設定を既定値へ戻した(ウィンドウ位置・サイズとOpenFilePathsは保持)");
+
+        if (_requestBroadcastSettings is not null) _requestBroadcastSettings(this);
+        else PostCapabilities();
+        PostSettingsSnapshot();
+    }
+
+    /// <summary>
+    /// { type: "open-devtools" } を受け取り、開発者ツールを開く。enableDebugがtrueのときのみ許可する。
+    /// 開発ビルド(DEBUG)では設定値に関わらず常に許可する(デバッグ作業を妨げないため)。
+    /// </summary>
+    private void HandleOpenDevToolsRequest()
+    {
+#if DEBUG
+        _webView.CoreWebView2.OpenDevToolsWindow();
+#else
+        AppSettings settings = SettingsService.Load();
+        if (settings.EnableDebug)
+        {
+            _webView.CoreWebView2.OpenDevToolsWindow();
+        }
+        else
+        {
+            Logger.Write("open-devtools: enableDebug=falseのため開発者ツールの要求を無視した");
+        }
+#endif
     }
 
     private static bool? _pandocAvailableCache;

@@ -15,24 +15,28 @@ internal static class FileTypes
         // マークダウン
         "md", "markdown", "mdown", "mkd", "mmd", // Markdown
         // テキスト
-        "txt", "text", "log", // プレーンテキスト
+        "txt", "text", "log", "nfo", // プレーンテキスト
+        "rst", // reStructuredText
+        "adoc", "asciidoc", // AsciiDoc
+        "org", // Org-mode
+        "bib", // BibTeX
         // プログラミング言語
         "js", "jsx", "mjs", "cjs", // JavaScript
         "ts", "tsx", "mts", "cts", // TypeScript
-        "py", "pyw", "pyi", // Python
+        "py", "pyw", "pyi", "pyx", // Python
         "java", // Java
         "c", "h", // C
-        "cpp", "cc", "cxx", "hpp", "hh", "hxx", // C++
+        "cpp", "cc", "cxx", "hpp", "hh", "hxx", "ino", // C++
         "cs", "csx", // C#
         "m", "mm", // Objective-C
         "go", // Go
         "rs", // Rust
-        "rb", "rake", "gemspec", // Ruby
+        "rb", "rake", "gemspec", "gemfile", "rakefile", // Ruby
         "php", "phtml", // PHP
         "pl", "pm", "t", // Perl
         "swift", // Swift
         "kt", "kts", // Kotlin
-        "scala", "sc", // Scala
+        "scala", "sc", "sbt", // Scala
         "vb", // Visual Basic
         "vbs", // VBScript
         "lua", // Lua
@@ -57,12 +61,19 @@ internal static class FileTypes
         "elm", // Elm
         "ml", "mli", // OCaml
         "fs", "fsi", "fsx", // F#
+        "bzl", "bazel", // Starlark (Bazel)
+        "vue", // Vue
+        "svelte", // Svelte
+        "astro", // Astro
         // スクリプト・シェル
         "sh", "bash", "zsh", "ksh", "fish", // シェルスクリプト
         "ps1", "psm1", "psd1", // PowerShell
         "bat", "cmd", // バッチファイル
-        "mk", "make", // Makefile
+        "mk", "make", "makefile", "mak", // Makefile
         "dockerfile", // Dockerfile
+        "cmake", // CMake
+        "ninja", // Ninjaビルドファイル
+        "awk", // AWK
         // マークアップ・スタイルシート
         "html", "htm", "xhtml", // HTML
         "css", // CSS
@@ -73,17 +84,36 @@ internal static class FileTypes
         "pug", "jade", // Pug
         "tex", "latex", "sty", "cls", // LaTeX
         "textile", // Textile
+        "xaml", "axaml", // XAML
+        "cshtml", "vbhtml", "razor", // Razor (cshtml/vbhtml)
+        "aspx", "ascx", "ashx", "asmx", // ASP.NET Web Forms
+        "ejs", // EJSテンプレート
+        "erb", // ERBテンプレート
+        "hbs", "handlebars", "mustache", // Handlebars/Mustache
+        "jinja", "jinja2", "j2", "twig", "liquid", // Jinja2/Twig/Liquid
         // データ・設定ファイル
-        "json", "jsonc", "json5", // JSON
+        "json", "jsonc", "json5", "ndjson", "jsonl", "avsc", "geojson", "webmanifest", "babelrc", "eslintrc", "prettierrc", // JSON
         "yaml", "yml", // YAML
         "toml", // TOML
-        "ini", "cfg", "conf", "properties", "editorconfig", // INI/設定ファイル
+        "ini", "cfg", "conf", "properties", "editorconfig", "env", "reg", "npmrc", "service", "desktop", // INI/設定ファイル
         "sql", // SQL
+        "pgsql", // PostgreSQL
+        "plsql", "pls", "pkb", "pks", // PL/SQL (Oracle)
         "csv", "tsv", // CSV/TSV
         "proto", // Protocol Buffers
+        "graphql", "gql", // GraphQL
+        "csproj", "vbproj", "fsproj", "props", "targets", "nuspec", // MSBuildプロジェクト
+        "config", "manifest", "settings", "ruleset", "resx", // .NET設定ファイル
         // その他
         "diff", "patch", // 差分
         "nginx", // nginx設定
         "feature", // Gherkin
+        "sln", // Visual Studio ソリューション
+        "http", "rest", // HTTPリクエスト
+        "spec", // RPM Spec
+        "lock", "sum", "mod", // ロック・モジュールファイル
+        "procfile", // Procfile
+        "gitignore", "gitattributes", "dockerignore", // 無視ファイル(.gitignore等)
+        "db", "cache", // その他(バイナリ系)
     };
 }

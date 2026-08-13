@@ -4,10 +4,10 @@
 import { EditorView, keymap, Decoration, ViewPlugin, WidgetType, lineNumbers } from "@codemirror/view";
 import { EditorState, Compartment, StateEffect, StateField } from "@codemirror/state";
 import { markdown } from "@codemirror/lang-markdown";
-import { Strikethrough, Table, Superscript, Subscript, Emoji } from "@lezer/markdown";
-import { defaultKeymap, history, historyKeymap, indentWithTab, insertNewline, undo, redo, moveLineUp, moveLineDown, copyLineDown, deleteLine } from "@codemirror/commands";
-import { syntaxTree, syntaxHighlighting, HighlightStyle, LanguageDescription, bracketMatching } from "@codemirror/language";
-import { autocompletion, closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
+import { Strikethrough, Table, Superscript, Subscript, Emoji, Autolink } from "@lezer/markdown";
+import { defaultKeymap, history, historyKeymap, indentWithTab, insertNewline, undo, redo, moveLineUp, moveLineDown, copyLineDown, deleteLine, indentLess, indentSelection } from "@codemirror/commands";
+import { syntaxTree, syntaxHighlighting, HighlightStyle, LanguageDescription, bracketMatching, indentUnit } from "@codemirror/language";
+import { autocompletion, closeBrackets, closeBracketsKeymap, startCompletion } from "@codemirror/autocomplete";
 import { search, setSearchQuery, getSearchQuery, SearchQuery, findNext, findPrevious, replaceNext, replaceAll } from "@codemirror/search";
 import { tags as t } from "@lezer/highlight";
 import { codeLanguages, resolveFileMode } from "./languages.js";
@@ -52,8 +52,11 @@ function isDarkTheme() {
 }
 
 // カーソル/選択がこの範囲に触れているか。フォーカスがなければ常に装飾。
+// liveRenderingShowSourceOnFocusがfalseの間は、カーソルが乗っていても常に装飾したまま
+// (生の記法を見せない)にする。
 function cursorInside(view, from, to) {
   if (!view.hasFocus) return false;
+  if (!revealOnFocus(view.state)) return false;
   for (const r of view.state.selection.ranges) if (r.from <= to && r.to >= from) return true;
   return false;
 }
@@ -62,11 +65,25 @@ function cursorInside(view, from, to) {
 // (導入前の挙動を変えないため)。C#設定画面からの変更は setExtensionToggles() 経由で届く。
 // インライン数式・自動採番はTypora準拠で既定OFF。
 const setExtToggles = StateEffect.define();
-const DEFAULT_EXT_TOGGLES = { callouts: true, superSub: true, highlight: true, inlineMath: false, mathAutoNumber: false };
+// 自動リンク(M-17)は既定ON(Typoraも既定で有効なため、他のTypora非準拠拡張とは扱いを分ける)。
+// mathAutoNumberは"off"|"ams"|"all"の3値(仕様書 mathAutoNumber)。
+// diagrams/codeBlockMath/codeAutoWrap/liveRenderingShowSourceOnFocus/whitespaceWhenWriting/
+// smartQuotes/smartDashes/recognizeUnicodePunctuationは、いずれもドキュメントを再構築せずに
+// 反映できるようこの同じStateField経由で扱う(既存のautoLinksと同じ流儀)。
+const DEFAULT_EXT_TOGGLES = {
+  callouts: true, superSub: true, highlight: true, inlineMath: false, mathAutoNumber: "off", autoLinks: true,
+  diagrams: true, codeBlockMath: false, codeAutoWrap: true, liveRenderingShowSourceOnFocus: true,
+  whitespaceWhenWriting: "preserve", smartQuotes: "off", smartDashes: "off", recognizeUnicodePunctuation: false,
+};
 const extTogglesField = StateField.define({
   create: () => DEFAULT_EXT_TOGGLES,
   update: (v, tr) => { for (const ef of tr.effects) if (ef.is(setExtToggles)) v = { ...v, ...ef.value }; return v; },
 });
+// カーソル/選択が触れている記法だけ生表示する既存の挙動全体のON/OFF(仕様書 liveRenderingShowSourceOnFocus)。
+// falseなら、カーソルが乗っていても記法マーカーを隠したままにする。
+function revealOnFocus(state) {
+  return (state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES).liveRenderingShowSourceOnFocus !== false;
+}
 
 // ---- YAML Front Matter(仕様書 M-11) ----
 // 先頭が正確に "---" の行から始まる場合のみ検出する。閉じの "---" が
@@ -90,6 +107,37 @@ const frontmatterField = StateField.define({
     return tr.changes.touchesRange(0, boundary) ? computeFrontmatter(tr.state) : v;
   },
 });
+// YAML Front Matterの typora-root-url 相当のキーを読み取る(仕様書 2.9.2)。
+// フルのYAMLパーサは持ち込まず、他のfront matter処理(computeFrontmatter等)と同様に
+// 素朴な正規表現で該当行の値だけを拾う。
+function frontmatterRootUrl(state, fm) {
+  if (!fm) return null;
+  const text = state.doc.sliceString(0, fm.to);
+  const m = text.match(/^[ \t]*typora-root-url[ \t]*:[ \t]*(.+?)[ \t]*$/mi);
+  if (!m) return null;
+  const v = m[1].trim().replace(/^["']|["']$/g, "");
+  return v || null;
+}
+// 画像パスの解決(仕様書 2.9.2)。typora-root-urlが指定されていれば"/"始まりのパスの
+// 基準をそこにする。スキーム付き(https:, data: 等)や"//"始まりは外部/プロトコル相対と
+// みなしそのまま使う。それ以外(通常の相対パス)はブラウザの既定解決に委ねる(従来どおり)。
+function resolveImageSrc(rawSrc, rootUrl) {
+  if (!rawSrc) return rawSrc;
+  if (/^[a-zA-Z][\w+.-]*:/.test(rawSrc) || rawSrc.startsWith("//")) return rawSrc;
+  if (rawSrc.startsWith("/") && rootUrl) {
+    return rootUrl.replace(/\/+$/, "") + "/" + rawSrc.replace(/^\/+/, "");
+  }
+  return rawSrc;
+}
+// 自動リンク(仕様書 M-17)のリンク先を決める。スキームが既に付いていればそのまま、
+// "www."始まりはhttps://を補い、"@"を含む(スキーム無し)ものはメールアドレスとみなし
+// mailto:を補う(<foo@bar.com> や 裸のfoo@bar.comの場合。mailto:/xmpp:付きは1つ目の分岐で素通り)。
+function autolinkHref(text) {
+  if (/^[a-zA-Z][\w+.-]*:/.test(text)) return text;
+  if (text.startsWith("www.")) return "https://" + text;
+  if (text.includes("@")) return "mailto:" + text;
+  return text;
+}
 
 // ---- 参照リンク(M-16)・脚注定義(M-09)の収集 ----
 // LinkReference ノード([id]: url 形式)を1回の木走査でまとめて集める。
@@ -228,6 +276,59 @@ class EmojiWidget extends WidgetType {
     return span;
   }
   ignoreEvent() { return false; }
+}
+// スマート引用符・スマートダッシュの表示専用置換(仕様書 smartQuotes="render"・smartDashes)用の
+// 汎用ウィジェット。1文字(または短い置換文字列)をそのまま表示するだけで、クリック等の
+// 特別な挙動は持たない。
+class GlyphWidget extends WidgetType {
+  constructor(glyph) { super(); this.glyph = glyph; }
+  eq(o) { return o.glyph === this.glyph; }
+  toDOM() { const span = document.createElement("span"); span.className = "cm-glyph"; span.textContent = this.glyph; return span; }
+  ignoreEvent() { return false; }
+}
+// "を開き引用符/閉じ引用符どちらにするかの判定は共通(表示専用のGlyphWidgetと、
+// ドキュメントを直接書き換えるsmartTypingInputHandlerの両方から使う)。
+function smartQuoteChar(open, straightChar) {
+  if (straightChar === '"') return open ? "“" : "”"; // “ / ”
+  return open ? "‘" : "’"; // ‘ / ’
+}
+// 画像のライブプレビュー(仕様書 M-18・第2.9.2節)。数式・Mermaid・表と異なり画像は
+// インライン要素(段落の途中に来うる)なので、ブロックウィジェット(StateField側でblock:true
+// にして提供する方式)ではなく、既存のLink装飾と同じくlivePreviewのDecoration.replace
+// (ブロック指定なしの通常の置換)で表示する。単独行の画像(段落の中身が画像だけ)も
+// 同じ扱いで問題ない(画像を含むcm-line自体が既にブロック単位で改行されるため、
+// 見た目上は他の行と同じく独立した1行として表示される)。
+class ImageWidget extends WidgetType {
+  constructor(alt, src, resolvedSrc, from) { super(); this.alt = alt; this.src = src; this.resolvedSrc = resolvedSrc; this.from = from; }
+  eq(o) { return o.alt === this.alt && o.src === this.src && o.resolvedSrc === this.resolvedSrc; }
+  toDOM(view) {
+    const wrap = document.createElement("span");
+    wrap.className = "cm-image-widget";
+    wrap.dataset.resolvedSrc = this.resolvedSrc; // 読み込み失敗でimg要素が消えても解決後のパスを参照できるようにしておく
+    const img = document.createElement("img");
+    img.alt = this.alt;
+    img.src = this.resolvedSrc;
+    // 読み込みに失敗した画像(このアプリは外部通信を行わないため、リモートURLの画像は
+    // 必ず失敗する)は、壊れたアイコンのまま残さず代替テキストに差し替える。
+    img.addEventListener("error", () => {
+      img.remove();
+      wrap.classList.add("cm-image-error");
+      wrap.textContent = `画像を読み込めません: ${this.src}`;
+    }, { once: true });
+    wrap.appendChild(img);
+    // クリックすると記法を展開して編集できる(仕様書 2.9.2)。posAtDOMで現在のドキュメント上の
+    // 位置を求める(TableWidgetのpos()と同じ考え方。docの変更でウィジェットが使い回されても
+    // 正しい位置を取れる)。取得できない場合のみ構築時のfromへフォールバックする。
+    wrap.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      let pos = this.from;
+      try { pos = view.posAtDOM(wrap); } catch { /* フォールバックのfromを使う */ }
+      view.dispatch({ selection: { anchor: pos }, effects: EditorView.scrollIntoView(pos, { y: "nearest" }) });
+      view.focus();
+    });
+    return wrap;
+  }
+  ignoreEvent() { return true; }
 }
 class MathWidget extends WidgetType {
   constructor(tex, display, autoNumber) { super(); this.tex = tex; this.display = display; this.autoNumber = autoNumber; }
@@ -424,6 +525,9 @@ const livePreview = ViewPlugin.fromClass(class {
     const htmlBlocks = state.field(htmlBlocksField, false) ?? [];
     const inHtmlBlock = (pos) => htmlBlocks.some((b) => pos >= b.from && pos < b.to);
     const { links: linkRefs, footnotes: footnoteDefs } = collectReferences(state);
+    // 画像パスの基準(仕様書 2.9.2 typora-root-url相当)。front matterが無ければnull
+    // (=従来どおりの相対パス解決)。
+    const imgRootUrl = fm ? frontmatterRootUrl(state, fm) : null;
     const tree = syntaxTree(state);
     for (const { from, to } of view.visibleRanges) {
       tree.iterate({ from, to, enter: (node) => {
@@ -443,7 +547,8 @@ const livePreview = ViewPlugin.fromClass(class {
           for (let ln = open.number; ln <= close.number; ln++) {
             const l = state.doc.line(ln);
             const cls = "cm-codeblock-line" + (ln === open.number ? " cm-cb-first" : "") + (ln === close.number ? " cm-cb-last" : "")
-              + (!blockLive && (ln === open.number || ln === close.number) ? " cm-cb-fence-hidden" : ""); // 記号を隠している時だけフェンス行を圧縮
+              + (!blockLive && (ln === open.number || ln === close.number) ? " cm-cb-fence-hidden" : "") // 記号を隠している時だけフェンス行を圧縮
+              + (toggles.codeAutoWrap === false ? " cm-cb-nowrap" : ""); // 仕様書 codeAutoWrap: falseなら長い行を折り返さない
             marks.push({ from: l.from, to: l.from, deco: Decoration.line({ class: cls }), line: true });
           }
           // コピーボタンを開始フェンス行の行末にwidgetで配置(行デコレーションとは位置/sideが異なるため競合しない)
@@ -501,6 +606,21 @@ const livePreview = ViewPlugin.fromClass(class {
           if (!live) { marks.push({ from: nf, to: nf + 1, deco: Decoration.replace({}) }); marks.push({ from: nt - 1, to: nt, deco: Decoration.replace({}) }); }
           return;
         }
+        if (name === "Image") {
+          // 画像のライブプレビュー(仕様書 M-18・第2.9.2節)。既存のLink直接記法と同じ流儀で
+          // ノード全体の生テキストを正規表現で読む(alt/pathそれぞれの子ノードが無く、
+          // "]"と"("の間の生テキストとしてしか取れないため。Linkの直接記法と同じ理由)。
+          if (live) return; // カーソルが記法内にあるときは生記法のまま(既存の他の記法と同じ)
+          const text = state.doc.sliceString(nf, nt);
+          const m = text.match(/^!\[([^\]]*)\]\(([^)]*)\)$/);
+          if (!m) return false; // 参照形式などの非対応の形は生テキストのまま(子ノードも見ない)
+          const alt = m[1];
+          const rawSrc = m[2].trim();
+          if (!rawSrc) return false;
+          const resolvedSrc = resolveImageSrc(rawSrc, imgRootUrl);
+          marks.push({ from: nf, to: nt, deco: Decoration.replace({ widget: new ImageWidget(alt, rawSrc, resolvedSrc, nf) }) });
+          return false; // 子ノード(LinkMark/URL)は個別処理不要
+        }
         if (name === "Link") {
           const text = state.doc.sliceString(nf, nt);
           // 脚注の本文中参照 [^id] (仕様書 M-09)。ホバーで内容をポップアップ表示する。
@@ -536,6 +656,32 @@ const livePreview = ViewPlugin.fromClass(class {
               marks.push({ from: textFrom, to: textTo, deco: Decoration.mark({ class: "tok-link", attributes: { "data-href": url } }) });
             }
           }
+          return;
+        }
+        if (name === "Autolink") {
+          // <url> 形式の自動リンク(仕様書 M-17)。コアのCommonMarkパーサが標準で
+          // このノードを生成する(<https://...> や <foo@bar.com>)ため拡張の追加は不要。
+          // 構文木のノードとして判定しているため、コードブロック・インラインコード・数式
+          // ブロックの中では(それらの中は元々インライン解析されない・別扱いのため)ここに来ない。
+          if (!toggles.autoLinks || inMathBlock(nf) || live) return false;
+          const urlNode = node.node.getChild("URL");
+          if (!urlNode) return false;
+          const href = autolinkHref(state.doc.sliceString(urlNode.from, urlNode.to));
+          marks.push({ from: urlNode.from, to: urlNode.to, deco: Decoration.mark({ class: "tok-link", attributes: { "data-href": href } }) });
+          marks.push({ from: nf, to: nf + 1, deco: Decoration.replace({}) }); // 開き "<"
+          marks.push({ from: nt - 1, to: nt, deco: Decoration.replace({}) }); // 閉じ ">"
+          return false; // URL子ノードは既に処理済み
+        }
+        if (name === "URL") {
+          // 裸のURL・メールアドレス(仕様書 M-17、GFM拡張のAutolinkが生成する"URL"ノード)。
+          // Image/Autolinkは子孫へ降りないためここに来ないが、Linkは直接記法のテキスト中に
+          // 入れ子の装飾(太字等)を許すためreturn falseしていない。そのLinkの内部URL(既に
+          // Decoration.replaceで非表示にしている範囲)を誤って二重装飾しないよう親で弾く。
+          const parentName = node.node.parent?.name;
+          if (parentName === "Link" || parentName === "Image" || parentName === "Autolink") return;
+          if (!toggles.autoLinks || inMathBlock(nf) || live) return;
+          const href = autolinkHref(state.doc.sliceString(nf, nt));
+          marks.push({ from: nf, to: nt, deco: Decoration.mark({ class: "tok-link", attributes: { "data-href": href } }) });
           return;
         }
         if (name === "LinkReference") {
@@ -578,12 +724,20 @@ const livePreview = ViewPlugin.fromClass(class {
           const lastLn = state.doc.lineAt(Math.min(nt, state.doc.length)).number;
           const markerLn = state.doc.lineAt(nf).number;
           for (let ln = markerLn; ln <= lastLn; ln++) {
-            if (quotedLines.has(ln)) continue; // 入れ子ノードでの二重装飾を防ぐ
+            if (quotedLines.has(ln)) continue; // 入れ子ノードでの二重装飾を防ぐ(最も外側のBlockquoteノードで1回だけ処理する)
             const line = state.doc.line(ln);
-            const m = line.text.match(/^ {0,3}>\s?/);
-            if (!m) continue;
+            // 多段引用(仕様書 M-03)。1行に連続する "> " をネストの深さぶんすべて数える
+            // (例: "> > 入れ子" ならdepth=2)。木のQuoteMarkノードを個別に辿らなくても、
+            // 行頭のマーカーは常にこの形で連続するため素朴な繰り返しマッチで十分。
+            let depth = 0, consumed = 0, rest = line.text;
+            for (;;) {
+              const lm = rest.match(/^ {0,3}>\s?/);
+              if (!lm) break;
+              depth++; consumed += lm[0].length; rest = rest.slice(lm[0].length);
+            }
+            if (depth === 0) continue;
             quotedLines.add(ln);
-            const lineLive = view.hasFocus && state.selection.ranges.some(r => {
+            const lineLive = view.hasFocus && revealOnFocus(state) && state.selection.ranges.some(r => {
               const cl = state.doc.lineAt(r.head);
               return cl.number === line.number || (r.from !== r.to && r.from <= line.to && r.to >= line.from);
             });
@@ -591,10 +745,22 @@ const livePreview = ViewPlugin.fromClass(class {
             if (isMarker && !lineLive) {
               marks.push({ from: line.from, to: line.to, deco: Decoration.replace({ widget: new CalloutMarkerWidget(calloutType) }) });
             } else if (!lineLive) {
-              marks.push({ from: line.from, to: line.from + m[0].length, deco: Decoration.replace({}) });
+              // depthぶんのマーカーをまとめて隠す(内側の">"も含めて画面に見えないようにする)
+              marks.push({ from: line.from, to: line.from + consumed, deco: Decoration.replace({}) });
             }
             const cls = calloutType ? `tok-quote cm-callout cm-callout-${calloutType}` : "tok-quote";
-            marks.push({ from: line.from, to: line.to, deco: Decoration.mark({ class: cls }) });
+            if (depth >= 2) {
+              // 2段目以降は深さに応じて左の罫線を重ねて表示する(仕様書 M-03)。
+              // .tok-quote のborder-leftは1本分の見た目のため、多段では
+              // 複数のinset box-shadowを重ねて段数ぶんの罫線に見せる(色は交互に変化させる)。
+              const step = 6;
+              const shadows = [];
+              for (let d = 1; d <= depth; d++) shadows.push(`inset ${3 + (d - 1) * step}px 0 0 0 ${d % 2 ? "var(--accent)" : "var(--accent-soft)"}`);
+              const style = `border-left:none;box-shadow:${shadows.join(",")};padding-left:${10 + (depth - 1) * step}px;`;
+              marks.push({ from: line.from, to: line.to, deco: Decoration.mark({ class: `${cls} cm-quote-nested`, attributes: { style } }) });
+            } else {
+              marks.push({ from: line.from, to: line.to, deco: Decoration.mark({ class: cls }) });
+            }
           }
           return;
         }
@@ -645,7 +811,7 @@ const livePreview = ViewPlugin.fromClass(class {
           pos = line.to + 1;
           continue;
         }
-        const lineLive = view.hasFocus && state.selection.ranges.some(r => {
+        const lineLive = view.hasFocus && revealOnFocus(state) && state.selection.ranges.some(r => {
           const cl = state.doc.lineAt(r.head);
           return cl.number === line.number || (r.from !== r.to && r.from <= line.to && r.to >= line.from);
         });
@@ -678,8 +844,34 @@ const livePreview = ViewPlugin.fromClass(class {
           while ((mm = mre.exec(line.text))) {
             const mf = line.from + mm.index, mt = mf + mm[0].length;
             if (!cursorInside(view, mf, mt)) {
-              marks.push({ from: mf, to: mt, deco: Decoration.replace({ widget: new MathWidget(mm[1], false, false) }) });
+              marks.push({ from: mf, to: mt, deco: Decoration.replace({ widget: new MathWidget(mm[1], false, "off") }) }); // インライン数式は自動採番の対象外(Typora準拠)
             }
+          }
+        }
+        if (toggles.smartQuotes === "render") {
+          // スマート引用符(仕様書 smartQuotes="render"): 表示だけ変換し、文書のテキストは変えない。
+          // "input"モード(ドキュメントのテキストを直接置換する側、smartTypingInputHandler参照)とは
+          // 別経路。カーソルが乗っている位置は生の記号のまま。
+          let qm; const qre = /["']/g;
+          while ((qm = qre.exec(line.text))) {
+            const qf = line.from + qm.index, qt = qf + 1;
+            if (cursorInside(view, qf, qt)) continue;
+            const before = qm.index > 0 ? line.text[qm.index - 1] : "";
+            const open = !before || /[\s([{＜「『（【〈《]/.test(before);
+            marks.push({ from: qf, to: qt, deco: Decoration.replace({ widget: new GlyphWidget(smartQuoteChar(open, qm[0])) }) });
+          }
+        }
+        if (toggles.smartDashes !== "off" && toggles.smartQuotes !== "input") {
+          // スマートダッシュ(仕様書 smartDashes)。適用タイミングはsmartQuotesと同じ考え方にする:
+          // smartQuotes="input"のときはsmartTypingInputHandlerがドキュメントのテキスト自体を
+          // 直接置換するため、ここでの表示専用の二重変換はしない。それ以外(off/render)の間は
+          // 表示だけ変換する(テキストは変えない)。
+          let dm; const dre = /-{2,3}/g;
+          while ((dm = dre.exec(line.text))) {
+            const df = line.from + dm.index, dt = df + dm[0].length;
+            if (cursorInside(view, df, dt)) continue;
+            const ch = toggles.smartDashes === "emdash" ? "—" : (dm[0].length >= 3 ? "—" : "–");
+            marks.push({ from: df, to: dt, deco: Decoration.replace({ widget: new GlyphWidget(ch) }) });
           }
         }
         // リスト系の折り返し行を1行目のテキスト開始位置に揃える(ハンギングインデント)
@@ -1155,6 +1347,9 @@ const mermaidBlocksField = StateField.define({
   update: (v, tr) => (tr.docChanged ? findMermaidBlocks(tr.state) : v),
 });
 function buildMermaidBlockDeco(state, blocks) {
+  // 仕様書 diagramsEnabled: falseなら図として描画せず、通常のフェンスコードのまま
+  // (livePreviewのFencedCode処理に委ねる。ここでは空のDecoration.setを返すだけでよい)。
+  if (!(state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES).diagrams) return Decoration.none;
   const focused = state.field(focusField, false) ?? false;
   const sel = state.selection.main;
   const dark = isDarkTheme();
@@ -1170,8 +1365,116 @@ function buildMermaidBlockDeco(state, blocks) {
 }
 const mermaidBlockDecoField = StateField.define({
   create: (state) => buildMermaidBlockDeco(state, state.field(mermaidBlocksField)),
-  update: (v, tr) => (tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect) || e.is(themeRefreshEffect)))
+  update: (v, tr) => (tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect) || e.is(themeRefreshEffect) || e.is(setExtToggles)))
     ? buildMermaidBlockDeco(tr.state, tr.state.field(mermaidBlocksField))
+    : v,
+  provide: (f) => EditorView.decorations.from(f),
+});
+
+// ---- コードブロック内の数式(仕様書 codeBlockMathEnabled) ----
+// ```math フェンスコードブロックを数式として描画する。Mermaid(上記)と全く同じ構成
+// (FencedCodeを構文木から検出→フォーカスに応じてウィジェットに置き換え)を踏襲し、
+// 実際のレンダリングは既存の数式ブロック($$...$$)と同じMathWidget/renderMathToHtmlを流用する。
+function findCodeMathBlocks(state) {
+  const blocks = [];
+  syntaxTree(state).iterate({
+    enter: (node) => {
+      if (node.name !== "FencedCode") return;
+      const fn = node.node;
+      if (fn.getChildren("CodeMark").length < 2) return false;
+      const info = fn.getChild("CodeInfo");
+      const lang = info ? state.doc.sliceString(info.from, info.to).trim().toLowerCase() : "";
+      if (lang !== "math") return false;
+      const open = state.doc.lineAt(node.from);
+      const close = state.doc.lineAt(Math.max(node.from, node.to - 1));
+      const bodyFromLine = Math.min(open.number + 1, close.number);
+      const bodyFrom = state.doc.line(bodyFromLine).from;
+      const bodyTo = close.number > open.number ? Math.max(bodyFrom, close.from - 1) : bodyFrom;
+      blocks.push({ from: open.from, to: close.to, text: state.sliceDoc(bodyFrom, bodyTo) });
+      return false;
+    },
+  });
+  return blocks;
+}
+const codeMathBlocksField = StateField.define({
+  create: (state) => findCodeMathBlocks(state),
+  update: (v, tr) => (tr.docChanged ? findCodeMathBlocks(tr.state) : v),
+});
+function buildCodeMathBlockDeco(state, blocks) {
+  const toggles = state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
+  if (!toggles.codeBlockMath) return Decoration.none; // 仕様書 codeBlockMathEnabled: falseなら通常のコードブロックのまま
+  const focused = state.field(focusField, false) ?? false;
+  const sel = state.selection.main;
+  const decos = [];
+  for (const b of blocks) {
+    if (focused && sel.from <= b.to && sel.to >= b.from) continue; // カーソル/選択がフェンス内→生のコードを表示
+    decos.push(Decoration.replace({ widget: new MathWidget(b.text, true, toggles.mathAutoNumber), block: true }).range(b.from, b.to));
+  }
+  return Decoration.set(decos);
+}
+const codeMathBlockDecoField = StateField.define({
+  create: (state) => buildCodeMathBlockDeco(state, state.field(codeMathBlocksField)),
+  update: (v, tr) => (tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect) || e.is(setExtToggles)))
+    ? buildCodeMathBlockDeco(tr.state, tr.state.field(codeMathBlocksField))
+    : v,
+  provide: (f) => EditorView.decorations.from(f),
+});
+
+// ---- 空白と改行(仕様書 whitespaceWhenWriting) ----
+// "ignore"のとき、段落内の単独改行(ソフトブレーク)を表示上だけ空白1つとして描画する
+// (ドキュメントのテキストは変えない)。ViewPluginが提供する装飾は改行をまたいで置換できない
+// 制約があるため(CodeMirrorの仕様。表・数式ブロック等の複数行ウィジェットと同じ理由で
+// StateFieldにする必要がある)、専用のStateFieldとして実装する。今回は改行1文字だけを
+// 幅の狭いスペースに差し替える非ブロックDecoration.replaceのため、block:trueは使わない
+// (block:trueの複数行ウィジェットと違い、前後の行はそのまま編集・装飾できる)。
+class SoftBreakWidget extends WidgetType {
+  eq() { return true; }
+  toDOM() { const s = document.createElement("span"); s.className = "cm-softbreak"; s.textContent = " "; return s; }
+  ignoreEvent() { return false; }
+}
+function findParagraphSoftBreaks(state) {
+  const breaks = [];
+  syntaxTree(state).iterate({
+    enter: (node) => {
+      if (node.name !== "Paragraph") return;
+      const fromLine = state.doc.lineAt(node.from).number;
+      const toLine = state.doc.lineAt(Math.max(node.from, node.to - 1)).number;
+      for (let ln = fromLine; ln < toLine; ln++) {
+        const line = state.doc.line(ln);
+        if (line.to < state.doc.length) breaks.push({ from: line.to, to: line.to + 1 });
+      }
+      return false; // 段落内部(インライン装飾)へは降りない。改行位置だけが目的
+    },
+  });
+  return breaks;
+}
+const softBreaksField = StateField.define({
+  create: (state) => findParagraphSoftBreaks(state),
+  update: (v, tr) => (tr.docChanged ? findParagraphSoftBreaks(tr.state) : v),
+});
+function buildSoftBreakDeco(state, breaks) {
+  const toggles = state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
+  if (toggles.whitespaceWhenWriting !== "ignore") return Decoration.none;
+  const focused = state.field(focusField, false) ?? false;
+  const sel = state.selection.main;
+  const decos = [];
+  for (const b of breaks) {
+    if (b.from >= b.to) continue;
+    if (focused) {
+      // 改行の前後どちらかの行にカーソル/選択が触れている間は生の改行のまま(編集しやすくするため)
+      const beforeLine = state.doc.lineAt(b.from);
+      const afterLine = state.doc.lineAt(Math.min(state.doc.length, b.to));
+      const touches = sel.from <= afterLine.to && sel.to >= beforeLine.from;
+      if (touches) continue;
+    }
+    decos.push(Decoration.replace({ widget: new SoftBreakWidget() }).range(b.from, b.to));
+  }
+  return Decoration.set(decos);
+}
+const softBreakDecoField = StateField.define({
+  create: (state) => buildSoftBreakDeco(state, state.field(softBreaksField)),
+  update: (v, tr) => (tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect) || e.is(setExtToggles)))
+    ? buildSoftBreakDeco(tr.state, tr.state.field(softBreaksField))
     : v,
   provide: (f) => EditorView.decorations.from(f),
 });
@@ -1282,10 +1585,19 @@ function countSearchMatches(state) {
 // livePreviewのbuild()内(可視範囲の行走査)でcm-hangクラスとして付与している。
 
 
-// ---- 絵文字ショートコードの入力補完(仕様書 M-22) ----
+// ---- 絵文字ショートコードの入力補完(仕様書 M-22・emojiAutocomplete) ----
+// "off"なら常に候補を出さない。"esc"なら自動起動(入力のたびの呼び出し)では反応せず、
+// 下記のEscapeキーバインド経由のstartCompletion(explicit呼び出し)でのみ候補を出す。
+// "auto"(既定)は従来どおり":"入力のたびに自動で候補を出す。拡張自体は常時マウントしたまま
+// (Compartmentでの着脱ではなく)状態に応じてsource関数がnullを返すだけにすることで、
+// 他のトグル設定と同じくextTogglesFieldのStateEffect経由で即時反映できるようにする。
 function emojiCompletionSource(context) {
+  const mode = (context.state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES).emojiAutocomplete ?? "auto";
+  if (mode === "off") return null;
   const word = context.matchBefore(/:[a-zA-Z0-9_+-]*$/);
-  if (!word || (word.from === word.to && !context.explicit)) return null;
+  if (!word) return null;
+  if (mode === "esc" && !context.explicit) return null; // Escapeでの明示呼び出し時のみ
+  if (word.from === word.to && !context.explicit) return null;
   const query = word.text.slice(1);
   if (!query) return null;
   const options = findEmojiCompletions(query).map(({ code, emoji }) => ({
@@ -1297,13 +1609,63 @@ function emojiCompletionSource(context) {
 const emojiCompletion = autocompletion({ override: [emojiCompletionSource], icons: false });
 
 // Markdown文書(ライブプレビュー一式)の拡張子集合。docModeComp/livePreviewCompの既定値。
-const markdownLanguageExt = () => markdown({ extensions: [Strikethrough, Table, Superscript, Subscript, Emoji], codeLanguages });
+// Autolink(@lezer/markdown のGFM拡張)は "www./http(s)://" や裸のメールアドレス等を
+// "URL" ノードとして検出する(<url>形式は拡張なしでコアパーサが標準対応済み、仕様書 M-17)。
+// ---- スマート引用符・スマートダッシュの"input"タイミング(ドキュメントのテキスト自体を置換) ----
+// 仕様書: smartQuotes="input"は入力時に文書のテキストごと置換する。smartDashesの適用タイミングは
+// smartQuotesと同じ考え方にする(このファイルの方針として、smartQuotes="input"の間だけ
+// smartDashesも実テキストを書き換え、それ以外はlivePreview側の表示専用変換に任せる)。
+const CODE_CONTEXT_NODES = new Set(["InlineCode", "CodeText", "CodeMark", "CodeInfo", "FencedCode"]);
+function inCodeContext(state, pos) {
+  let node = syntaxTree(state).resolveInner(pos, -1);
+  while (node) { if (CODE_CONTEXT_NODES.has(node.name)) return true; node = node.parent; }
+  const mathBlocks = state.field(mathBlocksField, false) ?? [];
+  return mathBlocks.some((b) => pos >= b.from && pos <= b.to);
+}
+const smartTypingInputHandler = EditorView.inputHandler.of((view, from, to, text) => {
+  if (from !== to) return false; // 選択の置換は対象外(意図しない変換を避ける)
+  const toggles = view.state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
+  const wantsQuotes = toggles.smartQuotes === "input";
+  const wantsDashes = toggles.smartDashes !== "off" && toggles.smartQuotes === "input";
+  if (!wantsQuotes && !wantsDashes) return false;
+  if (inCodeContext(view.state, from)) return false;
+  if ((text === '"' || text === "'") && wantsQuotes) {
+    const before = view.state.sliceDoc(Math.max(0, from - 1), from);
+    const open = !before || /[\s([{＜「『（【〈《]/.test(before);
+    const ch = smartQuoteChar(open, text);
+    view.dispatch({ changes: { from, to, insert: ch }, selection: { anchor: from + ch.length }, userEvent: "input.type" });
+    return true;
+  }
+  if (text.length === 1 && text !== "-" && wantsDashes) {
+    // ハイフンの連続の直後に別の文字が入力された時点で、その連続を変換する
+    // (2〜3個目のハイフンを打った瞬間には、まだ後何個続くか分からないため)。
+    const before = view.state.sliceDoc(Math.max(0, from - 3), from);
+    const m = before.match(/-{2,3}$/);
+    if (m) {
+      const runLen = m[0].length;
+      const ch = toggles.smartDashes === "emdash" ? "—" : (runLen >= 3 ? "—" : "–");
+      const runFrom = from - runLen;
+      view.dispatch({
+        changes: [{ from: runFrom, to: from, insert: ch }, { from, to, insert: text }],
+        selection: { anchor: runFrom + ch.length + text.length },
+        userEvent: "input.type",
+      });
+      return true;
+    }
+  }
+  return false;
+});
+
+const markdownLanguageExt = () => markdown({ extensions: [Strikethrough, Table, Superscript, Subscript, Emoji, Autolink], codeLanguages });
 const livePreviewExt = () => [
   livePreview, focusField, focusNotifier, tableField, tableAutoFormat,
   frontmatterField, tocField, extTogglesField, emojiCompletion,
   mathBlocksField, mathBlockDecoField,
   mermaidBlocksField, mermaidBlockDecoField, // Mermaid図(仕様書 第4.2節・第8.3節)
+  codeMathBlocksField, codeMathBlockDecoField, // ```mathフェンス(仕様書 codeBlockMathEnabled)
   htmlBlocksField, htmlBlockDecoField, // ブロックHTML(M-27〜M-31)
+  softBreaksField, softBreakDecoField, // 仕様書 whitespaceWhenWriting="ignore"
+  smartTypingInputHandler, // 仕様書 smartQuotes="input"・smartDashes
 ];
 
 // コードモード限定の拡張(仕様書 決定済み事項: 行番号・括弧の対応表示まで。
@@ -1333,6 +1695,10 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
   const typewriterComp = new Compartment();
   let composing = false;
   let currentMode = "markdown";
+  // コードモード時に実際に適用している言語ID(src/file-types.js の FILE_TYPES[].id と一致)。
+  // ステータスバーの言語表示・言語ピッカー(仕様書 第1章の拡張)に使う。markdown/plainモードや、
+  // ハイライトのロードに失敗してプレーン表示にフォールバックした場合はnull。
+  let currentCodeLanguage = null;
   // 自動ペアリング(仕様書 第2.10節 C-05)。既定はON。
   let autoPairingOn = true;
   // ソースコードモード(仕様書 V-05): 記法マーカーを隠さない生表示。docModeComp(構文ハイライト)は
@@ -1386,6 +1752,16 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
       // 編集中のため触らず、既存の.cm-table系スタイルに合わせてここに追記する。
       ".cm-table-col-resizer": { position: "absolute", top: "0", bottom: "0", right: "-3px", width: "6px", cursor: "col-resize", zIndex: "3", touchAction: "none" },
       ".cm-table-col-resizer:hover, .cm-table-col-resizer:active": { background: "var(--accent)", opacity: "0.5" },
+      // 画像のライブプレビュー(仕様書 M-18・第2.9.2節)。インライン要素として段落に混在できるよう
+      // inline-blockにし、本文幅からはみ出さないようmax-width:100%にする(style.cssは
+      // 別エージェントが編集中のため触らず、ここに書く)。
+      ".cm-image-widget": { display: "inline-block", maxWidth: "100%", verticalAlign: "middle", cursor: "pointer" },
+      ".cm-image-widget img": { maxWidth: "100%", display: "block", borderRadius: "4px" },
+      // 読み込み失敗時の代替表示(壊れたアイコンのまま残さない)。数式エラーと同系統の見た目にする。
+      ".cm-image-widget.cm-image-error": { display: "inline-block", padding: "3px 8px", fontSize: ".85em", color: "var(--danger)", background: "var(--code-bg)", borderRadius: "4px", fontFamily: "var(--font-mono)", cursor: "pointer" },
+      // 多段引用(仕様書 M-03)。.tok-quoteのborder-leftは1段ぶんの見た目のため、2段目以降は
+      // JS側(livePreview)で計算したbox-shadowの重ね書きに置き換える(border-leftは無効化する)。
+      ".cm-quote-nested": { borderLeft: "none" },
     });
   };
 
@@ -1480,6 +1856,7 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
       const mode = forceMode || resolveFileMode(filename);
       currentMode = mode;
       if (mode === "markdown") {
+        currentCodeLanguage = null;
         view.dispatch({
           effects: [
             docModeComp.reconfigure(markdownLanguageExt()),
@@ -1498,6 +1875,7 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
         } catch {
           support = null; // 未対応/ロード失敗時はプレーン表示にフォールバックする
         }
+        currentCodeLanguage = support ? desc.name : null;
         view.dispatch({
           effects: [
             docModeComp.reconfigure(support ? [support] : []),
@@ -1508,6 +1886,7 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
         return;
       }
       // plain
+      currentCodeLanguage = null;
       view.dispatch({
         effects: [
           docModeComp.reconfigure([]),
@@ -1516,6 +1895,32 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
         ],
       });
     },
+    // 拡張子ではなく言語IDを直接指定してコードモードにする(仕様書 第1章の拡張: 内容からの
+    // 自動判定・ステータスバーの言語ピッカーから使う)。setFileMode(code分岐)と同じ流儀
+    // (LanguageDescription.matchFilename → desc.load() → docModeComp.reconfigure)を、
+    // ファイル名でなく言語IDでの一致に置き換えただけ。ロード失敗時はプレーン表示に
+    // フォールバックする作法も同じ。
+    setCodeLanguage: async (languageId) => {
+      const desc = codeLanguages.find((d) => d.name === languageId) || null;
+      let support = null;
+      try {
+        support = desc ? await desc.load() : null;
+      } catch {
+        support = null; // 未対応/ロード失敗時はプレーン表示にフォールバックする
+      }
+      currentMode = "code";
+      currentCodeLanguage = support ? desc.name : null;
+      view.dispatch({
+        effects: [
+          docModeComp.reconfigure(support ? [support] : []),
+          livePreviewComp.reconfigure([]),
+          codeModeExtrasComp.reconfigure(codeModeExtras()),
+        ],
+      });
+    },
+    // 現在コードモードで適用している言語ID。markdown/plainモード時、またはハイライトの
+    // ロードに失敗しプレーン表示へフォールバックした場合はnull。
+    getCodeLanguage: () => currentCodeLanguage,
     // 折り返し表示のON/OFF(仕様書 N-05)
     setWordWrap: (on) => view.dispatch({ effects: wrapComp.reconfigure(on ? EditorView.lineWrapping : []) }),
     // 自動ペアリング(仕様書 第2.10節 C-05)のON/OFF。既定はON。C#設定画面から呼ばれる想定。
@@ -1524,6 +1929,11 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
       view.dispatch({ effects: autoPairComp.reconfigure(autoPairingOn ? closeBrackets() : []) });
     },
     isAutoPairing: () => autoPairingOn,
+    // 自動リンク(仕様書 M-17)のON/OFF。既定はON。C#設定画面のautoLinksEnabledから
+    // apply-settings経由で呼ばれる想定(main.js側の配線は別途行う)。既存のマークダウン記法
+    // 拡張トグル(extTogglesField/setExtensionToggles)の仕組みにそのまま乗せる。
+    setAutoLinks: (on) => view.dispatch({ effects: setExtToggles.of({ autoLinks: !!on }) }),
+    isAutoLinks: () => (view.state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES).autoLinks,
     // ソースコードモード(仕様書 V-05): 記法マーカーを隠さない生表示。Markdownの構文ハイライト
     // (docModeComp)自体は外さない。markdownモード以外の時はlivePreviewComp自体が既に空なので
     // 見た目には影響しないが、状態は保持しておき次にmarkdownモードへ戻った時に反映する。

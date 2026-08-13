@@ -67,8 +67,16 @@ internal sealed class PaneApplicationContext : ApplicationContext
         // 1. 異常終了からのリカバリー提案(仕様書 N-06)。
         //    Ctrl+Sの明示保存が成功した時点でスナップショットは破棄されるため、
         //    起動時に残っているスナップショットがあるのは前回が異常終了した印。
+        //    recoverUnsavedDraftsがfalseの場合は、確認ダイアログを出さずスナップショットを破棄する。
         foreach ((Guid windowId, AutoSaveSnapshot snapshot) in AutoSaveService.FindOrphanedSnapshots())
         {
+            if (!_settings.RecoverUnsavedDrafts)
+            {
+                Logger.Write($"復元確認をスキップ(recoverUnsavedDrafts=false): スナップショットを破棄: {snapshot.OriginalPath ?? "無題のドキュメント"}");
+                AutoSaveService.DeleteSnapshot(windowId);
+                continue;
+            }
+
             string label = snapshot.OriginalPath ?? "無題のドキュメント";
             DialogResult choice = MessageBox.Show(
                 $"前回のPaneは正常に終了しませんでした。\n未保存の内容を復元しますか?\n\n{label}",
@@ -88,7 +96,8 @@ internal sealed class PaneApplicationContext : ApplicationContext
             AutoSaveService.DeleteSnapshot(windowId);
         }
 
-        // 2. コマンドライン引数 > セッション復元 > 空文書、の優先順位で起動時のウィンドウを開く。
+        // 2. コマンドライン引数 > セッション復元 > カスタムフォルダ > 空文書、の優先順位で
+        //    起動時のウィンドウを開く。
         if (cliInitialPath is not null)
         {
             if (openedPaths.Add(cliInitialPath))
@@ -107,6 +116,21 @@ internal sealed class PaneApplicationContext : ApplicationContext
                 openedAny = true;
             }
         }
+        else if (_settings.StartupBehavior == "customFolder")
+        {
+            string? folder = _settings.StartupFolderPath;
+            if (!string.IsNullOrWhiteSpace(folder) && Directory.Exists(folder))
+            {
+                Logger.Write($"起動時のカスタムフォルダを読み込む: {folder}");
+                OpenWindow(null, initialFolderPath: folder);
+                openedAny = true;
+            }
+            else
+            {
+                // 指定フォルダが存在しない場合は空文書で起動する(下の!openedAnyフォールバックへ)。
+                Logger.Write($"起動時のカスタムフォルダが存在しないため空文書で起動する: {folder ?? "(未設定)"}");
+            }
+        }
 
         if (!openedAny)
         {
@@ -119,7 +143,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// 実際には新規ウィンドウとして扱う)からも、起動時の複数ファイルオープンからも、ここを通る。
     /// UIスレッド上で呼び出すこと(<see cref="SingleInstanceServer"/> はSynchronizationContext経由で保証する)。
     /// </summary>
-    public void OpenWindow(string? path, AutoSaveSnapshot? recoverFrom = null, DroppedFileContent? droppedFile = null)
+    public void OpenWindow(string? path, AutoSaveSnapshot? recoverFrom = null, DroppedFileContent? droppedFile = null, string? initialFolderPath = null)
     {
         var form = new MainForm(
             path,
@@ -128,7 +152,8 @@ internal sealed class PaneApplicationContext : ApplicationContext
             requestNewWindowWithContent: content => OpenWindow(null, null, content),
             requestSwitchDocument: SwitchToNextWindow,
             requestBroadcastSettings: BroadcastSettingsChanged,
-            droppedFile: droppedFile);
+            droppedFile: droppedFile,
+            initialFolderPath: initialFolderPath);
 
         int width = _settings.WindowWidth ?? DefaultWidth;
         int height = _settings.WindowHeight ?? DefaultHeight;
@@ -252,14 +277,15 @@ internal sealed class PaneApplicationContext : ApplicationContext
             if (openFilePaths is not null) latest.OpenFilePaths = openFilePaths;
             SettingsService.Save(latest);
 
-            if (_preload)
+            // preload起動の常駐プロセス、またはquitOnLastWindowClosed=falseの場合は、
+            // 最後のウィンドウが閉じられてもプロセスを終了させず、再びウィンドウ0枚の待機状態へ
+            // 戻る(次にファイルを開くときもWebView2環境のキャッシュを保ったまま高速に開けるため)。
+            // 次にOpenWindowFromPipeRequestが呼ばれたときも、既にウィンドウを一度見せた後なので
+            // 復元確認は再実行しない(_initialOpenPendingは既にfalse)。
+            if (_preload || !latest.QuitOnLastWindowClosed)
             {
-                // preload起動の常駐プロセスは、最後のウィンドウが閉じられてもプロセスを
-                // 終了させず、再びウィンドウ0枚の待機状態へ戻る(次にファイルを開くときも
-                // WebView2環境のキャッシュを保ったまま高速に開けるようにするため)。
-                // 次にOpenWindowFromPipeRequestが呼ばれたときも、既にウィンドウを一度
-                // 見せた後なので復元確認は再実行しない(_initialOpenPendingは既にfalse)。
-                Logger.Write("preload: 最後のウィンドウが閉じられた。ExitThreadは呼ばず常駐状態へ戻る");
+                string reason = _preload ? "preload起動" : "quitOnLastWindowClosed=false";
+                Logger.Write($"最後のウィンドウが閉じられた({reason})。ExitThreadは呼ばず常駐状態へ戻る");
             }
             else
             {
