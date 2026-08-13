@@ -384,10 +384,10 @@ body.export-layout .cm-scroller { overflow: visible !important; }
 #search-panel[hidden] { display: none; }
 
 /* ===== コードモード: 行番号・括弧対応(仕様書 決定済み事項) ===== */
-.cm-host .cm-gutters { background: var(--paper); border-right: 1px solid var(--rule); color: var(--ink-sub); }
-.cm-host .cm-lineNumbers .cm-gutterElement { padding: 0 8px 0 4px; font-family: var(--font-mono); font-size: 12px; }
-.cm-host .cm-matchingBracket { background: var(--accent-soft); color: var(--accent); border-radius: 3px; }
-.cm-host.mode-code .cm-content, .cm-host.mode-code .cm-gutters { font-family: var(--font-mono); }
+#cm-host .cm-gutters { background: var(--paper); border-right: 1px solid var(--rule); color: var(--ink-sub); }
+#cm-host .cm-lineNumbers .cm-gutterElement { padding: 0 8px 0 4px; font-family: var(--font-mono); font-size: 12px; }
+#cm-host .cm-matchingBracket { background: var(--accent-soft); color: var(--accent); border-radius: 3px; }
+#cm-host.mode-code .cm-content, #cm-host.mode-code .cm-gutters { font-family: var(--font-mono); }
 
 /* モバイル: キーボード上部ツールバー */
 .mobile-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; height: var(--bar-h, 48px); box-sizing: border-box; display: flex; align-items: center; background: var(--surface); border-top: 1px solid var(--line); box-shadow: 0 -2px 10px rgba(16,24,32,.08); }
@@ -488,11 +488,11 @@ html[data-theme="dark"] mark { background: #8A7A2E; }
 }
 
 /* ===== CodeMirror ライブプレビューエディタ ===== */
-.cm-host { flex: 1; min-height: 0; display: flex; overflow: hidden; }
-.cm-host .cm-editor { flex: 1; width: 100%; height: 100%; }
-.cm-host .cm-scroller { padding: 8px 0; overflow-y: auto; }
-.cm-host .cm-content { padding: 0 !important; }
-.cm-host .cm-line { padding: 0 !important; margin: 0; text-indent: 0; }
+#cm-host { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+#cm-host .cm-editor { flex: 1; width: 100%; height: 100%; }
+#cm-host .cm-scroller { padding: 8px 0; overflow-y: auto; }
+#cm-host .cm-content { padding: 0 !important; }
+#cm-host .cm-line { padding: 0 !important; margin: 0; text-indent: 0; }
 .editor.readonly .cm-cursor, .editor.readonly .cm-cursor-primary { display: none !important; }
 .editor.readonly .cm-content { caret-color: transparent !important; }
 
@@ -510,10 +510,10 @@ html[data-theme="dark"] mark { background: #8A7A2E; }
 .tok-quote { color: var(--ink-sub); border-left: 3px solid var(--accent); padding-left: 10px; display: inline-block; }
 .tok-link { color: var(--accent); text-decoration: underline; }
 .cm-bullet { color: var(--accent); }
-.cm-host .cm-content { caret-color: var(--ink); }
-.cm-host .cm-cursor, .cm-host .cm-cursor-primary { border-left-color: var(--ink) !important; }
-html[data-theme="dark"] .cm-host .cm-content { caret-color: #E6E6E6; }
-html[data-theme="dark"] .cm-host .cm-cursor, html[data-theme="dark"] .cm-host .cm-cursor-primary { border-left-color: #E6E6E6 !important; }
+#cm-host .cm-content { caret-color: var(--ink); }
+#cm-host .cm-cursor, #cm-host .cm-cursor-primary { border-left-color: var(--ink) !important; }
+html[data-theme="dark"] #cm-host .cm-content { caret-color: #E6E6E6; }
+html[data-theme="dark"] #cm-host .cm-cursor, html[data-theme="dark"] #cm-host .cm-cursor-primary { border-left-color: #E6E6E6 !important; }
 .cm-checkbox { accent-color: var(--accent); width: 16px; height: 16px; margin-right: 8px; vertical-align: -2px; cursor: pointer; }
 .tok-done { color: var(--ink-sub); text-decoration: line-through; text-decoration-color: currentColor; }
 .cm-hr { border: none; border-top: 2px solid var(--line); margin: 4px 0; }
@@ -857,3 +857,25 @@ html[data-theme="dark"] .cm-table th { background: rgba(61,193,181,.14); }
 
 /* 既定のアプリが他アプリになっている拡張子ごとの「選び直す」ボタンの並び。 */
 .ft-blocked-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+
+/* ===== 本文フォント・等幅フォントの設定(仕様書 C-08) =====
+   main.js が apply-settings を受け取って --editor-font-body / --editor-font-mono を
+   設定する。未設定のときはテーマ既定(--font-body / --font-mono)へフォールバックする。
+   本文は「地の文」、等幅は「コードブロック・インラインコード・コードモード・行番号」に効く。
+   CodeMirrorのテーマは .ͼ1 付きの高い詳細度で .cm-content に font-family を当てるため、
+   ここでは !important で確実に上書きする。 */
+#cm-host { font-family: var(--editor-font-body, var(--font-body)); }
+.tok-code, .tok-codeblock { font-family: var(--editor-font-mono, var(--font-mono)) !important; }
+#cm-host.mode-code .cm-content,
+#cm-host.mode-code .cm-gutters,
+#cm-host .cm-lineNumbers .cm-gutterElement { font-family: var(--editor-font-mono, var(--font-mono)) !important; }
+
+/* <select>の内在的な最小幅は「いちばん長い項目」で決まる。インストール済みフォントの
+   一覧は数百件あり長い名前も含まれるため、親の max-width を無視して横に伸びていた
+   (等幅フォントは候補が少ないため問題が出ていなかった)。
+   フレックス項目の既定 min-width:auto を打ち消し、親の幅に収める。 */
+.settings-select-row select, .settings-text-row input, .settings-text-row select {
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+}

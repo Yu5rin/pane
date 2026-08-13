@@ -512,7 +512,71 @@ internal sealed class MainForm : Form
                 // 実体はPaneApplicationContext.OpenSettingsWindowが持つ(同時に1つしか開かない)。
                 _requestOpenSettingsWindow?.Invoke(this);
                 break;
+            case "open-menu":
+                // メニューバーの見出しがクリックされた(またはAltキー操作で開かれた)。
+                // ネイティブなポップアップ(Pane/NativeMenu.cs)で表示する(ユーザー要望:
+                // ウィンドウを小さくしても項目数の多いメニューが画面外へはみ出さないように)。
+                HandleOpenMenuRequest(root);
+                break;
         }
+    }
+
+    // ---- ネイティブメニュー(仕様書外・ユーザー要望。Pane/NativeMenu.cs) ----
+
+    /// <summary>
+    /// { type: "open-menu", menu, x, y, items } を受け取り、ToolStripDropDownMenuを表示する。
+    /// x/yはJS側(src/commands.js)がWebView2内のCSSピクセル座標(見出しボタンのgetBoundingClientRect()の
+    /// left/bottom)で送ってくる。画面座標への変換は次の2段階:
+    ///   1. CSSピクセル → WebView2コントロール内のデバイスピクセルへ、DeviceDpi(96分率)倍率を掛けて変換する。
+    ///      WebView2(Chromium)はホストHWNDのDPIに合わせて内部的にページを実ピクセルへ拡大縮小して描画しており、
+    ///      WinForms側のControl座標系(_webView.Width/Height等)は常にそのデバイスピクセルで表現されるため、
+    ///      CSSピクセルをそのまま使うとDPI125%/150%等の環境でクリック位置とズレる。
+    ///   2. _webView.PointToScreen(...)で、WebView2コントロール内のデバイスピクセル座標を画面座標(スクリーン座標)へ変換する。
+    /// 選ばれた項目は"menu-command"、選ばずに閉じられた場合は"menu-closed"としてJSへ返す
+    /// (実際のコマンド実行は引き続きJS側のcommand.run()が行う。C#側はコマンドの実装を一切持たない)。
+    /// </summary>
+    private void HandleOpenMenuRequest(JsonElement root)
+    {
+        string menuName = root.TryGetProperty("menu", out JsonElement menuProp) ? menuProp.GetString() ?? "" : "";
+        double cssX = root.TryGetProperty("x", out JsonElement xProp) && xProp.ValueKind == JsonValueKind.Number ? xProp.GetDouble() : 0;
+        double cssY = root.TryGetProperty("y", out JsonElement yProp) && yProp.ValueKind == JsonValueKind.Number ? yProp.GetDouble() : 0;
+        List<NativeMenu.MenuItemData> items = root.TryGetProperty("items", out JsonElement itemsProp) && itemsProp.ValueKind == JsonValueKind.Array
+            ? ParseMenuItems(itemsProp)
+            : new List<NativeMenu.MenuItemData>();
+
+        double dpiScale = DeviceDpi / 96.0;
+        var clientPoint = new Point((int)Math.Round(cssX * dpiScale), (int)Math.Round(cssY * dpiScale));
+        Point screenPoint = _webView.PointToScreen(clientPoint);
+        Logger.Write($"open-menu: menu={menuName}, 項目数={items.Count}, cssPoint=({cssX},{cssY}), DeviceDpi={DeviceDpi}, clientPoint=({clientPoint.X},{clientPoint.Y}), screenPoint=({screenPoint.X},{screenPoint.Y})");
+
+        bool isDark = ResolveIsDarkTheme(SettingsService.Load().Theme);
+        NativeMenu.Show(
+            screenPoint,
+            isDark,
+            items,
+            onCommand: id => PostToWeb(new { type = "menu-command", id }),
+            onClosed: () => PostToWeb(new { type = "menu-closed", menu = menuName }));
+    }
+
+    /// <summary>"open-menu"のitems配列(入れ子のsubmenuを含む)をJSONから<see cref="NativeMenu.MenuItemData"/>へ変換する。</summary>
+    private static List<NativeMenu.MenuItemData> ParseMenuItems(JsonElement arrayElement)
+    {
+        var list = new List<NativeMenu.MenuItemData>();
+        foreach (JsonElement el in arrayElement.EnumerateArray())
+        {
+            string? id = el.TryGetProperty("id", out JsonElement idProp) && idProp.ValueKind == JsonValueKind.String ? idProp.GetString() : null;
+            string label = el.TryGetProperty("label", out JsonElement labelProp) ? labelProp.GetString() ?? "" : "";
+            string shortcut = el.TryGetProperty("shortcut", out JsonElement scProp) ? scProp.GetString() ?? "" : "";
+            bool enabled = !el.TryGetProperty("enabled", out JsonElement enProp) || enProp.ValueKind != JsonValueKind.False;
+            bool isChecked = el.TryGetProperty("checked", out JsonElement chProp) && chProp.ValueKind == JsonValueKind.True;
+            bool separatorAfter = el.TryGetProperty("separatorAfter", out JsonElement sepProp) && sepProp.ValueKind == JsonValueKind.True;
+            string note = el.TryGetProperty("note", out JsonElement noteProp) ? noteProp.GetString() ?? "" : "";
+            List<NativeMenu.MenuItemData>? submenu = el.TryGetProperty("submenu", out JsonElement subProp) && subProp.ValueKind == JsonValueKind.Array
+                ? ParseMenuItems(subProp)
+                : null;
+            list.Add(new NativeMenu.MenuItemData(id, label, shortcut, enabled, isChecked, separatorAfter, note, submenu));
+        }
+        return list;
     }
 
     // ---- ウィンドウ制御(仕様書 第2.5節 V-08・V-11・V-12) ----

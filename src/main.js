@@ -665,7 +665,7 @@ ctx.actions.openQuickOpen = () => quickOpen.open();
 
 const commands = buildCommands(ctx);
 bindShortcuts(commands, ctx);
-initMenuBar(menubarEl, commands, ctx);
+const menuBar = initMenuBar(menubarEl, commands, ctx);
 const commandPalette = initCommandPalette(document.body, commands, ctx);
 initContextMenu(host, commands, ctx, resolveContextCommandIds);
 
@@ -892,10 +892,19 @@ async function handleHostMessage(msg) {
         showWordCount = msg.showWordCount;
         updateWordCountVisibility();
       }
-      // 本文フォント(仕様書 第2.10節 C-08)。空文字/未設定ならCSS側の既定(var(--font-body)由来)
-      // に戻す(host.style.fontFamily = ""でインラインスタイルを外すと通常のカスケードに戻る)。
-      // CodeMirror側(.cm-scroller { fontFamily: "inherit" })がこれをそのまま継承する。
-      host.style.fontFamily = msg.editorFontFamily || "";
+      // 本文フォントと等幅フォント(仕様書 第2.10節 C-08)。
+      // インラインスタイルで#cm-hostへ直接当てると、コードブロック・インラインコード・
+      // コードモードのように「本文とは別に等幅を当てたい」箇所まで継承で巻き込んでしまい、
+      // 等幅フォントの設定がまったく効かなくなっていた。CSSカスタムプロパティを上書きする
+      // 形にして、本文用(--editor-font-body)と等幅用(--editor-font-mono)を
+      // それぞれの箇所で使い分けられるようにする。
+      // 未設定なら変数自体を消して、style.cssの既定(--font-body / --font-mono)へ戻す。
+      const rootStyle = document.documentElement.style;
+      host.style.fontFamily = ""; // 旧実装のインラインスタイルが残っていたら外す
+      if (msg.editorFontFamily) rootStyle.setProperty("--editor-font-body", msg.editorFontFamily);
+      else rootStyle.removeProperty("--editor-font-body");
+      if (msg.editorMonospaceFontFamily) rootStyle.setProperty("--editor-font-mono", msg.editorMonospaceFontFamily);
+      else rootStyle.removeProperty("--editor-font-mono");
       // カスタムCSS(仕様書 第2.10節 C-07)。C#側がファイル内容を読み込んで文字列として送ってくる
       // (file://は仮想ホスト配下から読めないため)。<head>内の専用<style>要素のtextContentへ
       // 反映する(innerHTMLは使わない)。要素が無ければここで生成する。
@@ -971,6 +980,15 @@ async function handleHostMessage(msg) {
       // 全画面表示(V-08)・常に手前に表示(V-12)の実際の状態はC#側(WinForms)が持ち、
       // トグル操作のたび・起動直後に届く。ここは表示専用(メニューのcheckedに反映するだけ)。
       windowState = { fullscreen: !!msg.fullscreen, alwaysOnTop: !!msg.alwaysOnTop };
+      break;
+    case "menu-command":
+      // ネイティブメニュー(Pane/NativeMenu.cs)で項目が選ばれた。既存のcommands配列から
+      // idで引いて実行する(コマンドの実装はC#側に持たせない。commands.js参照)。
+      menuBar.handleMenuCommand(msg.id);
+      break;
+    case "menu-closed":
+      // ネイティブメニューが選択なしで閉じられた。見出しのハイライトを解除するだけ。
+      menuBar.handleMenuClosed(msg.menu);
       break;
   }
 }
