@@ -49,4 +49,7 @@ internal sealed class AppSettings
 
     /// <summary>最近使ったファイル(仕様書 F-09)。先頭が最新。最大件数はRecentFilesService側で制御する。</summary>
     public List<string> RecentFiles { get; set; } = new();
+
+    /// <summary>"system" | "light" | "dark"。手動でテーマを切り替えた場合に永続化する(仕様書 第10.2節)。</summary>
+    public string Theme { get; set; } = "system";
 }

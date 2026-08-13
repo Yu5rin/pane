@@ -183,15 +183,9 @@ const ctx = {
       let text;
       if (format === "html") text = editor.getStandaloneHtml(currentName, true);
       else if (format === "html-plain") text = editor.getStandaloneHtml(currentName, false);
-      else text = editor.getValue(); // pdf/pngは本文を使わない。docx/epubはMarkdown原文をPandocへ渡す。
-      let captureHeight;
-      if (format === "png") {
-        // PDF/印刷はbeforeprint/afterprintで自動的に展開・復元されるが、PNGは印刷パイプラインを
-        // 経由しないため、ここで明示的に展開し、C#側からの"export-done"到着時に復元する。
-        captureHeight = enterExportLayout();
-        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-      }
-      bridge.postMessage({ type: "export", format, text, captureHeight });
+      else text = editor.getValue(); // pdfは本文を使わない。docx/epubはMarkdown原文をPandocへ渡す。
+      // PDF/印刷はbeforeprint/afterprintで自動的にレイアウトを展開・復元する(enterExportLayout参照)。
+      bridge.postMessage({ type: "export", format, text });
     },
     print() {
       if (bridge) bridge.postMessage({ type: "print" });
@@ -363,6 +357,12 @@ async function handleHostMessage(msg) {
       defaultCopyFormat = msg.defaultCopyFormat ?? "markdown";
       pandocAvailable = !!msg.pandocAvailable;
       recentFiles = msg.recentFiles ?? [];
+      // テーマ(仕様書 第10.2節): 手動で切り替えた選択を永続化している。"system"ならOS設定
+      // (index.htmlの起動時スクリプトが既に反映済み)のままにする。
+      if (msg.theme === "light" || msg.theme === "dark") {
+        document.documentElement.dataset.theme = msg.theme;
+        editor.refreshTheme();
+      }
       break;
     case "image-inserted":
       // 画像挿入(仕様書 R-07)。C#側でファイルコピー・相対パス解決を終えたものが届く。
@@ -466,8 +466,11 @@ async function saveFile(forcePicker) {
 
 document.getElementById("btn-theme").addEventListener("click", () => {
   const cur = document.documentElement.dataset.theme;
-  document.documentElement.dataset.theme = cur === "dark" ? "light" : "dark";
+  const next = cur === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
   editor.refreshTheme();
+  // 手動選択を永続化する(仕様書 第10.2節)。次回起動時もOS設定に戻らないようにする。
+  bridge?.postMessage({ type: "set-theme", theme: next });
 });
 // 設定ダイアログはC#側のネイティブウィンドウで表示する(Phase 3時点の最小実装、Phase 8で置き換え)。
 const btnSettings = document.getElementById("btn-settings");

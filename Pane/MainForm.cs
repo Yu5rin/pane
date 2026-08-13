@@ -285,6 +285,12 @@ internal sealed class MainForm : Form
                 string logMessage = root.TryGetProperty("message", out JsonElement msgProp) ? msgProp.GetString() ?? "" : "";
                 Logger.Write($"[JS:{level}] {logMessage}");
                 break;
+            case "set-theme":
+                if (root.TryGetProperty("theme", out JsonElement themeProp))
+                {
+                    SaveTheme(themeProp.GetString() ?? "system");
+                }
+                break;
         }
     }
 
@@ -689,7 +695,17 @@ internal sealed class MainForm : Form
             defaultCopyFormat = settings.DefaultCopyFormat,
             recentFiles = settings.RecentFiles,
             pandocAvailable = DetectPandocAvailable(),
+            theme = settings.Theme,
         });
+    }
+
+    /// <summary>テーマ切替(仕様書 第10.2節)の手動選択を永続化する。"system"ならOS設定に追従したまま何もしない。</summary>
+    private static void SaveTheme(string theme)
+    {
+        if (theme != "light" && theme != "dark" && theme != "system") return;
+        AppSettings settings = SettingsService.Load();
+        settings.Theme = theme;
+        SettingsService.Save(settings);
     }
 
     /// <summary>最近使ったファイル一覧(仕様書 F-09)を更新する。先頭が最新、重複除去、最大10件。</summary>
@@ -745,24 +761,21 @@ internal sealed class MainForm : Form
         return Task.CompletedTask;
     }
 
-    // ---- エクスポート(仕様書 F-XX)。PDF/画像はWebView2のネイティブ機能、HTMLは
+    // ---- エクスポート(仕様書 F-XX)。PDFはWebView2のネイティブ機能、HTMLは
     // JS側で組み立て済みのHTML文字列をそのまま保存、Word/EPUBはPandocに委譲する。
-    // PNGはJS側が"export"送信前にメニューバー等を隠し文書全体をレイアウトへ展開している
+    // PDFはJS側が"export"送信前にメニューバー等を隠し文書全体をレイアウトへ展開している
     // (enterExportLayout)ため、このメソッドを抜ける経路(保存キャンセルを含む)すべてで
     // 必ず"export-done"を返し、JS側の表示を元に戻せるようにする。 ----
     private async Task HandleExportRequestAsync(JsonElement message)
     {
         string format = message.TryGetProperty("format", out JsonElement fmtProp) ? fmtProp.GetString() ?? "" : "";
         string text = message.TryGetProperty("text", out JsonElement textProp) ? textProp.GetString() ?? "" : "";
-        int captureHeight = message.TryGetProperty("captureHeight", out JsonElement chProp) && chProp.ValueKind == JsonValueKind.Number
-            ? chProp.GetInt32() : 0;
         string baseName = _currentPath is null ? "無題" : Path.GetFileNameWithoutExtension(_currentPath);
 
         (string filter, string ext) = format switch
         {
             "pdf" => ("PDF (*.pdf)|*.pdf", ".pdf"),
             "html" or "html-plain" => ("HTML (*.html)|*.html", ".html"),
-            "png" => ("PNG画像 (*.png)|*.png", ".png"),
             "docx" => ("Word文書 (*.docx)|*.docx", ".docx"),
             "epub" => ("EPUB (*.epub)|*.epub", ".epub"),
             _ => ("すべてのファイル (*.*)|*.*", ""),
@@ -782,9 +795,6 @@ internal sealed class MainForm : Form
                 case "html-plain":
                     await File.WriteAllTextAsync(targetPath, text, new UTF8Encoding(false));
                     break;
-                case "png":
-                    await CapturePngAsync(targetPath, captureHeight);
-                    break;
                 case "docx":
                 case "epub":
                     await ExportViaPandocAsync(text, targetPath);
@@ -798,33 +808,6 @@ internal sealed class MainForm : Form
         finally
         {
             PostToWeb(new { type = "export-done" });
-        }
-    }
-
-    /// <summary>
-    /// PNGエクスポート(仕様書 File項目「エクスポート: 画像(PNG)」)。CapturePreviewAsyncは
-    /// WebView2コントロールの現在の表示ピクセルしか撮れない(スクロール分は撮れない)ため、
-    /// 文書全体が収まるようウィンドウを一時的に(captureHeightが現在の高さを超える場合のみ)
-    /// 拡大してから撮影し、直後に元のサイズへ戻す。
-    /// </summary>
-    private async Task CapturePngAsync(string targetPath, int captureHeight)
-    {
-        Size? originalClientSize = null;
-        if (captureHeight > 0 && captureHeight > _webView.Height)
-        {
-            originalClientSize = ClientSize;
-            ClientSize = new Size(ClientSize.Width, captureHeight);
-            // WebView2側の再描画完了を待つ確実なAPIが無いため、ベストエフォートで少し待つ。
-            await Task.Delay(150);
-        }
-        try
-        {
-            await using FileStream stream = File.Create(targetPath);
-            await _webView.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, stream);
-        }
-        finally
-        {
-            if (originalClientSize is Size size) ClientSize = size;
         }
     }
 
