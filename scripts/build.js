@@ -113,6 +113,43 @@ function generateFileTypesCs() {
   }
 }
 
+// @lezer/markdown の表(GFM Table)の区切り行判定を修正するesbuildプラグイン。
+//
+// 上流の正規表現が、区切り行の末尾にある空白・タブを許していない:
+//   /^[>\s]*\|?(\s*:?-+:?\s*\|)+(\s*:?-+:?\s*)?$/
+// このため「| --- | --- |   」のように末尾へ空白が付いた表が、まったく表として
+// 認識されなくなる。表を桁揃えして整形するツールやエディタは末尾に空白を残すことが
+// あり、実際にユーザーの文書で表が描画されない原因になっていた。
+// GFMの仕様では行末の空白は無視されるべきなので、末尾に \s* を足して許容する。
+//
+// 依存を書き換えるため、対象の正規表現が見つからなければ**ビルドを失敗させる**。
+// ライブラリ更新で該当箇所が変わったことに気づかないまま、修正が黙って外れるのを防ぐ。
+const LEZER_MD_DELIMITER_LINE_ORIGINAL =
+  String.raw`/^[>\s]*\|?(\s*:?-+:?\s*\|)+(\s*:?-+:?\s*)?$/`;
+const LEZER_MD_DELIMITER_LINE_PATCHED =
+  String.raw`/^[>\s]*\|?(\s*:?-+:?\s*\|)+(\s*:?-+:?\s*)?\s*$/`;
+
+const patchLezerMarkdownTable = {
+  name: "patch-lezer-markdown-table",
+  setup(build) {
+    build.onLoad({ filter: /@lezer[\\/]markdown[\\/].*\.js$/ }, (args) => {
+      const source = fs.readFileSync(args.path, "utf8");
+      if (!source.includes("delimiterLine")) return null;
+      if (!source.includes(LEZER_MD_DELIMITER_LINE_ORIGINAL)) {
+        throw new Error(
+          `@lezer/markdown の表の区切り行の正規表現が見つかりませんでした(${args.path})。` +
+          "ライブラリの更新で該当箇所が変わった可能性があります。" +
+          "scripts/build.js の patchLezerMarkdownTable を見直してください。"
+        );
+      }
+      return {
+        contents: source.replace(LEZER_MD_DELIMITER_LINE_ORIGINAL, LEZER_MD_DELIMITER_LINE_PATCHED),
+        loader: "js",
+      };
+    });
+  },
+};
+
 const buildOptions = {
   entryPoints: ["src/main.js"],
   bundle: true,
@@ -120,6 +157,7 @@ const buildOptions = {
   splitting: true,
   outdir: "dist",
   define: { PACKAGE_VERSION: JSON.stringify(mathjaxVersion) },
+  plugins: [patchLezerMarkdownTable],
 };
 
 async function run() {
