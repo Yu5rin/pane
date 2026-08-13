@@ -31,7 +31,7 @@ function parentDirOf(relativePath) {
 
 // createSidebar(editor, ctx)
 // editor: createEditor()の戻り値(jumpToHeadingで見出し位置へジャンプする)
-// ctx: main.js側のctx。ctx.actions.openFolder/openFileByPathを使う。
+// ctx: main.js側のctx。ctx.actions.openFolder/openFileByPath/switchFileFromSidebarを使う。
 export function createSidebar(editor, ctx) {
   const sidebarEl = document.getElementById("sidebar");
   const bodyEl = document.getElementById("sidebar-body");
@@ -55,7 +55,17 @@ export function createSidebar(editor, ctx) {
 
   let isOpenFlag = false; // 初期状態はindex.html側の.collapsedと一致させる
   let currentPanelName = "outline"; // 既定パネル(仕様書: アウトラインは左側にピン留めできる)
+  // タブをユーザーが自分でクリックして選んだかどうか。trueの間は、開くたびの
+  // 自動パネル選択(defaultPanelForCurrentMode)を行わずユーザーの選択を尊重する。
+  let panelPickedByUser = false;
   let debounceTimer = null;
+  // アウトラインの折りたたみ可否(仕様書 collapsibleOutline、既定true)。main.jsのapply-settingsから
+  // setCollapsibleOutline()経由で更新される。
+  let collapsibleOutlineOn = true;
+  // 折りたたみ済みの見出し集合。行番号(見出しのfrom)は編集のたびにずれるため、代わりに
+  // extractHeadings()が既に文書内で一意になるよう採番しているslugをキーにする
+  // (仕様書「見出しテキストをキーにする等、行番号に依存しない方法にすること」)。
+  const outlineCollapsed = new Set();
 
   // 読み込み済みフォルダのデータ。main.jsのhandleHostMessage("folder-loaded")から
   // setFolder()経由で渡される。{ rootPath, rootName, entries, truncated } または
@@ -130,6 +140,21 @@ export function createSidebar(editor, ctx) {
     bodyEl.appendChild(notice);
   }
 
+  // 見出しレベルの入れ子から親子関係を組み立てる(collapsibleOutline用)。スタックの先頭より
+  // レベルが浅い/同じ見出しが来るまで子として繋いでいくだけの単純な木構築。
+  // レベルが飛んでいる場合(例: h1の直後にh3)も、直近の浅い見出しの子として扱う。
+  function buildOutlineForest(headings) {
+    const root = { level: 0, children: [] };
+    const stack = [root];
+    for (const heading of headings) {
+      while (stack.length > 1 && stack[stack.length - 1].level >= heading.level) stack.pop();
+      const node = { heading, level: heading.level, children: [] };
+      stack[stack.length - 1].children.push(node);
+      stack.push(node);
+    }
+    return root.children;
+  }
+
   // アウトラインパネル本体。extractHeadings()は構文木の全走査のため、呼び出し元
   // (scheduleRefresh/renderActivePanelNow)側でタイミングを制御する。
   function renderOutline() {
@@ -139,16 +164,84 @@ export function createSidebar(editor, ctx) {
       return;
     }
     bodyEl.innerHTML = "";
-    for (const heading of headings) {
+
+    // collapsibleOutline:falseの場合は木構造を組まず、常に全件フラット表示にする
+    // (折りたたみ操作自体を出さない)。
+    if (!collapsibleOutlineOn) {
+      for (const heading of headings) {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "outline-item";
+        item.dataset.level = String(heading.level);
+        item.textContent = heading.text;
+        item.title = heading.text;
+        item.addEventListener("click", () => editor.jumpToHeading(heading));
+        bodyEl.appendChild(item);
+      }
+      return;
+    }
+
+    // 折りたたまれた見出しの子孫はDOMに出さない(表示上も操作上も「隠す」)。
+    const forest = buildOutlineForest(headings);
+    const visible = [];
+    (function walk(nodes) {
+      for (const node of nodes) {
+        visible.push(node);
+        if (!outlineCollapsed.has(node.heading.slug)) walk(node.children);
+      }
+    })(forest);
+
+    for (const node of visible) {
+      const heading = node.heading;
+      const hasChildren = node.children.length > 0;
       const item = document.createElement("button");
       item.type = "button";
       item.className = "outline-item";
       item.dataset.level = String(heading.level);
-      item.textContent = heading.text;
       item.title = heading.text;
+
+      if (hasChildren) {
+        // 下位見出しを持つ項目だけ、折りたたみシェブロン付きの行にする(index.htmlを触らず、
+        // 既存クラス.tree-chevronの流用+インラインスタイルのflex化で対応)。
+        item.style.display = "flex";
+        item.style.alignItems = "center";
+        item.style.gap = "4px";
+        const collapsed = outlineCollapsed.has(heading.slug);
+        const chevronWrap = document.createElement("span");
+        chevronWrap.innerHTML = TREE_CHEVRON_SVG;
+        chevronWrap.style.display = "inline-flex";
+        chevronWrap.style.flex = "none";
+        chevronWrap.title = collapsed ? "展開" : "折りたたみ";
+        const svgEl = chevronWrap.firstElementChild;
+        if (svgEl) svgEl.style.transform = collapsed ? "rotate(0deg)" : "rotate(90deg)";
+        // シェブロンのクリックは見出しへのジャンプではなく折りたたみ操作にする(親のクリックへ伝播させない)。
+        chevronWrap.addEventListener("click", (e) => {
+          e.stopPropagation();
+          if (collapsed) outlineCollapsed.delete(heading.slug);
+          else outlineCollapsed.add(heading.slug);
+          renderOutline();
+        });
+        item.appendChild(chevronWrap);
+        const textEl = document.createElement("span");
+        textEl.textContent = heading.text;
+        textEl.style.minWidth = "0";
+        textEl.style.overflow = "hidden";
+        textEl.style.textOverflow = "ellipsis";
+        textEl.style.whiteSpace = "nowrap";
+        item.appendChild(textEl);
+      } else {
+        item.textContent = heading.text;
+      }
       item.addEventListener("click", () => editor.jumpToHeading(heading));
       bodyEl.appendChild(item);
     }
+  }
+
+  // collapsibleOutline設定の反映(main.jsのapply-settingsから呼ばれる)。表示中のアウトラインが
+  // あれば即座に再描画する。
+  function setCollapsibleOutline(v) {
+    collapsibleOutlineOn = !!v;
+    if (isOpenFlag && currentPanelName === "outline" && !globalSearch.hasQuery()) renderOutline();
   }
 
   // ファイルリストパネル(S-02): isDirectory===falseのエントリを平坦に一覧表示する。
@@ -184,7 +277,10 @@ export function createSidebar(editor, ctx) {
         dirEl.textContent = dir;
         item.appendChild(dirEl);
       }
-      item.addEventListener("click", () => ctx.actions.openFileByPath(entry.path));
+      // ファイル一覧からの切替(仕様書 saveWithoutAskingOnSwitch)。openFileByPathではなく
+      // 専用のswitchFileFromSidebarを通す(グローバル検索結果・クイックオープンは対象外のため
+      // 従来通りopenFileByPathのまま)。
+      item.addEventListener("click", () => ctx.actions.switchFileFromSidebar(entry.path));
       bodyEl.appendChild(item);
     }
     if (files.length > FILE_LIST_LIMIT) {
@@ -255,7 +351,8 @@ export function createSidebar(editor, ctx) {
         row.title = child.entry.relativePath;
         row.innerHTML = TREE_SPACER_HTML + TREE_FILE_SVG + '<span class="tree-item-name"></span>';
         row.querySelector(".tree-item-name").textContent = child.entry.name;
-        row.addEventListener("click", () => ctx.actions.openFileByPath(child.entry.path));
+        // ファイルツリーからの切替も同様にswitchFileFromSidebarを通す。
+        row.addEventListener("click", () => ctx.actions.switchFileFromSidebar(child.entry.path));
         container.appendChild(row);
       }
     }
@@ -329,15 +426,35 @@ export function createSidebar(editor, ctx) {
   }
 
   // 現在編集中のファイルのフルパスを受け取り、files/treeパネルのハイライトに反映する。
+  // パスが実際に変わった(=別の文書を開いた)場合は、アウトラインの折りたたみ状態も
+  // リセットする(前の文書の見出し構成に紐づく状態を残さないため)。
   function setCurrentPath(path) {
+    if (path !== openFilePath) outlineCollapsed.clear();
     openFilePath = path;
     if (isOpenFlag && (currentPanelName === "files" || currentPanelName === "tree")) renderActivePanelNow();
+  }
+
+  // アウトラインはMarkdownの見出しから作るため、コードモード・プレーンテキストモードでは
+  // 常に空になる。その状態でアウトラインを開いても何も出ず無意味なので、パネルを明示せずに
+  // 開いたときは自動でファイルリストへ切り替える。ユーザーがタブを自分で選んだ後は
+  // その選択を尊重する(panelPickedByUser)。
+  function defaultPanelForCurrentMode() {
+    if (panelPickedByUser) return currentPanelName;
+    let mode = "markdown";
+    try {
+      mode = ctx.getState?.().mode ?? "markdown";
+    } catch {
+      // getStateが未整備でも既定(アウトライン)にフォールバックするだけにする
+    }
+    if (mode === "markdown") return "outline";
+    return currentPanelName === "outline" ? "files" : currentPanelName;
   }
 
   function open(panel) {
     isOpenFlag = true;
     sidebarEl.classList.remove("collapsed");
     if (panel) currentPanelName = panel;
+    else currentPanelName = defaultPanelForCurrentMode();
     setActiveTab();
     renderActivePanelNow();
   }
@@ -378,7 +495,10 @@ export function createSidebar(editor, ctx) {
   }
 
   for (const btn of tabButtons) {
-    btn.addEventListener("click", () => showPanel(btn.dataset.panel));
+    btn.addEventListener("click", () => {
+      panelPickedByUser = true; // 以後は開くたびの自動選択より、この選択を優先する
+      showPanel(btn.dataset.panel);
+    });
   }
   setActiveTab();
 
@@ -392,6 +512,7 @@ export function createSidebar(editor, ctx) {
     refresh: scheduleOutlineRefresh,
     setFolder,
     setCurrentPath,
+    setCollapsibleOutline,
     openSearch: openSearchFlow,
     // main.jsのhandleHostMessageから"search-results"/"search-done"を渡す窓口。
     handleSearchResults: (hits) => globalSearch.handleResults(hits),
