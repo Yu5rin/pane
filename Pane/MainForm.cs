@@ -124,6 +124,9 @@ internal sealed class MainForm : Form
         _requestBroadcastSettings = requestBroadcastSettings;
         _requestOpenSettingsWindow = requestOpenSettingsWindow;
         Logger.Write($"MainForm生成: initialPath={initialPath ?? "(なし)"}, recoverFrom={(recoverFrom is null ? "なし" : recoverFrom.OriginalPath ?? "無題")}, droppedFile={droppedFile?.Name ?? "なし"}");
+        // カスタムCSSの参考サンプルを既定フォルダへ用意しておく(無ければ作るだけで、
+        // 既にあれば何もしない。ThemeFolderService.EnsureSampleCss参照)。
+        ThemeFolderService.EnsureSampleCss();
 
         Text = "Pane";
         Width = 960;
@@ -515,6 +518,19 @@ internal sealed class MainForm : Form
                 break;
             case "open-settings-file":
                 SettingsBridge.OpenSettingsFileInExplorer();
+                break;
+            case "open-log-folder":
+                // 設定画面「バージョン情報」カテゴリ: ログフォルダをエクスプローラーで開く。
+                SettingsBridge.OpenLogFolderInExplorer();
+                break;
+            case "open-today-log":
+                // 設定画面「バージョン情報」カテゴリ: 今日のログファイルを既定のアプリで開く。
+                SettingsBridge.OpenTodayLogFile();
+                break;
+            case "open-theme-folder":
+                // 設定画面「外観」「バージョン情報」カテゴリ: カスタムCSSのサンプルが
+                // 置いてあるフォルダ(ThemeFolderService.FolderPath)をエクスプローラーで開く。
+                SettingsBridge.OpenThemeFolderInExplorer();
                 break;
             case "reset-settings":
                 SettingsBridge.HandleResetSettingsRequest(PostToWeb, BroadcastOrRefreshSelf);
@@ -1512,6 +1528,7 @@ internal sealed class MainForm : Form
             editorFontSize = settings.EditorFontSize,
             editorLineHeight = settings.EditorLineHeight,
             editorMaxWidthPx = settings.EditorMaxWidthPx,
+            editorPaddingX = settings.EditorPaddingX,
             showWordCount = settings.ShowWordCount,
 
             // ---- キーボード ----

@@ -818,6 +818,15 @@ html[data-theme="dark"] .cm-table th { background: rgba(61,193,181,.14); }
 .adv-confirm-text { font-size: 12px; color: var(--ink); flex-basis: 100%; }
 .adv-action-msg { font-size: 12px; color: var(--accent); min-height: 1.4em; }
 
+/* バージョン情報カテゴリ: ラベル+値+操作ボタンの行、ライセンス一覧 */
+.settings-info-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; }
+.settings-info-label { color: var(--ink-sub); flex: 1 1 auto; min-width: 0; word-break: break-all; }
+.settings-license-list { display: flex; flex-direction: column; gap: 2px; }
+.settings-license-row { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; font-size: 12.5px; padding: 5px 0; border-bottom: 1px solid var(--rule); }
+.settings-license-row:last-child { border-bottom: none; }
+.settings-license-name { font-weight: 600; }
+.settings-license-type { color: var(--ink-sub); }
+
 /* ===== 外部サイトを開く前の確認ダイアログ(src/editor.js の confirmOpenExternal) =====
    誤クリックで既定のブラウザが勝手に開くのを防ぐ。見た目は既存のパレット/設定画面と
    揃える(--surface背景・--line枠・--shadow-pop)。色は既存のCSS変数のみを使う。 */
@@ -884,12 +893,13 @@ html[data-theme="dark"] .cm-table th { background: rgba(61,193,181,.14); }
 
 /* ===== 本文の余白・最大幅・行の高さ(仕様書 C-08) =====
    本文が左端にぴったり付いて読みにくかったため、左右に余白を入れる。
+   --editor-padding-x(設定 editorPaddingX、既定32px)がその余白の幅。
    --editor-max-width(設定 editorMaxWidthPx)を指定すると本文の幅を制限して中央寄せする。
    --editor-line-height(設定 editorLineHeight)は行の高さ。いずれも未設定なら既定のまま。
    CodeMirrorのテーマは .cm-scroller に line-height を当てるため、そちらも上書きする。 */
 #cm-host .cm-content {
-  padding-left: 32px !important;
-  padding-right: 32px !important;
+  padding-left: var(--editor-padding-x, 32px) !important;
+  padding-right: var(--editor-padding-x, 32px) !important;
   box-sizing: border-box;
   max-width: var(--editor-max-width, none);
   margin-left: auto;

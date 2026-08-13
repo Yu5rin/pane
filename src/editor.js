@@ -2,7 +2,7 @@
 // index.html から createEditor() で生成し、返り値のAPIで操作する。
 // 依存はすべてesbuildでビルド成果物(dist/)に同梱する。実行時に外部CDNへは一切到達しない。
 import { EditorView, keymap, Decoration, ViewPlugin, WidgetType, lineNumbers } from "@codemirror/view";
-import { EditorState, Compartment, StateEffect, StateField } from "@codemirror/state";
+import { EditorState, Compartment, StateEffect, StateField, Prec } from "@codemirror/state";
 import { markdown } from "@codemirror/lang-markdown";
 import { Strikethrough, Table, Superscript, Subscript, Emoji, Autolink } from "@lezer/markdown";
 import { defaultKeymap, history, historyKeymap, indentWithTab, insertNewline, undo, redo, moveLineUp, moveLineDown, copyLineDown, deleteLine, indentLess, indentSelection } from "@codemirror/commands";
@@ -70,10 +70,19 @@ const setExtToggles = StateEffect.define();
 // diagrams/codeBlockMath/codeAutoWrap/liveRenderingShowSourceOnFocus/whitespaceWhenWriting/
 // smartQuotes/smartDashes/recognizeUnicodePunctuationは、いずれもドキュメントを再構築せずに
 // 反映できるようこの同じStateField経由で扱う(既存のautoLinksと同じ流儀)。
+// headingStyle/unorderedListMarker/orderedListMarker/indentSizeOnSave/shiftTabAutoIndent/
+// autoPairMarkdown/copyWholeLineWhenNoSelection/typewriterKeepCaretCentered/whitespaceOnExport/
+// defaultCodeLanguage/defaultCodeLanguageApplyWhen/emojiAutocompleteも、この同じStateField経由で
+// 扱う(いずれも「メニューバーから記法を生成するときの形」や編集挙動の設定で、ドキュメントを
+// 再構築せず反映できるため)。
 const DEFAULT_EXT_TOGGLES = {
   callouts: true, superSub: true, highlight: true, inlineMath: false, mathAutoNumber: "off", autoLinks: true,
   diagrams: true, codeBlockMath: false, codeAutoWrap: true, liveRenderingShowSourceOnFocus: true,
   whitespaceWhenWriting: "preserve", smartQuotes: "off", smartDashes: "off", recognizeUnicodePunctuation: false,
+  headingStyle: "atx", unorderedListMarker: "-", orderedListMarker: ".", indentSizeOnSave: 4,
+  shiftTabAutoIndent: false, autoPairMarkdown: true, copyWholeLineWhenNoSelection: true,
+  typewriterKeepCaretCentered: true, whitespaceOnExport: "ignore", defaultCodeLanguage: "",
+  defaultCodeLanguageApplyWhen: "menubar", emojiAutocomplete: "auto",
 };
 const extTogglesField = StateField.define({
   create: () => DEFAULT_EXT_TOGGLES,
@@ -870,6 +879,37 @@ const livePreview = ViewPlugin.fromClass(class {
           const cl = state.doc.lineAt(r.head);
           return cl.number === line.number || (r.from !== r.to && r.from <= line.to && r.to >= line.from);
         });
+        if (toggles.recognizeUnicodePunctuation) {
+          // 全角の句読点をMarkdown記法として認識する(仕様書 recognizeUnicodePunctuation)。
+          // "》"を引用のマーカーとして扱う(単一階層のみ。入れ子の全角引用には対応しない、
+          // 通常の">"の多段引用[上のBlockquoteノード処理]とは別経路の簡易対応のため)。
+          const uq = line.text.match(/^( {0,3})》[ 　]?/);
+          if (uq && !quotedLines.has(line.number)) {
+            marks.push({ from: line.from, to: line.to, deco: Decoration.mark({ class: "tok-quote" }) });
+            if (!lineLive) marks.push({ from: line.from + uq[1].length, to: line.from + uq[0].length, deco: Decoration.replace({}) });
+          }
+          // 全角の"［］（）"を、リンク・画像の"[]()"として解釈する(直接記法のみ。
+          // 参照形式やリンクテキスト内のネストした強調等の再解析は行わない簡易対応)。
+          let fim; const fire = /(！?)［([^］\n]*)］（([^）\n]*)）/g;
+          while ((fim = fire.exec(line.text))) {
+            const isImage = fim[1] === "！";
+            const ff = line.from + fim.index, ft = ff + fim[0].length;
+            if (cursorInside(view, ff, ft)) continue;
+            if (isImage) {
+              const rawSrc = fim[3].trim();
+              if (!rawSrc) continue;
+              const resolvedSrc = resolveImageSrc(rawSrc, imgRootUrl);
+              marks.push({ from: ff, to: ft, deco: Decoration.replace({ widget: new ImageWidget(fim[2], rawSrc, resolvedSrc, ff) }) });
+            } else {
+              const href = fim[3].trim();
+              const textFrom = ff + fim[1].length + 1; // "！"(あれば)+"［"ぶん
+              const textTo = textFrom + fim[2].length;
+              marks.push({ from: ff, to: textFrom, deco: Decoration.replace({}) });
+              if (textTo < ft) marks.push({ from: textTo, to: ft, deco: Decoration.replace({}) });
+              marks.push({ from: textFrom, to: textTo, deco: Decoration.mark({ class: "tok-link", attributes: { "data-href": href } }) });
+            }
+          }
+        }
         const hd = line.text.match(/^( {0,3})(#{1,6})\s/);
         if (hd) { const lvl = hd[2].length; marks.push({ from: line.from, to: line.to, deco: Decoration.mark({ class: `tok-h${lvl}` }) }); if (!lineLive) marks.push({ from: line.from, to: line.from + hd[0].length, deco: Decoration.replace({}) }); }
         if (/^(\s*)(-{3,}|\*{3,}|_{3,})\s*$/.test(line.text)) {
@@ -994,7 +1034,10 @@ function handleEnter(view) {
   if (sel.from !== sel.to) return insertNewline(view);
   const line = state.doc.lineAt(sel.from);
   const before = line.text.slice(0, sel.from - line.from);
-  const m = before.match(/^(\s*)(- \[[ xX]\] |[-*+] |(\d+)\. )/);
+  // マーカー文字(-*+)・番号区切り(.か)のどちらも、実際にその文書で使われている形を
+  // そのまま継続する(設定のunorderedListMarker/orderedListMarkerは新規作成時のみに使い、
+  // 既存文書の継続はここでは設定に関わらずドキュメント側の実際の記法に合わせる)。
+  const m = before.match(/^(\s*)([-*+]\s\[[ xX]\]\s|[-*+]\s|\d+[.)]\s)/);
   if (!m) return insertNewline(view); // リストでなければ素の改行(インデントを引き継がない)
   const rest = before.slice(m[0].length);
   if (!rest.trim()) {
@@ -1004,8 +1047,10 @@ function handleEnter(view) {
   }
   // マーカーを継続(番号は+1、チェックは未チェックで)
   let marker = m[2];
-  if (m[3]) marker = m[1] + (parseInt(m[3], 10) + 1) + ". ";
-  else if (marker.startsWith("- [")) marker = m[1] + "- [ ] ";
+  const orderedMatch = marker.match(/^(\d+)([.)]\s)$/);
+  const checkMatch = marker.match(/^([-*+])\s\[[ xX]\]\s$/);
+  if (orderedMatch) marker = m[1] + (parseInt(orderedMatch[1], 10) + 1) + orderedMatch[2];
+  else if (checkMatch) marker = m[1] + checkMatch[1] + " [ ] ";
   else marker = m[1] + marker;
   view.dispatch({ changes: { from: sel.from, insert: "\n" + marker }, selection: { anchor: sel.from + 1 + marker.length } });
   return true;
@@ -1677,7 +1722,11 @@ function inCodeContext(state, pos) {
   const mathBlocks = state.field(mathBlocksField, false) ?? [];
   return mathBlocks.some((b) => pos >= b.from && pos <= b.to);
 }
-const smartTypingInputHandler = EditorView.inputHandler.of((view, from, to, text) => {
+// Prec.highest: 括弧・引用符の自動ペアリング(autoPairComp、closeBrackets())は"と'を
+// 特別扱いして自前で先取りしてしまうため、拡張の登録順(livePreviewCompはautoPairCompより
+// 後ろ)のままだとsmartQuotes="input"のときにこのハンドラへ"/'の入力が届かない。
+// 明示的に最優先度にして、closeBrackets()より先にこのハンドラへ入力を渡す。
+const smartTypingInputHandler = Prec.highest(EditorView.inputHandler.of((view, from, to, text) => {
   if (from !== to) return false; // 選択の置換は対象外(意図しない変換を避ける)
   const toggles = view.state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
   const wantsQuotes = toggles.smartQuotes === "input";
@@ -1709,6 +1758,67 @@ const smartTypingInputHandler = EditorView.inputHandler.of((view, from, to, text
     }
   }
   return false;
+}));
+
+// ---- Markdown記法の自動ペア(仕様書 autoPairMarkdown) ----
+// **/_/~~/==のような対称マーカーの自動ペア。既存のautoPairing(closeBrackets、括弧・引用符)とは
+// 完全に独立した仕組みにする(autoPairComp/closeBrackets()の対象ペアには含めず、ここで自前実装する)。
+// トグルはsmartTypingInputHandlerと同じくextTogglesField経由でその都度読む(Compartmentの
+// 着脱は使わない)ため、設定変更が次のキー入力から即座に反映される。
+const MD_PAIR_CHARS = { "*": "*", "_": "_", "~": "~", "=": "=" };
+const mdAutoPairInputHandler = EditorView.inputHandler.of((view, from, to, text) => {
+  const toggles = view.state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
+  if (toggles.autoPairMarkdown === false) return false;
+  if (!(text in MD_PAIR_CHARS)) return false;
+  if (inCodeContext(view.state, from)) return false; // コードブロック・インラインコード・数式内は対象外
+  if (from === to && (text === "*" || text === "_")) {
+    // 行頭(空白のみが前にある)での"*"/"_"は箇条書き記号や水平線("___"等)の書きかけの
+    // 可能性が高いため自動ペアの対象から外す(選択がある場合は行頭でも囲みたい場合が普通なので除外しない)。
+    const lineStart = view.state.doc.lineAt(from).from;
+    if (view.state.sliceDoc(lineStart, from).trim() === "") return false;
+  }
+  if (from !== to) {
+    // 選択範囲があれば、その前後をマーカーで囲む(closeBrackets()の選択時の挙動と同じ考え方)
+    view.dispatch({
+      changes: [{ from, insert: text }, { from: to, insert: text }],
+      selection: { anchor: from + text.length, head: to + text.length },
+      userEvent: "input.type",
+    });
+    return true;
+  }
+  const after = view.state.sliceDoc(to, to + text.length);
+  if (after === text) {
+    // カーソルの直後に既に同じ閉じマーカーがある → 追加せずその上を乗り越えるだけ(closeBrackets同様)
+    view.dispatch({ selection: { anchor: to + text.length }, userEvent: "input.type" });
+    return true;
+  }
+  view.dispatch({
+    changes: { from, to, insert: text + MD_PAIR_CHARS[text] },
+    selection: { anchor: from + text.length },
+    userEvent: "input.type",
+  });
+  return true;
+});
+
+// ---- 既定のコード言語(仕様書 defaultCodeLanguage・defaultCodeLanguageApplyWhen="markdown"|"both") ----
+// 空行で"```"だけを入力し終えた瞬間(3つ目のバッククォートを打った時点)、行頭からの入力かつ
+// 直後に他の文字が無ければ、既定言語を自動で付け足す。メニューバーからの挿入(P-06相当、
+// "menubar"|"both")はapplyMdActionの"codeblock"ケース側で別途扱う。
+const defaultCodeLangInputHandler = EditorView.inputHandler.of((view, from, to, text) => {
+  if (text !== "`" || from !== to) return false;
+  const toggles = view.state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
+  const lang = toggles.defaultCodeLanguage;
+  if (!lang) return false;
+  if (toggles.defaultCodeLanguageApplyWhen !== "markdown" && toggles.defaultCodeLanguageApplyWhen !== "both") return false;
+  const line = view.state.doc.lineAt(from);
+  if (from !== line.to) return false; // 行の途中への挿入は対象外
+  if (line.text.slice(0, from - line.from) !== "``") return false; // ちょうど3つ目の"`"のときだけ
+  view.dispatch({
+    changes: { from, to, insert: "`" + lang },
+    selection: { anchor: from + 1 + lang.length },
+    userEvent: "input.type",
+  });
+  return true;
 });
 
 const markdownLanguageExt = () => markdown({ extensions: [Strikethrough, Table, Superscript, Subscript, Emoji, Autolink], codeLanguages });
@@ -1721,12 +1831,41 @@ const livePreviewExt = () => [
   htmlBlocksField, htmlBlockDecoField, // ブロックHTML(M-27〜M-31)
   softBreaksField, softBreakDecoField, // 仕様書 whitespaceWhenWriting="ignore"
   smartTypingInputHandler, // 仕様書 smartQuotes="input"・smartDashes
+  mdAutoPairInputHandler, // 仕様書 autoPairMarkdown
+  defaultCodeLangInputHandler, // 仕様書 defaultCodeLanguage・defaultCodeLanguageApplyWhen="markdown"
 ];
 
 // コードモード限定の拡張(仕様書 決定済み事項: 行番号・括弧の対応表示まで。
 // インデントガイドは視認性を損なうため搭載しない。矩形選択・コード補完・LSP連携・
 // エラー診断も搭載しない)。
 const codeModeExtras = () => [lineNumbers(), bracketMatching()];
+
+// 選択が無いときのコピー・切り取り(仕様書 copyWholeLineWhenNoSelection、既定true)。
+// カーソル行(末尾の改行含む。最終行など次行が無ければ改行なし)を対象にする。
+// 選択がある場合は何もせず(既定のコピー/切り取りに委ねるためfalseを返す)、この機能の
+// 対象外(defaultCopyFormat="html"のデュアルコピー等)にも影響しない。
+function wholeLineClipboardHandler(view, e, isCut) {
+  const toggles = view.state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
+  const sel = view.state.selection.main;
+  if (sel.from !== sel.to) return false; // 選択があれば通常のコピー/切り取りに任せる
+  if (toggles.copyWholeLineWhenNoSelection === false) {
+    // CodeMirror自身が既定で持つ「選択が無ければ現在行を対象にする」コピー/切り取りの
+    // 挙動を打ち消す(stopImmediatePropagationで、同じイベントに対する他のハンドラ
+    // ―CodeMirror本体の既定処理―の実行自体を止める。preventDefaultだけでは
+    // 別のリスナーの実行は止まらないため)。何もクリップボードへ書き込まない。
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    return true;
+  }
+  const line = view.state.doc.lineAt(sel.head);
+  const to = Math.min(view.state.doc.length, line.to + 1); // 次行があればその改行まで含める
+  const text = view.state.sliceDoc(line.from, to);
+  e.clipboardData?.setData("text/plain", text);
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  if (isCut) view.dispatch({ changes: { from: line.from, to }, selection: { anchor: line.from } });
+  return true;
+}
 
 // 本文のフォントサイズ(px)。Ctrl+マウスホイールでMIN〜MAXの範囲を1pxずつ変更する。
 export const DEFAULT_FONT_SIZE = 15;
@@ -1745,6 +1884,11 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
   const wrapComp = new Compartment();
   // 自動ペアリング(仕様書 第2.10節 C-05)のON/OFF。既定はON。
   const autoPairComp = new Compartment();
+  // コードブロックのインデント幅(仕様書 codeIndentSize)。CodeMirror標準のindentUnitを
+  // Compartmentで切り替える。既定は4スペース。
+  const codeIndentComp = new Compartment();
+  // スペルチェック(仕様書 spellCheckEnabled)。.cm-contentのspellcheck属性を切り替える。既定OFF。
+  const spellCheckComp = new Compartment();
   // フォーカスモード(V-06)・タイプライターモード(V-07)のON/OFF。
   const focusModeComp = new Compartment();
   const typewriterComp = new Compartment();
@@ -1774,7 +1918,11 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
     if (!u.docChanged && !u.selectionSet) return;
     applyingTypewriterScroll = true;
     try {
-      u.view.dispatch({ effects: EditorView.scrollIntoView(u.state.selection.main.head, { y: "center" }) });
+      // 仕様書 typewriterKeepCaretCentered: falseなら常に中央固定はせず、画面内に収まる
+      // 範囲でのみスクロールする("nearest": 既に見えていれば動かない)。
+      const toggles = u.state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
+      const y = toggles.typewriterKeepCaretCentered === false ? "nearest" : "center";
+      u.view.dispatch({ effects: EditorView.scrollIntoView(u.state.selection.main.head, { y }) });
     } finally {
       applyingTypewriterScroll = false;
     }
@@ -1833,6 +1981,16 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
           // IME変換中の確定Enterで誤発火しないよう、view.composingがtrueの間は既定動作に委ねる(falseを返す)。
           { key: "Shift-Enter", run: (v) => (v.composing ? false : insertSoftBreak(v)) },
           { key: "Enter", run: handleEnter },
+          // 仕様書 shiftTabAutoIndent: falseならShift+Tabはアウトデント(indentLess、既定の
+          // indentWithTabと同じ挙動)、trueなら自動インデント(indentSelection)にする。
+          // indentWithTab自体もshift:indentLessでShift-Tabを扱うため、それより先に評価される
+          // よう配列の前に置く(先勝ちで、この設定を反映したこのエントリが優先される)。
+          {
+            key: "Shift-Tab", run: (v) => {
+              const auto = (v.state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES).shiftTabAutoIndent;
+              return auto ? indentSelection(v) : indentLess(v);
+            },
+          },
           indentWithTab,
           // closeBrackets()の閉じ括弧削除(Backspaceで対の括弧をまとめて消す)は、
           // defaultKeymapの素のBackspaceより先に評価されるようindentWithTabの直後・
@@ -1849,6 +2007,10 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
         // 記法文字(*_~`)まで自動ペアリングするとやりすぎで邪魔になりうるため、あえて追加しない
         // (判断に迷う点であり、追加するかどうかは仕様確定後の判断に委ねる)。
         autoPairComp.of(autoPairingOn ? closeBrackets() : []),
+        // コードブロックのインデント幅(仕様書 codeIndentSize)。既定4スペース。
+        codeIndentComp.of(indentUnit.of("    ")),
+        // スペルチェック(仕様書 spellCheckEnabled)。既定OFF。
+        spellCheckComp.of(EditorView.contentAttributes.of({ spellcheck: "false" })),
         livePreviewComp.of(livePreviewExt()),
         codeModeExtrasComp.of([]),
         focusModeComp.of([]),
@@ -1871,7 +2033,17 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
           paste: (e) => { if (onPaste && onPaste(e)) { e.preventDefault(); return true; } return false; },
           // 既定のコピー形式(仕様書 第2.9.3節、設定で切替可能): 有効な場合はHTMLも併せて
           // クリップボードへ書き込む。CMの既定コピー処理より先に評価する。
-          copy: (e) => { if (onCopy && onCopy(e)) { e.preventDefault(); return true; } return false; },
+          // 選択が無いときのコピー(仕様書 copyWholeLineWhenNoSelection、既定true)はカーソル行
+          // 全体を対象にする。既定のコピーは選択が無ければ何もコピーしないため、これより先に
+          // 判定する必要がある。
+          copy: (e) => {
+            if (wholeLineClipboardHandler(view, e, false)) return true;
+            if (onCopy && onCopy(e)) { e.preventDefault(); return true; }
+            return false;
+          },
+          // 選択が無いときの切り取り(仕様書 copyWholeLineWhenNoSelection)。行全体をクリップボードへ
+          // コピーしたうえで、その行(末尾の改行含む)をドキュメントから削除する。
+          cut: (e) => wholeLineClipboardHandler(view, e, true),
           // リンク装飾のタップでリンク先を開く(mousedownで先取りしてカーソル移動を抑止)。
           // 内部アンカー(#見出し)はCtrl/Cmd+クリック時のみジャンプする(仕様書 M-15)。
           mousedown: (e) => {
@@ -1984,6 +2156,16 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
       view.dispatch({ effects: autoPairComp.reconfigure(autoPairingOn ? closeBrackets() : []) });
     },
     isAutoPairing: () => autoPairingOn,
+    // コードブロックのインデント幅(仕様書 codeIndentSize)。2/4/8以外の値は既定4にフォールバックする。
+    setCodeIndentSize: (n) => {
+      const size = [2, 4, 8].includes(n) ? n : 4;
+      view.dispatch({ effects: codeIndentComp.reconfigure(indentUnit.of(" ".repeat(size))) });
+    },
+    // スペルチェック(仕様書 spellCheckEnabled)。.cm-contentのspellcheck属性を切り替える。
+    // spellCheckAutoCorrect(自動修正)はWebView2側の機能でJSからは制御できないため未実装。
+    setSpellCheck: (on) => {
+      view.dispatch({ effects: spellCheckComp.reconfigure(EditorView.contentAttributes.of({ spellcheck: on ? "true" : "false" })) });
+    },
     // 自動リンク(仕様書 M-17)のON/OFF。既定はON。C#設定画面のautoLinksEnabledから
     // apply-settings経由で呼ばれる想定(main.js側の配線は別途行う)。既存のマークダウン記法
     // 拡張トグル(extTogglesField/setExtensionToggles)の仕組みにそのまま乗せる。
@@ -2009,7 +2191,11 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
     setTypewriterMode: (on) => {
       typewriterOn = !!on;
       view.dispatch({ effects: typewriterComp.reconfigure(typewriterOn ? [typewriterListener] : []) });
-      if (typewriterOn) view.dispatch({ effects: EditorView.scrollIntoView(view.state.selection.main.head, { y: "center" }) });
+      if (typewriterOn) {
+        const toggles = view.state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
+        const y = toggles.typewriterKeepCaretCentered === false ? "nearest" : "center";
+        view.dispatch({ effects: EditorView.scrollIntoView(view.state.selection.main.head, { y }) });
+      }
     },
     isTypewriterMode: () => typewriterOn,
     // 指定行へジャンプ(仕様書 N-04)
@@ -2062,13 +2248,19 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
       return sel.from === sel.to ? view.state.doc.toString() : view.state.sliceDoc(sel.from, sel.to);
     },
     // HTMLとしてコピー(仕様書 E-05)。選択があれば選択範囲、無ければ全文をHTML化する。
+    // whitespaceOnExport(仕様書、既定"ignore")が"preserve"のときは段落内の単独改行を<br>として
+    // 書き出す(エクスポート・印刷・HTMLコピーいずれも同じ設定を使う)。
     getHtmlForClipboard: () => {
       const sel = view.state.selection.main;
       const range = sel.from === sel.to ? { from: 0, to: view.state.doc.length } : { from: sel.from, to: sel.to };
-      return renderMarkdownToHtml(view.state, range);
+      const toggles = view.state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
+      return renderMarkdownToHtml(view.state, range, { preserveWhitespace: toggles.whitespaceOnExport === "preserve" });
     },
     // HTMLエクスポート(仕様書 File項目「エクスポート: HTML」)。文書全体を対象にする。
-    getStandaloneHtml: (title, styled) => renderStandaloneHtml(view.state, title, EXPORT_CSS, styled),
+    getStandaloneHtml: (title, styled) => {
+      const toggles = view.state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
+      return renderStandaloneHtml(view.state, title, EXPORT_CSS, styled, { preserveWhitespace: toggles.whitespaceOnExport === "preserve" });
+    },
     // カーソル位置の行に記法を挿入(ツールバー用)
     applyAction: (action, payload) => applyMdAction(view, action, payload),
     // 選択範囲をテキストで置き換える(プレーンテキスト貼り付け・スマートペースト用)
@@ -2160,14 +2352,37 @@ function shiftHeadingLevel(view, delta) {
   view.focus();
 }
 // リスト種別の相互変換(仕様書 P-13)。target: "bullet" | "ordered" | "check"
+// 新しく付け直すマーカーは設定(unorderedListMarker/orderedListMarker)に従う。
 function convertListType(view, target) {
   const { state } = view;
+  const toggles = state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
+  const uMarker = toggles.unorderedListMarker || "-";
+  const oSep = toggles.orderedListMarker || ".";
   const line = state.doc.lineAt(state.selection.main.from);
-  const m = line.text.match(/^(\s*)(?:[-*+]\s+\[[ xX]\]\s?|[-*+]\s|\d+\.\s)/);
+  const m = line.text.match(/^(\s*)(?:[-*+]\s+\[[ xX]\]\s?|[-*+]\s|\d+[.)]\s)/);
   if (!m) return;
   const indent = m[1];
-  const marker = target === "bullet" ? indent + "- " : target === "ordered" ? indent + "1. " : indent + "- [ ] ";
+  const marker = target === "bullet" ? indent + uMarker + " " : target === "ordered" ? indent + "1" + oSep + " " : indent + uMarker + " [ ] ";
   view.dispatch({ changes: { from: line.from, to: line.from + m[0].length, insert: marker } });
+  view.focus();
+}
+// Setext形式の見出し(仕様書 headingStyle="setext")。レベル1・2のみ表現できるため、
+// h1/h2のツールバー操作でのみ使う(h3以降は常にatx、呼び出し元のapplyMdActionで分岐済み)。
+// 既に同じレベルの下線が付いていればトグルで解除する。
+function applySetextHeading(view, level) {
+  const { state } = view;
+  const line = state.doc.lineAt(state.selection.main.from);
+  const text = line.text.replace(/^ {0,3}#{1,6}\s+/, "");
+  const underlineChar = level === 1 ? "=" : "-";
+  const nextLine = line.number < state.doc.lines ? state.doc.line(line.number + 1) : null;
+  const nextTrim = nextLine ? nextLine.text.trim() : "";
+  const alreadyUnderlined = nextTrim !== "" && [...nextTrim].every((c) => c === underlineChar);
+  if (alreadyUnderlined) {
+    view.dispatch({ changes: { from: line.from, to: nextLine.to, insert: text } });
+  } else {
+    const underline = underlineChar.repeat(Math.max(3, [...text].length));
+    view.dispatch({ changes: { from: line.from, to: line.to, insert: `${text}\n${underline}` } });
+  }
   view.focus();
 }
 // 表の行を削除(仕様書 Edit系)。ヘッダー・区切り行では何もしない。
@@ -2206,11 +2421,14 @@ function applyMdAction(view, action, payload) {
   const s = sel.from, e = sel.to;
   const selText = state.sliceDoc(s, e);
   const line = state.doc.lineAt(s);
+  // メニューバーからの記法生成(仕様書「記法の書き方」節)。見出しの記法(setext/atx)は
+  // 呼び出し元(h1/h2ケース)で個別に分岐するため、ここではリスト記号・番号の区切りのみを扱う。
+  const toggles = state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
   const linePrefix = (p) => {
     // 既存の同種プレフィックスがあればトグル、無ければ付与。浅いインデント(3個まで)の後ろで判定する
     const ind = line.text.match(/^ {0,3}/)[0].length;
     const base = line.from + ind;
-    const cur = line.text.slice(ind).match(/^(#{1,6}\s|[-*+]\s\[[ xX]\]\s|[-*+]\s|\d+\.\s|>\s)/);
+    const cur = line.text.slice(ind).match(/^(#{1,6}\s|[-*+]\s\[[ xX]\]\s|[-*+]\s|\d+[.)]\s|>\s)/);
     if (cur && cur[0] === p) {
       view.dispatch({ changes: { from: base, to: base + p.length }, selection: { anchor: Math.max(base, s - p.length) } });
     } else if (cur) {
@@ -2265,8 +2483,10 @@ function applyMdAction(view, action, payload) {
       break; // 仕様書 R-07
     }
     case "h": linePrefix("## "); break;
-    case "h1": linePrefix("# "); break;
-    case "h2": linePrefix("## "); break;
+    // headingStyle="setext"はレベル1・2のみ表現できる記法のため、そのときだけh1/h2を
+    // Setext形式(下線)にする。レベル3以上は常にatx(仕様書の指示どおり)。
+    case "h1": toggles.headingStyle === "setext" ? applySetextHeading(view, 1) : linePrefix("# "); break;
+    case "h2": toggles.headingStyle === "setext" ? applySetextHeading(view, 2) : linePrefix("## "); break;
     case "h3": linePrefix("### "); break;
     case "h4": linePrefix("#### "); break;
     case "h5": linePrefix("##### "); break;
@@ -2276,12 +2496,20 @@ function applyMdAction(view, action, payload) {
     case "moveDown": moveLineDown(view); break;
     case "dupLine": copyLineDown(view); break;
     case "delLine": deleteLine(view); break;
-    case "list": linePrefix("- "); break;
-    case "olist": linePrefix("1. "); break;
-    case "check": linePrefix("- [ ] "); break;
+    // 箇条書き・番号付きリストの記号は設定(unorderedListMarker/orderedListMarker)に従う。
+    case "list": linePrefix(`${toggles.unorderedListMarker || "-"} `); break;
+    case "olist": linePrefix(`1${toggles.orderedListMarker || "."} `); break;
+    case "check": linePrefix(`${toggles.unorderedListMarker || "-"} [ ] `); break;
     case "quote": linePrefix("> "); break;
     case "link": { const label = selText || "リンク"; insert(`[${label}](https://)`, label.length + 11); break; } // カーソルはhttps://の直後
-    case "codeblock": insert("```\n" + selText + "\n```", 4); break;
+    case "codeblock": {
+      // 仕様書 defaultCodeLanguage・defaultCodeLanguageApplyWhen="menubar"|"both":
+      // メニューバー(ツールバー)からの挿入時のみ、ここで既定言語を付与する。
+      const applyWhen = toggles.defaultCodeLanguageApplyWhen;
+      const lang = (applyWhen === "menubar" || applyWhen === "both") ? (toggles.defaultCodeLanguage || "") : "";
+      insert("```" + lang + "\n" + selText + "\n```", 4 + lang.length);
+      break;
+    }
     case "hr": {
       const atLineStart = s === line.from;       // 行の先頭にカーソルがあるか
       if (atLineStart) insert("---\n");          // 行頭なら前の改行は不要、後ろだけ
@@ -2293,8 +2521,18 @@ function applyMdAction(view, action, payload) {
     case "time": { const d = new Date(); insert(`${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`); break; }
     case "undo": undo(view); break;
     case "redo": redo(view); break;
-    case "indent": { const ls = line.text.match(/^\s*/)[0]; view.dispatch({ changes: { from: line.from, insert: "  " } }); break; }
-    case "outdent": { const m = line.text.match(/^( {1,2}|\t)/); if (m) view.dispatch({ changes: { from: line.from, to: line.from + m[0].length } }); break; }
+    // 引用・リストのインデント幅(仕様書 indentSizeOnSave、既定4)。2/4/8以外の値は既定4にフォールバックする。
+    case "indent": {
+      const n = [2, 4, 8].includes(toggles.indentSizeOnSave) ? toggles.indentSizeOnSave : 4;
+      view.dispatch({ changes: { from: line.from, insert: " ".repeat(n) } });
+      break;
+    }
+    case "outdent": {
+      const n = [2, 4, 8].includes(toggles.indentSizeOnSave) ? toggles.indentSizeOnSave : 4;
+      const m = line.text.match(new RegExp(`^( {1,${n}}|\\t)`));
+      if (m) view.dispatch({ changes: { from: line.from, to: line.from + m[0].length } });
+      break;
+    }
 
   }
   view.focus();

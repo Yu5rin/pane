@@ -15,6 +15,7 @@ import { resolveFileMode, codeLanguages } from "./languages.js";
 import { FILE_TYPES } from "./file-types.js";
 import { detectContentMode } from "./detect-mode.js";
 import { setReadingSpeedWpm } from "./text-stats.js";
+import { setOutlineMaxLevel } from "./markdown-extras.js";
 
 const host = document.getElementById("cm-host");
 const statusbarEl = document.getElementById("statusbar");
@@ -885,11 +886,52 @@ async function handleHostMessage(msg) {
       // Pandoc導入状況・既定コピー形式。起動時と設定変更時、最近使ったファイル更新時に届く。
       editor.setExtensionToggles({
         callouts: msg.calloutsEnabled,
-        superSub: msg.superSubEnabled,
+        // 既存コードはmsg.superSubEnabledという存在しないキーを参照しており、C#側が実際に
+        // 送るキー名(superSubscriptEnabled)と食い違っていたため、上付き・下付きの設定が
+        // 常にundefinedになり反映されていなかった(このバグを機に修正する)。
+        superSub: msg.superSubscriptEnabled,
         highlight: msg.highlightEnabled,
         inlineMath: msg.inlineMathEnabled,
-        mathAutoNumber: msg.mathAutoNumberEnabled,
+        mathAutoNumber: msg.mathAutoNumber,
+        // 記法サポートのON/OFF(仕様書「記法サポート」節)。diagrams/codeBlockMath/autoLinksは
+        // いずれもextTogglesField経由でライブプレビュー側の描画を切り替える。
+        diagrams: msg.diagramsEnabled,
+        codeBlockMath: msg.codeBlockMathEnabled,
+        autoLinks: msg.autoLinksEnabled,
+        // 編集の挙動(仕様書「編集」節)。
+        codeAutoWrap: msg.codeAutoWrap,
+        liveRenderingShowSourceOnFocus: msg.liveRenderingShowSourceOnFocus,
+        emojiAutocomplete: msg.emojiAutocomplete,
+        copyWholeLineWhenNoSelection: msg.copyWholeLineWhenNoSelection,
+        typewriterKeepCaretCentered: msg.typewriterKeepCaretCentered,
+        shiftTabAutoIndent: msg.shiftTabAutoIndent,
+        autoPairMarkdown: msg.autoPairMarkdown,
+        // 記法の書き方(メニューバーから作るときの形。仕様書「記法の書き方」節)。
+        headingStyle: msg.headingStyle,
+        unorderedListMarker: msg.unorderedListMarker,
+        orderedListMarker: msg.orderedListMarker,
+        indentSizeOnSave: msg.indentSizeOnSave,
+        defaultCodeLanguage: msg.defaultCodeLanguage,
+        defaultCodeLanguageApplyWhen: msg.defaultCodeLanguageApplyWhen,
+        // 空白と改行・スマート置換(仕様書「空白と改行」「スマート置換」節)。
+        whitespaceWhenWriting: msg.whitespaceWhenWriting,
+        whitespaceOnExport: msg.whitespaceOnExport,
+        smartQuotes: msg.smartQuotes,
+        smartDashes: msg.smartDashes,
+        recognizeUnicodePunctuation: msg.recognizeUnicodePunctuation,
       });
+      // コードブロックのインデント幅(仕様書 codeIndentSize)。CodeMirrorのindentUnitを切り替える。
+      editor.setCodeIndentSize(msg.codeIndentSize);
+      // 自動ペアリング(仕様書 第2.10節 C-05、括弧・引用符)。setAutoPairing自体は既に実装済みだが
+      // ここからの配線が抜けていたため、他の設定と同じ流儀で追加する。
+      editor.setAutoPairing(msg.autoPairing !== false);
+      // スペルチェック(仕様書 spellCheckEnabled)。.cm-contentのspellcheck属性を切り替える。
+      // spellCheckAutoCorrect(自動修正)はWebView2側の機能でJSからは制御できないため未実装。
+      editor.setSpellCheck(!!msg.spellCheckEnabled);
+      // アウトラインに出す見出しの最大レベル(仕様書 chapterLevelInOutline、既定6)。
+      // sidebar.jsは編集不可のため、共有の既定値(markdown-extras.jsのoutlineMaxLevel)を
+      // ここで更新することでアウトライン・[toc]記法双方の絞り込みに反映させる。
+      setOutlineMaxLevel(msg.chapterLevelInOutline ?? 6);
       defaultCopyFormat = msg.defaultCopyFormat ?? "markdown";
       pandocAvailable = !!msg.pandocAvailable;
       recentFiles = msg.recentFiles ?? [];
@@ -934,6 +976,11 @@ async function handleHostMessage(msg) {
       const lineHeight = Number(msg.editorLineHeight);
       if (Number.isFinite(lineHeight) && lineHeight > 0) rootStyle.setProperty("--editor-line-height", String(lineHeight));
       else rootStyle.removeProperty("--editor-line-height");
+      // 本文の左右余白(仕様書 editorPaddingX、既定32)。style.css側が
+      // var(--editor-padding-x, 32px) を参照する想定。0以下や未指定なら変数を消してCSS既定に戻す。
+      const paddingX = Number(msg.editorPaddingX);
+      if (Number.isFinite(paddingX) && paddingX > 0) rootStyle.setProperty("--editor-padding-x", `${paddingX}px`);
+      else rootStyle.removeProperty("--editor-padding-x");
       // カスタムCSS(仕様書 第2.10節 C-07)。C#側がファイル内容を読み込んで文字列として送ってくる
       // (file://は仮想ホスト配下から読めないため)。<head>内の専用<style>要素のtextContentへ
       // 反映する(innerHTMLは使わない)。要素が無ければここで生成する。
