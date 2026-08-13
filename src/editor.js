@@ -6,7 +6,22 @@ import { EditorState, Compartment, StateEffect, StateField } from "@codemirror/s
 import { markdown } from "@codemirror/lang-markdown";
 import { Strikethrough, Table } from "@lezer/markdown";
 import { defaultKeymap, history, historyKeymap, indentWithTab, insertNewline, undo, redo, moveLineUp, moveLineDown, copyLineDown, deleteLine } from "@codemirror/commands";
-import { syntaxTree } from "@codemirror/language";
+import { syntaxTree, syntaxHighlighting, HighlightStyle, LanguageDescription } from "@codemirror/language";
+import { tags as t } from "@lezer/highlight";
+import { codeLanguages, resolveFileMode } from "./languages.js";
+
+// コードのハイライト配色(仕様書 第5章・第10.2節)。色は単独で決め打ちせず、
+// style.cssで定義した--code-*トークン(--ink/--ink-mute/--accentから派生)を参照する。
+const codeHighlightStyle = HighlightStyle.define([
+  { tag: [t.keyword, t.controlKeyword, t.moduleKeyword], color: "var(--code-kw)", fontWeight: "600" },
+  { tag: [t.atom, t.bool, t.self], color: "var(--code-kw)" },
+  { tag: [t.string, t.special(t.string)], color: "var(--code-str)" },
+  { tag: t.comment, color: "var(--code-cmt)", fontStyle: "italic" },
+  { tag: [t.number, t.integer, t.float], color: "var(--code-num)" },
+  { tag: [t.function(t.variableName), t.definition(t.variableName)], color: "var(--code-fn)" },
+  { tag: [t.typeName, t.className], color: "var(--code-type)" },
+  { tag: [t.operator, t.punctuation, t.meta], color: "var(--code-op)" },
+]);
 
 // カーソル/選択がこの範囲に触れているか。フォーカスがなければ常に装飾。
 function cursorInside(view, from, to) {
@@ -501,9 +516,17 @@ const searchHighlight = EditorView.decorations.compute([searchTermsField, "doc",
   }), true);
 });
 
+// Markdown文書(ライブプレビュー一式)の拡張子集合。docModeComp/livePreviewCompの既定値。
+const markdownLanguageExt = () => markdown({ extensions: [Strikethrough, Table], codeLanguages });
+const livePreviewExt = () => [livePreview, focusField, focusNotifier, tableField, tableAutoFormat];
+
 export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionChange, onRender, onKeydown } = {}) {
   const editable = new Compartment();
   const themeComp = new Compartment();
+  // ファイル種別ごとの編集モード切り替え(仕様書 第1章: markdown / code / plain)。
+  // コード/プレーンテキストのファイルではMarkdownの言語解析とライブプレビュー装飾を外す。
+  const docModeComp = new Compartment();
+  const livePreviewComp = new Compartment();
   let composing = false;
   const makeTheme = () => {
     const cs = getComputedStyle(document.documentElement);
@@ -531,12 +554,12 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
           ...defaultKeymap.filter(k => k.key !== "Enter"),
           ...historyKeymap,
         ]),
-        markdown({ extensions: [Strikethrough, Table] }),
+        docModeComp.of(markdownLanguageExt()),
+        syntaxHighlighting(codeHighlightStyle),
         EditorView.lineWrapping,
-        livePreview,
+        livePreviewComp.of(livePreviewExt()),
         editable.of(EditorView.editable.of(true)),
         searchTermsField, searchHighlight,
-        focusField, focusNotifier, tableField, tableAutoFormat,
         EditorView.updateListener.of((u) => {
           if (u.docChanged && onChange) onChange(view.state.doc.toString());
           if (u.focusChanged) { (view.hasFocus ? onFocus : onBlur)?.(); }
@@ -586,6 +609,41 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
                       effects: EditorView.scrollIntoView(target[0], { y: "center" }) });
     },
     setEditable: (on) => view.dispatch({ effects: editable.reconfigure(EditorView.editable.of(on)) }),
+    // ファイルを開いた際に拡張子から編集モードを切り替える(仕様書 第1章)。
+    // markdown: 従来どおりライブプレビュー一式。code: 該当言語を動的ロードして
+    // シンタックスハイライトのみ適用(ライブプレビュー装飾は外す)。plain: 装飾なし。
+    setFileMode: async (filename) => {
+      const mode = resolveFileMode(filename);
+      if (mode === "markdown") {
+        view.dispatch({
+          effects: [
+            docModeComp.reconfigure(markdownLanguageExt()),
+            livePreviewComp.reconfigure(livePreviewExt()),
+          ],
+        });
+        return;
+      }
+      if (mode === "code") {
+        const desc = LanguageDescription.matchFilename(codeLanguages, filename);
+        let support = null;
+        try {
+          support = desc ? await desc.load() : null;
+        } catch {
+          support = null; // 未対応/ロード失敗時はプレーン表示にフォールバックする
+        }
+        view.dispatch({
+          effects: [
+            docModeComp.reconfigure(support ? [support] : []),
+            livePreviewComp.reconfigure([]),
+          ],
+        });
+        return;
+      }
+      // plain
+      view.dispatch({
+        effects: [docModeComp.reconfigure([]), livePreviewComp.reconfigure([])],
+      });
+    },
     // カーソル位置の行に記法を挿入(ツールバー用)
     applyAction: (action) => applyMdAction(view, action),
     refreshTheme: () => view.dispatch({ effects: themeComp.reconfigure(makeTheme()) }),

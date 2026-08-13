@@ -56,9 +56,10 @@ function setReadOnly(readOnly) {
   titlebar.classList.toggle("readonly", !!readOnly);
 }
 
-function handleHostMessage(msg) {
+async function handleHostMessage(msg) {
   switch (msg?.type) {
     case "file-opened":
+      await editor.setFileMode(msg.fileName); // 拡張子から編集モードを切替(仕様書 第1章)
       editor.setValue(msg.text);
       setName(msg.fileName);
       currentEncoding = msg.encoding;
@@ -69,6 +70,7 @@ function handleHostMessage(msg) {
       updateStatusMeta();
       break;
     case "new-document":
+      await editor.setFileMode(null); // 無題の新規文書は既定でMarkdownモード
       editor.setValue("");
       setName("無題");
       currentEncoding = null;
@@ -112,6 +114,7 @@ async function openFile() {
     }
     const [handle] = handles;
     const file = await handle.getFile();
+    await editor.setFileMode(file.name);
     editor.setValue(await file.text());
     currentHandle = handle;
     setName(file.name);
@@ -125,6 +128,7 @@ async function openFile() {
 fileInput.addEventListener("change", async () => {
   const file = fileInput.files[0];
   if (!file) return;
+  await editor.setFileMode(file.name);
   editor.setValue(await file.text());
   currentHandle = null;
   setName(file.name);
