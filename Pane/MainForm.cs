@@ -85,6 +85,7 @@ internal sealed class MainForm : Form
         DragEnter += OnDragEnter;
         DragOver += OnDragEnter;
         DragDrop += OnDragDrop;
+        DragLeave += OnDragLeave;
 
         _webView.Dock = DockStyle.Fill;
         // WebView2はDock=Fillでクライアント領域全体を覆うため、実際のドラッグ&ドロップ通知は
@@ -99,6 +100,7 @@ internal sealed class MainForm : Form
         _webView.DragEnter += OnDragEnter;
         _webView.DragOver += OnDragEnter;
         _webView.DragDrop += OnDragDrop;
+        _webView.DragLeave += OnDragLeave;
         Controls.Add(_webView);
 
         // 起動直後・ウィンドウ切替後の初回キー入力がWebView2内のコンテンツへ届かない
@@ -285,6 +287,9 @@ internal sealed class MainForm : Form
             case "insert-image":
                 HandleInsertImageRequest(root);
                 break;
+            case "open-dropped-file":
+                _ = HandleOpenDroppedFileAsync(root);
+                break;
             case "log":
                 // JS側の不具合調査ログ(main.jsのlogToHost)をC#側と同じログファイルへ集約する。
                 string level = root.TryGetProperty("level", out JsonElement levelProp) ? levelProp.GetString() ?? "log" : "log";
@@ -449,6 +454,48 @@ internal sealed class MainForm : Form
         }
     }
 
+    /// <summary>
+    /// WebView2の本文エリア(Webページ側)へドラッグ&ドロップされたファイルを開く。
+    /// 標準のDOM File APIでは実パスが分からないため、JS側でバイト列化して送ってもらい、
+    /// ここで通常のOpenFile(path)と同じエンコーディング判定にかける。パスが無いため
+    /// 外部変更監視・上書き保存はできず、保存時は名前を付けて保存になる(仕様書外の代替経路)。
+    /// </summary>
+    private async Task HandleOpenDroppedFileAsync(JsonElement message)
+    {
+        if (!await ConfirmDiscardDirtyAsync()) return;
+
+        string name = message.TryGetProperty("name", out JsonElement nameProp) ? nameProp.GetString() ?? "無題" : "無題";
+        string dataBase64 = message.TryGetProperty("dataBase64", out JsonElement dataProp) ? dataProp.GetString() ?? "" : "";
+        Logger.Write($"HandleOpenDroppedFileAsync: name={name}");
+        try
+        {
+            byte[] bytes = Convert.FromBase64String(dataBase64);
+            LoadResult result = TextFileService.LoadBytes(bytes);
+            _currentPath = null;
+            _currentEncoding = result.Encoding;
+            _currentLineEnding = result.LineEnding;
+            _hasTrailingNewline = result.HasTrailingNewline;
+            _isReadOnly = false;
+            StopWatching();
+            SetDirty(false);
+            PostToWeb(new
+            {
+                type = "file-opened",
+                text = result.Text,
+                fileName = name,
+                path = (string?)null,
+                encoding = TextFileService.EncodingLabel(result.Encoding),
+                lineEnding = TextFileService.LineEndingLabel(result.LineEnding),
+                readOnly = false,
+            });
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException($"ドロップされたファイルを開けなかった: {name}", ex);
+            MessageBox.Show(this, $"ファイルを開けませんでした。\n{ex.Message}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
     private void OpenNewDocument()
     {
         _currentPath = null;
@@ -533,9 +580,22 @@ internal sealed class MainForm : Form
         if (key != _lastDragLogKey)
         {
             _lastDragLogKey = key;
-            Logger.Write($"OnDragEnter/Over (sender={sender?.GetType().Name}): hasFileDrop={hasFileDrop}");
+            // e.X/e.Yは画面座標(スクリーン座標)。本文エリアの中央付近で失敗する/端で成功する、
+            // といった位置依存の切り分けをするため、フォーム内座標も一緒に記録する。
+            Point screenPos = new Point(e.X, e.Y);
+            Point formOrigin = PointToScreen(Point.Empty);
+            Point formRelative = new Point(screenPos.X - formOrigin.X, screenPos.Y - formOrigin.Y);
+            Logger.Write($"OnDragEnter/Over (sender={sender?.GetType().Name}): hasFileDrop={hasFileDrop}, " +
+                $"screenPos=({screenPos.X},{screenPos.Y}), formRelativePos=({formRelative.X},{formRelative.Y}), " +
+                $"formBounds={Bounds}, webViewBounds={_webView.Bounds}");
         }
         e.Effect = hasFileDrop ? DragDropEffects.Copy : DragDropEffects.None;
+    }
+
+    private void OnDragLeave(object? sender, EventArgs e)
+    {
+        Logger.Write($"OnDragLeave (sender={sender?.GetType().Name})");
+        _lastDragLogKey = null;
     }
 
     private async void OnDragDrop(object? sender, DragEventArgs e)

@@ -430,6 +430,47 @@ imageInput.addEventListener("change", async () => {
   imageInput.value = "";
 });
 
+// ウィンドウへのファイルD&D。WebView2は本文エリアではWebページとしてドラッグ&ドロップを
+// 扱うため、HTML5の標準どおりdragoverでpreventDefault()しないとブラウザが既定で
+// ドロップを拒否し、禁止マークが出て何も起きない(C#側のOLEドラッグ&ドロップ設定とは
+// 無関係)。標準のDOM File APIでは実パスが分からないため、ブリッジがある場合はバイト列を
+// C#へ渡して開き直す(エンコーディング判定・保存はC#側で行う。パスが無いため保存時は
+// 名前を付けて保存になる)。
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+function hasFileDrag(e) {
+  return !!e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files");
+}
+window.addEventListener("dragenter", (e) => { if (hasFileDrag(e)) e.preventDefault(); });
+window.addEventListener("dragover", (e) => { if (hasFileDrag(e)) e.preventDefault(); });
+window.addEventListener("drop", async (e) => {
+  if (!hasFileDrag(e) || !e.dataTransfer.files.length) return;
+  e.preventDefault();
+  const file = e.dataTransfer.files[0];
+  if (bridge) {
+    if (isDirty && !window.confirm("保存されていない変更があります。ドロップしたファイルを開くと失われますが、よろしいですか?")) return;
+    const buf = await file.arrayBuffer();
+    bridge.postMessage({ type: "open-dropped-file", name: file.name, dataBase64: arrayBufferToBase64(buf) });
+    return;
+  }
+  if (isDirty && !window.confirm("保存されていない変更があります。ドロップしたファイルを開くと失われますが、よろしいですか?")) return;
+  await editor.setFileMode(file.name);
+  editor.setValue(await file.text());
+  currentHandle = null;
+  currentPath = null;
+  setName(file.name);
+  setDirty(false);
+  updateCount();
+  updateStatusMode();
+});
+
 async function saveFile(forcePicker) {
   const text = editor.getValue();
   if (bridge) {
