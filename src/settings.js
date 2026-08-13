@@ -27,6 +27,9 @@ const ICON_FILETYPES = `<svg ${ICON_ATTRS}><path d="M9 15l6-6"/><path d="M10 6l.
 const ICON_KEYBOARD = `<svg ${ICON_ATTRS}><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.01M9.5 10h.01M13 10h.01M16.5 10h.01M6 14h12"/></svg>`;
 const ICON_CHEVRON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>';
 
+// 編集モードの自動判定(仕様: C#側AppSettings.AutoDetectModeと同じ4値、既定はstandard)。
+const AUTO_DETECT_MODES = ["off", "suggest", "standard", "aggressive"];
+
 const NAV_ITEMS = [
   { id: "general", label: "一般", icon: ICON_GENERAL },
   { id: "edit", label: "編集", icon: ICON_EDIT },
@@ -58,6 +61,8 @@ const DEFAULTS = {
   autoPairing: true,
   customCssPath: "",
   editorFontFamily: "",
+  editorMonospaceFontFamily: "",
+  autoDetectMode: "standard",
   showWordCount: true,
   keyBindings: {},
   defaultEncoding: "utf8",
@@ -248,6 +253,8 @@ export function createSettings(ctx) {
       autoPairing: msg.autoPairing ?? DEFAULTS.autoPairing,
       customCssPath: msg.customCssPath ?? "",
       editorFontFamily: msg.editorFontFamily ?? "",
+      editorMonospaceFontFamily: msg.editorMonospaceFontFamily ?? "",
+      autoDetectMode: AUTO_DETECT_MODES.includes(msg.autoDetectMode) ? msg.autoDetectMode : DEFAULTS.autoDetectMode,
       showWordCount: msg.showWordCount ?? DEFAULTS.showWordCount,
       keyBindings: msg.keyBindings ? { ...msg.keyBindings } : {},
       defaultEncoding: msg.defaultEncoding ?? DEFAULTS.defaultEncoding,
@@ -255,6 +262,10 @@ export function createSettings(ctx) {
       associatedExtensions: Array.isArray(msg.associatedExtensions) ? msg.associatedExtensions.slice() : [],
       pandocAvailable: !!msg.pandocAvailable,
       fileModeOverrides: msg.fileModeOverrides && typeof msg.fileModeOverrides === "object" ? { ...msg.fileModeOverrides } : {},
+      // 保存対象ではない(表示にのみ使う)。C#側から届かない/空の場合はフォント選択欄が
+      // テキスト入力にフォールバックする(renderFontField参照)。
+      installedFonts: Array.isArray(msg.installedFonts) ? msg.installedFonts.slice() : [],
+      monospaceFonts: Array.isArray(msg.monospaceFonts) ? msg.monospaceFonts.slice() : [],
     };
     selectedExtensions = new Set(draft.associatedExtensions);
     fmRows = buildFmRows(draft.fileModeOverrides);
@@ -288,6 +299,8 @@ export function createSettings(ctx) {
       autoPairing: draft.autoPairing,
       customCssPath: draft.customCssPath ? draft.customCssPath : null,
       editorFontFamily: draft.editorFontFamily ? draft.editorFontFamily : null,
+      editorMonospaceFontFamily: draft.editorMonospaceFontFamily ? draft.editorMonospaceFontFamily : null,
+      autoDetectMode: draft.autoDetectMode,
       showWordCount: draft.showWordCount,
       keyBindings: draft.keyBindings,
       defaultEncoding: draft.defaultEncoding,
@@ -450,6 +463,14 @@ export function createSettings(ctx) {
         </label>
       </div>
       <div class="settings-group">
+        <div class="settings-group-title">編集モードの自動判定</div>
+        <p class="settings-intro">通常は拡張子から編集モードを判断します。無題の新規文書では、内容からも判断できます。</p>
+        <label class="settings-radio"><input type="radio" name="autoDetectMode" value="off"><span>オフ<span class="settings-field-desc">内容からは判断しません</span></span></label>
+        <label class="settings-radio"><input type="radio" name="autoDetectMode" value="suggest"><span>控えめ<span class="settings-field-desc">切り替えず、ステータスバーで提案だけします</span></span></label>
+        <label class="settings-radio"><input type="radio" name="autoDetectMode" value="standard"><span>標準(推奨)<span class="settings-field-desc">無題の新規文書のみ自動で切り替えます。切り替え後に取り消せます</span></span></label>
+        <label class="settings-radio"><input type="radio" name="autoDetectMode" value="aggressive"><span>積極的<span class="settings-field-desc">拡張子のあるファイルでも、内容と食い違う場合は提案します</span></span></label>
+      </div>
+      <div class="settings-group">
         <div class="settings-group-title">拡張子ごとの編集モード</div>
         <p class="settings-intro">通常は拡張子から自動で判断します。ここに登録した拡張子だけ、指定したモードで開きます。</p>
         <div class="fm-list"></div>
@@ -538,6 +559,55 @@ export function createSettings(ctx) {
     wireCommonFields(el);
   }
 
+  // ---- フォント選択欄(本文/等幅)----
+  // installedFonts/monospaceFontsが届いている場合はドロップダウン、届かない/空の場合は
+  // 従来どおりのテキスト入力にフォールバックする。どちらの場合もdata-field/data-font-preview
+  // 属性を付けておき、wireCommonFields(既存の汎用配線)とwireFontPreviews(プレビュー反映)の
+  // 両方から同じ要素を扱えるようにする。
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+  function fontOptionHtml(name, selected) {
+    const label = escapeHtml(name);
+    // CSS文字列(font-family: '...')としてのエスケープ→HTML属性としてのエスケープの順で行う
+    // (フォント名に ' や \ が含まれていても壊れないように)。
+    const cssName = String(name).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+    const styleAttr = escapeHtml(`font-family: '${cssName}'`);
+    return `<option value="${label}" style="${styleAttr}"${selected ? " selected" : ""}>${label}</option>`;
+  }
+  function renderFontField(key, list, labelText, placeholder) {
+    const current = draft[key] || "";
+    if (!Array.isArray(list) || !list.length) {
+      // フォールバック: 従来どおりのテキスト入力(ブラウザ単体・C#側が未対応の場合)。
+      return `<label class="settings-text-row">${labelText}
+          <input type="text" data-field="${key}" data-font-preview placeholder="${escapeHtml(placeholder)}">
+        </label>`;
+    }
+    // 保存済みの値が一覧に無くても選択状態を保つため、先頭付近(既定の直後)に追加しておく。
+    const options = list.slice();
+    if (current && !options.includes(current)) options.unshift(current);
+    const optionsHtml = options.map((f) => fontOptionHtml(f, f === current)).join("");
+    return `<label class="settings-select-row">${labelText}
+        <select data-field="${key}" data-font-preview>
+          <option value=""${current === "" ? " selected" : ""}>(既定)</option>
+          ${optionsHtml}
+        </select>
+      </label>`;
+  }
+  // data-font-preview付きの入力/セレクトの現在値を、対応するdata-font-preview-target要素の
+  // font-familyへ即時反映する。style属性の文字列組み立てではなくstyle.fontFamilyへの代入で
+  // 行うため、フォント名のエスケープを気にする必要がない。
+  function wireFontPreviews(container) {
+    for (const field of container.querySelectorAll("[data-font-preview]")) {
+      const key = field.dataset.field;
+      const target = container.querySelector(`[data-font-preview-target="${key}"]`);
+      if (!target) continue;
+      const apply = () => { target.style.fontFamily = field.value ? `'${field.value}'` : ""; };
+      apply();
+      field.addEventListener(field.tagName === "SELECT" ? "change" : "input", apply);
+    }
+  }
+
   function renderAppearance(el) {
     el.innerHTML = `
       <div class="settings-group">
@@ -548,9 +618,10 @@ export function createSettings(ctx) {
             <option value="dark">ダーク</option>
           </select>
         </label>
-        <label class="settings-text-row">本文フォント
-          <input type="text" data-field="editorFontFamily" placeholder="(既定のフォントを使用)">
-        </label>
+        ${renderFontField("editorFontFamily", draft.installedFonts, "本文フォント", "(既定のフォントを使用)")}
+        <div class="settings-field-desc">プレビュー: <span data-font-preview-target="editorFontFamily" style="font-size: 15px;">あア亜 Aa Bb Cc 0123</span></div>
+        ${renderFontField("editorMonospaceFontFamily", draft.monospaceFonts, "等幅フォント", "(既定のフォントを使用)")}
+        <div class="settings-field-desc">プレビュー: <span data-font-preview-target="editorMonospaceFontFamily" style="font-size: 15px;">あア亜 Aa Bb Cc 0123</span></div>
         <label class="settings-text-row">文字サイズ
           <input type="number" data-field="editorFontSize" min="8" max="40" step="1">
         </label>
@@ -581,6 +652,7 @@ export function createSettings(ctx) {
         <label class="settings-checkbox-row"><input type="checkbox" data-field="showWordCount"><span class="settings-checkbox-title">文字数カウントを常に表示</span></label>
       </div>`;
     wireCommonFields(el);
+    wireFontPreviews(el);
   }
 
   // ---- ファイルの関連付け(3階層チェックボックス、仕様書 C-13) ----

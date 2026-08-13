@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using Microsoft.Win32;
 
 namespace Pane;
@@ -32,6 +33,25 @@ internal static class FileAssociationService
     private const string LegacyProgId = "Pane.MarkdownFile";
 
     private const string AppRegisteredName = "Pane";
+
+    /// <summary>
+    /// エクスプローラーへ「関連付けが変わった」ことを通知するためのシェルAPI。
+    /// レジストリを書き換えただけではエクスプローラーは古い関連付け(とアイコン)を
+    /// キャッシュしたままで、アイコンが切り替わらない。登録・解除の直後に必ず呼ぶ。
+    /// </summary>
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern void SHChangeNotify(int wEventId, uint uFlags, IntPtr dwItem1, IntPtr dwItem2);
+
+    private const int SHCNE_ASSOCCHANGED = 0x08000000;
+    private const uint SHCNF_IDLIST = 0x0000;
+    private const uint SHCNF_FLUSH = 0x1000; // 通知が処理されるまで待つ(戻った時点で反映済みにする)
+
+    /// <summary>
+    /// Windows 10以降で、ユーザーが「既定のアプリ」を明示的に選んだ場合に作られるキー。
+    /// ここに他アプリのProgIDが入っていると、HKCU\Software\Classes\.ext の設定よりも
+    /// 優先されるため、Paneの関連付け(とアイコン)は反映されない。
+    /// </summary>
+    private const string FileExtsKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts";
 
     /// <summary>
     /// 旧実装(拡張子固定)からの移行措置用の既定拡張子一覧。AppSettings.FileAssociationEnabled が
@@ -72,6 +92,59 @@ internal static class FileAssociationService
         if (desiredSet.Count > 0) Register(desiredSet);
 
         UpdateCapabilities(desiredSet);
+
+        // レジストリを書いただけではエクスプローラーの表示(特にアイコン)は切り替わらない。
+        // ここで明示的に通知して、開いているエクスプローラーのウィンドウにも反映させる。
+        NotifyShell();
+    }
+
+    /// <summary>
+    /// エクスプローラーへ関連付けの変更を通知する。失敗してもアプリの動作には影響しないため、
+    /// 例外はログに記録するだけで握りつぶす(shell32.dllが無い環境での実行など)。
+    /// </summary>
+    public static void NotifyShell()
+    {
+        try
+        {
+            SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST | SHCNF_FLUSH, IntPtr.Zero, IntPtr.Zero);
+            Logger.Write("FileAssociationService: SHChangeNotifyでエクスプローラーへ関連付けの変更を通知した");
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException("FileAssociationService.NotifyShell失敗", ex);
+        }
+    }
+
+    /// <summary>
+    /// 渡した拡張子のうち、Windowsの「既定のアプリ」設定(UserChoice)で他アプリが選ばれているため
+    /// Paneの関連付けが反映されないものを返す。UserChoiceはHKCU\Software\Classes\.extより優先され、
+    /// かつWindows 10以降はハッシュ保護されていてアプリ側から書き換えられない(書き換えるべきでもない)。
+    /// 該当した場合はユーザーに手動での切り替えを案内するしかないため、その判定材料として使う。
+    /// </summary>
+    public static IReadOnlyList<string> FindExtensionsBlockedByUserChoice(IReadOnlyCollection<string> extensions)
+    {
+        var blocked = new List<string>();
+        foreach (string ext in Normalize(extensions))
+        {
+            try
+            {
+                using RegistryKey? userChoice = Registry.CurrentUser.OpenSubKey($@"{FileExtsKeyPath}\.{ext}\UserChoice");
+                if (userChoice?.GetValue("ProgId") is not string progId) continue;
+                if (progId == ProgIdFor(ext)) continue;
+                blocked.Add(ext);
+            }
+            catch (Exception ex)
+            {
+                // 読み取れないだけなら「不明」として扱い、案内対象には入れない。
+                Logger.WriteException($"FileAssociationService: .{ext} のUserChoice読み取りに失敗", ex);
+            }
+        }
+
+        if (blocked.Count > 0)
+        {
+            Logger.Write($"FileAssociationService: UserChoiceで他アプリが既定になっている拡張子: {string.Join(",", blocked)}");
+        }
+        return blocked;
     }
 
     /// <summary>
