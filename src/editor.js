@@ -1,17 +1,19 @@
 // Pane ライブプレビューエディタ (CodeMirror 6)
 // index.html から createEditor() で生成し、返り値のAPIで操作する。
 // 依存はすべてesbuildでビルド成果物(dist/)に同梱する。実行時に外部CDNへは一切到達しない。
-import { EditorView, keymap, Decoration, ViewPlugin, WidgetType } from "@codemirror/view";
+import { EditorView, keymap, Decoration, ViewPlugin, WidgetType, lineNumbers } from "@codemirror/view";
 import { EditorState, Compartment, StateEffect, StateField } from "@codemirror/state";
 import { markdown } from "@codemirror/lang-markdown";
 import { Strikethrough, Table, Superscript, Subscript, Emoji } from "@lezer/markdown";
 import { defaultKeymap, history, historyKeymap, indentWithTab, insertNewline, undo, redo, moveLineUp, moveLineDown, copyLineDown, deleteLine } from "@codemirror/commands";
-import { syntaxTree, syntaxHighlighting, HighlightStyle, LanguageDescription } from "@codemirror/language";
+import { syntaxTree, syntaxHighlighting, HighlightStyle, LanguageDescription, bracketMatching } from "@codemirror/language";
 import { autocompletion } from "@codemirror/autocomplete";
+import { search, setSearchQuery, getSearchQuery, SearchQuery, findNext, findPrevious, replaceNext, replaceAll } from "@codemirror/search";
 import { tags as t } from "@lezer/highlight";
 import { codeLanguages, resolveFileMode } from "./languages.js";
 import { extractHeadings, findHeadingBySlug, findEmojiCompletions, EMOJI_SHORTCODES, CALLOUT_TYPES } from "./markdown-extras.js";
 import { renderMathToHtml } from "./math.js";
+import { renderMarkdownToHtml, renderStandaloneHtml } from "./md-to-html.js";
 
 // コードのハイライト配色(仕様書 第5章・第10.2節)。色は単独で決め打ちせず、
 // style.cssで定義した--code-*トークン(--ink/--ink-mute/--accentから派生)を参照する。
@@ -25,6 +27,19 @@ const codeHighlightStyle = HighlightStyle.define([
   { tag: [t.typeName, t.className], color: "var(--code-type)" },
   { tag: [t.operator, t.punctuation, t.meta], color: "var(--code-op)" },
 ]);
+
+// HTMLエクスポート(スタイルあり、仕様書 File項目「エクスポート: HTML」)用の最小限の閲覧用CSS。
+// アプリ実行時にしか存在しないCSSカスタムプロパティ(--ink等)には依存しない、自己完結した値にする。
+const EXPORT_CSS = `body{font-family:"Yu Gothic UI","Segoe UI",sans-serif;line-height:1.85;color:#1F2428;max-width:840px;margin:2.5rem auto;padding:0 1.5rem;}
+.pane-export h1,.pane-export h2,.pane-export h3,.pane-export h4,.pane-export h5,.pane-export h6{font-weight:700;margin:1.6em 0 .6em;}
+.pane-export code{background:#F0F2F1;padding:.15em .35em;border-radius:4px;font-family:ui-monospace,Consolas,monospace;}
+.pane-export pre{background:#F0F2F1;padding:.8em 1em;border-radius:8px;overflow-x:auto;}
+.pane-export pre code{background:none;padding:0;}
+.pane-export blockquote{border-left:3px solid #7BAFA6;margin:0;padding:.2em 1em;color:#5A6B68;}
+.pane-export table{border-collapse:collapse;}
+.pane-export th,.pane-export td{border:1px solid #D8DEDC;padding:.4em .7em;}
+.pane-export img{max-width:100%;}
+.pane-export mark{background:#FCE9A8;}`;
 
 // カーソル/選択がこの範囲に触れているか。フォーカスがなければ常に装飾。
 function cursorInside(view, from, to) {
@@ -879,36 +894,48 @@ function handleTableKey(view, ev) {
   }
   return false;
 }
-// ---- エディタ内検索(全一致ハイライト + ジャンプ) ----
-const setSearchTerms = StateEffect.define();
-const searchTermsField = StateField.define({
-  create: () => [],
-  update: (v, tr) => { for (const ef of tr.effects) if (ef.is(setSearchTerms)) v = ef.value; return v; },
-});
-function collectHits(state) {
-  const terms = state.field(searchTermsField).filter(Boolean);
-  if (!terms.length) return [];
-  const text = state.doc.toString().toLowerCase();
-  const hits = [];
-  for (const t of terms) {
-    const tl = t.toLowerCase();
-    let i = 0;
-    while ((i = text.indexOf(tl, i)) >= 0) { hits.push([i, i + tl.length]); i += tl.length; }
+// ---- 検索・置換(仕様書 E-17〜E-19) ----
+// マッチの検出・ハイライト・正規表現/大文字小文字/単語単位の判定は
+// @codemirror/search の SearchQuery / search() 拡張に任せる。パネルUIは
+// 自前で構築する(src/search-ui.js)ため、既定の検索キーマップ・パネルは使わない。
+function countSearchMatches(state) {
+  const query = getSearchQuery(state);
+  if (!query.valid) return { count: 0, index: -1 };
+  const cursor = query.getCursor(state);
+  const sel = state.selection.main;
+  let count = 0, index = -1;
+  for (let r = cursor.next(); !r.done; r = cursor.next()) {
+    if (r.value.from === sel.from && r.value.to === sel.to) index = count;
+    count++;
   }
-  return hits.sort((a, b) => a[0] - b[0]);
+  return { count, index };
 }
 // リスト系の折り返し行のハンギングインデント(1行目のテキスト開始位置に揃える)は
 // livePreviewのbuild()内(可視範囲の行走査)でcm-hangクラスとして付与している。
-const searchHighlight = EditorView.decorations.compute([searchTermsField, "doc", "selection"], (state) => {
-  const hits = collectHits(state);
-  if (!hits.length) return Decoration.none;
-  const sel = state.selection.main;
-  return Decoration.set(hits.map(h => {
-    // 選択範囲がこのヒットと一致していれば「選択中」として黄色ハイライト
-    const active = sel.from === h[0] && sel.to === h[1];
-    return Decoration.mark({ class: active ? "cm-search-hit cm-search-hit-active" : "cm-search-hit" }).range(h[0], h[1]);
-  }), true);
-});
+
+// ---- インデントガイド(コードモード、仕様書 決定済み事項) ----
+const INDENT_GUIDE_UNIT = 2; // 半角スペース換算でのインデント1段の幅
+const indentGuides = ViewPlugin.fromClass(class {
+  constructor(view) { this.decorations = this.build(view); }
+  update(u) { if (u.docChanged || u.viewportChanged) this.decorations = this.build(u.view); }
+  build(view) {
+    const marks = [];
+    for (const { from, to } of view.visibleRanges) {
+      let pos = from;
+      while (pos <= to) {
+        const line = view.state.doc.lineAt(pos);
+        const lead = line.text.match(/^[ \t]*/)[0].replace(/\t/g, "  ");
+        const level = Math.floor(lead.length / INDENT_GUIDE_UNIT);
+        if (level > 0 && line.text.trim().length > 0) {
+          marks.push(Decoration.line({ class: "cm-indent-guide", attributes: { style: `--indent-level:${level}` } }).range(line.from));
+        }
+        if (line.to + 1 > to) break;
+        pos = line.to + 1;
+      }
+    }
+    return Decoration.set(marks, true);
+  }
+}, { decorations: v => v.decorations });
 
 // ---- 絵文字ショートコードの入力補完(仕様書 M-22) ----
 function emojiCompletionSource(context) {
@@ -932,14 +959,22 @@ const livePreviewExt = () => [
   mathBlocksField, mathBlockDecoField,
 ];
 
-export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionChange, onRender, onKeydown } = {}) {
+// コードモード限定の拡張(仕様書 決定済み事項: 行番号・括弧の対応表示・
+// インデントガイドまで。矩形選択・コード補完・LSP連携・エラー診断は搭載しない)。
+const codeModeExtras = () => [lineNumbers(), bracketMatching(), indentGuides];
+
+export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionChange, onRender, onKeydown, onPaste, onCopy } = {}) {
   const editable = new Compartment();
   const themeComp = new Compartment();
   // ファイル種別ごとの編集モード切り替え(仕様書 第1章: markdown / code / plain)。
   // コード/プレーンテキストのファイルではMarkdownの言語解析とライブプレビュー装飾を外す。
   const docModeComp = new Compartment();
   const livePreviewComp = new Compartment();
+  const codeModeExtrasComp = new Compartment();
+  // 折り返し表示のON/OFF(仕様書 N-05)。既定はON(従来どおり)。
+  const wrapComp = new Compartment();
   let composing = false;
+  let currentMode = "markdown";
   const makeTheme = () => {
     const cs = getComputedStyle(document.documentElement);
     const ink = cs.getPropertyValue("--ink").trim() || "#1F2428";
@@ -968,10 +1003,11 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
         ]),
         docModeComp.of(markdownLanguageExt()),
         syntaxHighlighting(codeHighlightStyle),
-        EditorView.lineWrapping,
+        wrapComp.of(EditorView.lineWrapping),
         livePreviewComp.of(livePreviewExt()),
+        codeModeExtrasComp.of([]),
         editable.of(EditorView.editable.of(true)),
-        searchTermsField, searchHighlight,
+        search({ top: false }),
         EditorView.updateListener.of((u) => {
           if (u.docChanged && onChange) onChange(view.state.doc.toString());
           if (u.focusChanged) { (view.hasFocus ? onFocus : onBlur)?.(); }
@@ -982,6 +1018,12 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
           compositionend: () => { composing = false; onCompositionChange?.(false); },
           // アプリ側ショートカット(Md装飾/Tab/リスト継続)をCMの既定キー処理より先に評価
           keydown: (e) => { if (onKeydown && onKeydown(e)) { e.preventDefault(); return true; } return false; },
+          // スマートペースト(仕様書 第2.9.3節): HTML形式のクリップボードをMarkdownへ変換して
+          // 挿入する。CMの既定貼り付け処理より先に評価し、変換しない場合は既定動作に委ねる。
+          paste: (e) => { if (onPaste && onPaste(e)) { e.preventDefault(); return true; } return false; },
+          // 既定のコピー形式(仕様書 第2.9.3節、設定で切替可能): 有効な場合はHTMLも併せて
+          // クリップボードへ書き込む。CMの既定コピー処理より先に評価する。
+          copy: (e) => { if (onCopy && onCopy(e)) { e.preventDefault(); return true; } return false; },
           // リンク装飾のタップでリンク先を開く(mousedownで先取りしてカーソル移動を抑止)。
           // 内部アンカー(#見出し)はCtrl/Cmd+クリック時のみジャンプする(仕様書 M-15)。
           mousedown: (e) => {
@@ -1009,35 +1051,29 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
     isComposing: () => composing,
     hasFocus: () => view.hasFocus,
     tableKey: (ev) => handleTableKey(view, ev),
-    setSearch: (terms) => view.dispatch({ effects: setSearchTerms.of(terms || []) }),
-    searchJump: (dir) => {
-      const hits = collectHits(view.state);
-      if (!hits.length) return;
-      const cur = view.state.selection.main.from;
-      const target = dir > 0 ? (hits.find(h => h[0] > cur) || hits[0])
-                             : ([...hits].reverse().find(h => h[0] < cur) || hits[hits.length - 1]);
-      view.dispatch({ selection: { anchor: target[0], head: target[1] },
-                      effects: EditorView.scrollIntoView(target[0], { y: "center" }) });
-    },
     setEditable: (on) => view.dispatch({ effects: editable.reconfigure(EditorView.editable.of(on)) }),
     // マークダウン記法拡張のON/OFF(仕様書 第2.10節 C-01)。設定ダイアログでの変更を反映する。
     setExtensionToggles: (toggles) => view.dispatch({ effects: setExtToggles.of(toggles) }),
+    getMode: () => currentMode,
     // ファイルを開いた際に拡張子から編集モードを切り替える(仕様書 第1章)。
     // markdown: 従来どおりライブプレビュー一式。code: 該当言語を動的ロードして
     // シンタックスハイライトのみ適用(ライブプレビュー装飾は外す)。plain: 装飾なし。
-    setFileMode: async (filename) => {
-      const mode = resolveFileMode(filename);
+    // filenameの拡張子で自動判定するが、forceModeを渡すと手動切替(第10.5節メニュー)にも使える。
+    setFileMode: async (filename, forceMode) => {
+      const mode = forceMode || resolveFileMode(filename);
+      currentMode = mode;
       if (mode === "markdown") {
         view.dispatch({
           effects: [
             docModeComp.reconfigure(markdownLanguageExt()),
             livePreviewComp.reconfigure(livePreviewExt()),
+            codeModeExtrasComp.reconfigure([]),
           ],
         });
         return;
       }
       if (mode === "code") {
-        const desc = LanguageDescription.matchFilename(codeLanguages, filename);
+        const desc = LanguageDescription.matchFilename(codeLanguages, filename || "");
         let support = null;
         try {
           support = desc ? await desc.load() : null;
@@ -1048,24 +1084,176 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
           effects: [
             docModeComp.reconfigure(support ? [support] : []),
             livePreviewComp.reconfigure([]),
+            codeModeExtrasComp.reconfigure(codeModeExtras()),
           ],
         });
         return;
       }
       // plain
       view.dispatch({
-        effects: [docModeComp.reconfigure([]), livePreviewComp.reconfigure([])],
+        effects: [
+          docModeComp.reconfigure([]),
+          livePreviewComp.reconfigure([]),
+          codeModeExtrasComp.reconfigure([]),
+        ],
       });
     },
+    // 折り返し表示のON/OFF(仕様書 N-05)
+    setWordWrap: (on) => view.dispatch({ effects: wrapComp.reconfigure(on ? EditorView.lineWrapping : []) }),
+    // 指定行へジャンプ(仕様書 N-04)
+    gotoLine: (n) => {
+      const clamped = Math.max(1, Math.min(view.state.doc.lines, Math.floor(n) || 1));
+      const line = view.state.doc.line(clamped);
+      view.dispatch({ selection: { anchor: line.from }, effects: EditorView.scrollIntoView(line.from, { y: "center" }) });
+      view.focus();
+    },
+    // ---- 検索・置換(仕様書 E-17〜E-19) ----
+    setSearchQuery: (opts) => view.dispatch({ effects: setSearchQuery.of(new SearchQuery(opts)) }),
+    findNext: () => findNext(view),
+    findPrevious: () => findPrevious(view),
+    replaceNext: () => replaceNext(view),
+    replaceAllMatches: () => replaceAll(view),
+    getSearchMatchInfo: () => countSearchMatches(view.state),
+    // マークダウンとしてコピー(仕様書 E-04)。選択があれば選択範囲、無ければ全文。
+    getMarkdownForClipboard: () => {
+      const sel = view.state.selection.main;
+      return sel.from === sel.to ? view.state.doc.toString() : view.state.sliceDoc(sel.from, sel.to);
+    },
+    // HTMLとしてコピー(仕様書 E-05)。選択があれば選択範囲、無ければ全文をHTML化する。
+    getHtmlForClipboard: () => {
+      const sel = view.state.selection.main;
+      const range = sel.from === sel.to ? { from: 0, to: view.state.doc.length } : { from: sel.from, to: sel.to };
+      return renderMarkdownToHtml(view.state, range);
+    },
+    // HTMLエクスポート(仕様書 File項目「エクスポート: HTML」)。文書全体を対象にする。
+    getStandaloneHtml: (title, styled) => renderStandaloneHtml(view.state, title, EXPORT_CSS, styled),
     // カーソル位置の行に記法を挿入(ツールバー用)
-    applyAction: (action) => applyMdAction(view, action),
+    applyAction: (action, payload) => applyMdAction(view, action, payload),
+    // 選択範囲をテキストで置き換える(プレーンテキスト貼り付け・スマートペースト用)
+    pasteText: (text) => { view.dispatch(view.state.replaceSelection(text)); view.focus(); },
     refreshTheme: () => view.dispatch({ effects: themeComp.reconfigure(makeTheme()) }),
     destroy: () => view.destroy(),
   };
 }
 
+// ---- 文字種境界での単語判定(仕様書 E-12注記: 日本語は形態素境界ではなく文字種境界で判定) ----
+function charClass(ch) {
+  if (!ch) return "other";
+  if (/\s/.test(ch)) return "space";
+  if (/[0-9a-zA-Z_]/.test(ch)) return "latin";
+  if (/[぀-ゟ]/.test(ch)) return "hiragana";
+  if (/[゠-ヿ]/.test(ch)) return "katakana";
+  if (/[一-鿿]/.test(ch)) return "kanji";
+  return "other"; // 記号・句読点等はそれぞれ1文字単位の境界として扱う
+}
+function wordRangeAt(text, pos) {
+  if (!text.length) return { from: pos, to: pos };
+  const at = Math.min(pos, text.length - 1);
+  const cls = charClass(text[at] ?? text[Math.max(0, at - 1)]);
+  if (cls === "space") return { from: pos, to: pos };
+  let from = pos, to = pos;
+  while (from > 0 && charClass(text[from - 1]) === cls) from--;
+  while (to < text.length && charClass(text[to]) === cls) to++;
+  return { from, to };
+}
+function selectWordAtCursor(view) {
+  const { state } = view;
+  const pos = state.selection.main.head;
+  const line = state.doc.lineAt(pos);
+  const r = wordRangeAt(line.text, pos - line.from);
+  if (r.from === r.to) return;
+  view.dispatch({ selection: { anchor: line.from + r.from, head: line.from + r.to } });
+}
+function deleteWordAtCursor(view) {
+  const { state } = view;
+  const pos = state.selection.main.head;
+  const line = state.doc.lineAt(pos);
+  const r = wordRangeAt(line.text, pos - line.from);
+  if (r.from === r.to) return;
+  view.dispatch({ changes: { from: line.from + r.from, to: line.from + r.to }, selection: { anchor: line.from + r.from } });
+}
+// 行/文を選択(仕様書 E-09、表内では行を選択)
+function selectLineAtCursor(view) {
+  const { state } = view;
+  const pos = state.selection.main.head;
+  const line = state.doc.lineAt(pos);
+  view.dispatch({ selection: { anchor: line.from, head: line.to } });
+}
+// スタイル範囲を選択(仕様書 E-11、表内ではセルを選択)
+const STYLE_NODE_NAMES = new Set(["StrongEmphasis", "Emphasis", "Strikethrough", "InlineCode", "Link", "Superscript", "Subscript"]);
+function selectStyleRangeAtCursor(view) {
+  const { state } = view;
+  const pos = state.selection.main.head;
+  const t = tableAt(state, pos);
+  if (t) {
+    const line = state.doc.lineAt(pos);
+    const rowIdx = line.number - t.startLine;
+    const cols = Math.max(t.header.length, ...(t.body.length ? t.body.map((r) => r.length) : [0]), 1);
+    const before = line.text.slice(0, pos - line.from);
+    const c = Math.min(cols - 1, Math.max(0, (before.match(/\|/g) || []).length - 1));
+    selectCell(view, t, rowIdx, c);
+    return;
+  }
+  let node = syntaxTree(state).resolveInner(pos, 1);
+  while (node && !STYLE_NODE_NAMES.has(node.name)) node = node.parent;
+  if (node) view.dispatch({ selection: { anchor: node.from, head: node.to } });
+}
+// 見出しレベルの上げ下げ(仕様書 P-03・P-04)。delta<0で上げる(#を減らす)、delta>0で下げる。
+function shiftHeadingLevel(view, delta) {
+  const { state } = view;
+  const line = state.doc.lineAt(state.selection.main.from);
+  const m = line.text.match(/^( {0,3})(#{1,6})(\s+)/);
+  if (m) {
+    const newLevel = Math.min(6, Math.max(1, m[2].length + delta));
+    if (newLevel === m[2].length) return;
+    view.dispatch({ changes: { from: line.from + m[1].length, to: line.from + m[1].length + m[2].length, insert: "#".repeat(newLevel) } });
+  } else if (delta > 0) {
+    view.dispatch({ changes: { from: line.from, insert: "# " } });
+  }
+  view.focus();
+}
+// リスト種別の相互変換(仕様書 P-13)。target: "bullet" | "ordered" | "check"
+function convertListType(view, target) {
+  const { state } = view;
+  const line = state.doc.lineAt(state.selection.main.from);
+  const m = line.text.match(/^(\s*)(?:[-*+]\s+\[[ xX]\]\s?|[-*+]\s|\d+\.\s)/);
+  if (!m) return;
+  const indent = m[1];
+  const marker = target === "bullet" ? indent + "- " : target === "ordered" ? indent + "1. " : indent + "- [ ] ";
+  view.dispatch({ changes: { from: line.from, to: line.from + m[0].length, insert: marker } });
+  view.focus();
+}
+// 表の行を削除(仕様書 Edit系)。ヘッダー・区切り行では何もしない。
+function deleteTableRowAtCursor(view) {
+  const { state } = view;
+  const pos = state.selection.main.head;
+  const t = tableAt(state, pos);
+  if (!t) return;
+  const line = state.doc.lineAt(pos);
+  const rowIdx = line.number - t.startLine; // 0=見出し 1=区切り 2以降=ボディ
+  const bodyIdx = rowIdx - 2;
+  if (bodyIdx < 0 || bodyIdx >= t.body.length) return;
+  t.body.splice(bodyIdx, 1);
+  view.dispatch({ changes: { from: t.from, to: t.to, insert: formatTableText(t) } });
+  view.focus();
+}
+// 書式を消去(仕様書 R-08)。選択範囲のマークダウン記法をすべて除去する。
+function eraseFormatting(text) {
+  return text
+    .split("\n")
+    .map((line) => line.replace(/^ {0,3}(#{1,6}\s+|>\s?|[-*+]\s+(\[[ xX]\]\s+)?|\d+\.\s+)/, ""))
+    .join("\n")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\*([^*]+)\*/g, "$1")
+    .replace(/~~([^~]+)~~/g, "$1")
+    .replace(/==([^=]+)==/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\^([^^]+)\^/g, "$1")
+    .replace(/~([^~]+)~/g, "$1");
+}
+
 // ツールバーの記法挿入(CodeMirror版)
-function applyMdAction(view, action) {
+function applyMdAction(view, action, payload) {
   const { state } = view;
   const sel = state.selection.main;
   const s = sel.from, e = sel.to;
@@ -1087,6 +1275,7 @@ function applyMdAction(view, action) {
   };
   const insert = (t, cursorOffset) => view.dispatch({ changes: { from: s, to: e, insert: t }, selection: { anchor: s + (cursorOffset ?? t.length) } });
   const wrapSel = (w) => view.dispatch({ changes: [{ from: s, insert: w }, { from: e, insert: w }], selection: { anchor: s + w.length, head: e + w.length } });
+  const wrapPair = (open, close) => view.dispatch({ changes: [{ from: s, insert: open }, { from: e, insert: close }], selection: { anchor: s + open.length, head: e + open.length } });
 
   switch (action) {
     case "bold": wrapSel("**"); break;
@@ -1094,6 +1283,40 @@ function applyMdAction(view, action) {
     case "strike": wrapSel("~~"); break;
     case "highlight": wrapSel("=="); break;
     case "code": wrapSel("`"); break;
+    case "underline": wrapPair("<u>", "</u>"); break; // 仕様書 R-03
+    case "superscript": wrapSel("^"); break;
+    case "subscript": wrapSel("~"); break;
+    case "eraseFormat": {
+      const cleaned = eraseFormatting(selText);
+      view.dispatch({ changes: { from: s, to: e, insert: cleaned }, selection: { anchor: s, head: s + cleaned.length } });
+      break; // 仕様書 R-08
+    }
+    case "softBreak": view.dispatch({ changes: { from: s, to: e, insert: "  \n" }, selection: { anchor: s + 3 } }); break; // 仕様書 E-02
+    case "selectWord": selectWordAtCursor(view); break; // 仕様書 E-12
+    case "deleteWord": deleteWordAtCursor(view); break; // 仕様書 E-13
+    case "selectLine": selectLineAtCursor(view); break; // 仕様書 E-09
+    case "selectStyleRange": selectStyleRangeAtCursor(view); break; // 仕様書 E-11
+    case "deleteTableRow": deleteTableRowAtCursor(view); break; // 表の行を削除
+    case "scrollToSelection": view.dispatch({ effects: EditorView.scrollIntoView(state.selection.main.head, { y: "center" }) }); break; // 仕様書 E-16
+    case "headingUp": shiftHeadingLevel(view, -1); break; // 仕様書 P-03
+    case "headingDown": shiftHeadingLevel(view, 1); break; // 仕様書 P-04
+    case "listBullet": convertListType(view, "bullet"); break; // 仕様書 P-13
+    case "listOrdered": convertListType(view, "ordered"); break;
+    case "listCheck": convertListType(view, "check"); break;
+    case "mathBlock": insert("$$\n" + selText + "\n$$", 3); break; // 仕様書 P-07
+    case "frontMatter": {
+      if (state.doc.length > 0 && state.doc.line(1).text === "---") break; // 既にある場合は何もしない
+      view.dispatch({ changes: { from: 0, insert: "---\ntitle: \n---\n\n" }, selection: { anchor: 10 } });
+      break; // 仕様書 P-14
+    }
+    case "image": {
+      // 実際のファイル選択・相対パス解決はC#側(main.js)が行い、結果をpayloadで受け取る
+      const alt = payload?.alt ?? "";
+      const path = payload?.path ?? "";
+      const md = `![${alt}](${path})`;
+      view.dispatch({ changes: { from: s, to: e, insert: md }, selection: { anchor: s + md.length } });
+      break; // 仕様書 R-07
+    }
     case "h": linePrefix("## "); break;
     case "h1": linePrefix("# "); break;
     case "h2": linePrefix("## "); break;

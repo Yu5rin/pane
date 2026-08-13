@@ -80,7 +80,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// </summary>
     public void OpenWindow(string? path, AutoSaveSnapshot? recoverFrom = null)
     {
-        var form = new MainForm(path, recoverFrom);
+        var form = new MainForm(path, recoverFrom, requestNewWindow: p => OpenWindow(p));
 
         int width = _settings.WindowWidth ?? DefaultWidth;
         int height = _settings.WindowHeight ?? DefaultHeight;

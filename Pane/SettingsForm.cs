@@ -15,6 +15,7 @@ internal sealed class SettingsForm : Form
     private readonly CheckBox _checkHighlight;
     private readonly CheckBox _checkInlineMath;
     private readonly CheckBox _checkMathAutoNumber;
+    private readonly CheckBox _checkCopyHtml;
 
     public bool RestoreSessionOnStartup => _radioRestoreSession.Checked;
     public bool FileAssociationEnabled => _checkFileAssociation.Checked;
@@ -23,6 +24,8 @@ internal sealed class SettingsForm : Form
     public bool HighlightEnabled => _checkHighlight.Checked;
     public bool InlineMathEnabled => _checkInlineMath.Checked;
     public bool MathAutoNumberEnabled => _checkMathAutoNumber.Checked;
+    /// <summary>"markdown" | "html"。既定のコピー形式(仕様書 第2.9.3節)。</summary>
+    public string DefaultCopyFormat => _checkCopyHtml.Checked ? "html" : "markdown";
 
     public SettingsForm(AppSettings current)
     {
@@ -32,7 +35,7 @@ internal sealed class SettingsForm : Form
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterParent;
         Width = 400;
-        Height = 520;
+        Height = 560;
         Font = new Font("Yu Gothic UI", 9f);
 
         var groupStartup = new GroupBox
@@ -127,11 +130,22 @@ internal sealed class SettingsForm : Form
         groupMath.Controls.Add(_checkInlineMath);
         groupMath.Controls.Add(_checkMathAutoNumber);
 
+        // 既定のコピー形式(仕様書 第2.9.3節: 通常のコピーでHTMLも同時に含めるか)
+        _checkCopyHtml = new CheckBox
+        {
+            Text = "コピー時にHTML形式も含める(他アプリへの貼り付けで書式を保持)",
+            Left = 16,
+            Top = 340,
+            Width = 356,
+            Height = 24,
+            Checked = current.DefaultCopyFormat == "html",
+        };
+
         _checkFileAssociation = new CheckBox
         {
             Text = "既定のMarkdownエディタとして登録する (.md / .markdown / .mdown)",
             Left = 16,
-            Top = 340,
+            Top = 372,
             Width = 356,
             Height = 40,
             Checked = current.FileAssociationEnabled,
@@ -141,7 +155,7 @@ internal sealed class SettingsForm : Form
         {
             Text = "登録後、Windowsの設定画面で手動確認が必要な場合があります。",
             Left = 16,
-            Top = 382,
+            Top = 414,
             Width = 356,
             Height = 32,
             ForeColor = SystemColors.GrayText,
@@ -152,7 +166,7 @@ internal sealed class SettingsForm : Form
             Text = "OK",
             DialogResult = DialogResult.OK,
             Left = 210,
-            Top = 424,
+            Top = 456,
             Width = 80,
         };
         var btnCancel = new Button
@@ -160,13 +174,14 @@ internal sealed class SettingsForm : Form
             Text = "キャンセル",
             DialogResult = DialogResult.Cancel,
             Left = 296,
-            Top = 424,
+            Top = 456,
             Width = 80,
         };
 
         Controls.Add(groupStartup);
         Controls.Add(groupMarkdownExt);
         Controls.Add(groupMath);
+        Controls.Add(_checkCopyHtml);
         Controls.Add(_checkFileAssociation);
         Controls.Add(note);
         Controls.Add(btnOk);

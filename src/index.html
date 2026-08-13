@@ -13,38 +13,44 @@
 </script>
 <link rel="stylesheet" href="style.css">
 <style>
-  /* Phase 1 動作確認用の最小レイアウト。第10.4節の画面構成は後フェーズで実装する。 */
+  /* 第10.4節の画面構成: タイトルバー・メニューバー・本文・ステータスバーの四段。 */
   html, body { height: 100%; margin: 0; }
-  body { display: flex; flex-direction: column; background: var(--paper); color: var(--ink); font-family: var(--font-body); }
+  body { display: flex; flex-direction: column; background: var(--paper); color: var(--ink); font-family: var(--font-body); position: relative; }
   #titlebar { display: flex; align-items: center; gap: 10px; padding: 0 10px; height: 32px; border-bottom: 1px solid var(--rule); font-size: 13px; flex: none; }
   #titlebar .filename { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #titlebar .dot { color: var(--accent); visibility: hidden; }
   #titlebar.dirty .dot { visibility: visible; }
   #titlebar.readonly .filename::after { content: "(読み取り専用)"; margin-left: 6px; color: var(--ink-mute); font-size: 11px; }
-  #titlebar button { border: none; background: transparent; color: var(--ink-mute); font: inherit; cursor: pointer; padding: 4px 8px; border-radius: 6px; }
+  #titlebar button { border: none; background: transparent; color: var(--ink-mute); font: inherit; cursor: pointer; padding: 4px 6px; border-radius: 6px; display: inline-flex; align-items: center; }
   #titlebar button:hover { color: var(--ink); background: var(--accent-soft); }
-  #cm-host { flex: 1; min-height: 0; overflow: hidden; }
+  #cm-host { flex: 1; min-height: 0; overflow: hidden; position: relative; }
   #statusbar { display: flex; gap: 16px; padding: 0 10px; height: 24px; align-items: center; border-top: 1px solid var(--rule); font-size: 11px; color: var(--ink-mute); flex: none; font-family: var(--font-mono); }
+  #statusbar button { border: none; background: transparent; color: inherit; font: inherit; cursor: pointer; padding: 0 4px; }
+  #statusbar button:hover { color: var(--ink); }
 </style>
 </head>
 <body>
   <div id="titlebar">
     <span class="filename" id="filename">無題</span>
     <span class="dot" id="dirty-dot">&#9679;</span>
-    <button id="btn-open" type="button">開く</button>
-    <button id="btn-save" type="button">保存</button>
-    <button id="btn-save-as" type="button">名前を付けて保存</button>
-    <button id="btn-theme" type="button">テーマ切替</button>
-    <button id="btn-settings" type="button" hidden>設定</button>
+    <button id="btn-theme" type="button" title="テーマ切替" aria-label="テーマ切替">
+      <svg id="theme-icon-light" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2.5v2.5M12 19v2.5M4.2 4.2l1.8 1.8M18 18l1.8 1.8M2.5 12H5M19 12h2.5M4.2 19.8 6 18M18 6l1.8-1.8"/></svg>
+      <svg id="theme-icon-dark" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" hidden><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/></svg>
+    </button>
   </div>
+  <div id="menubar"></div>
   <div id="cm-host"></div>
   <div id="statusbar">
     <span id="status-mode">Markdown</span>
     <span id="status-encoding"></span>
     <span id="status-line-ending"></span>
+    <button id="status-wrap" type="button" title="折り返し表示を切り替え"></button>
     <span id="status-count">0文字</span>
+    <span style="flex:1"></span>
+    <button id="btn-settings" type="button" hidden>設定</button>
   </div>
   <input id="file-input" type="file" accept=".md,.markdown,.mdown,.txt" hidden>
+  <input id="image-input" type="file" accept="image/*" hidden>
   <script type="module" src="main.js"></script>
 </body>
 </html>
