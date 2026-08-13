@@ -86,6 +86,23 @@ html[data-theme="dark"] {
   --code-type: color-mix(in srgb, var(--accent) 40%, var(--ink) 60%);
   --code-op: var(--ink-mute);
 }
+
+/* ===== マークダウン記法拡張の配色(仕様書 第2.9節・第10.2節) =====
+   Front Matter・Callouts とも、上の6トークンからcolor-mix()で派生させる。 */
+:root {
+  --frontmatter-bg: color-mix(in srgb, var(--ink) 5%, var(--paper));
+
+  --callout-note: var(--accent);
+  --callout-tip: color-mix(in srgb, var(--accent) 70%, var(--ink-mute) 30%);
+  --callout-important: color-mix(in srgb, var(--accent) 55%, var(--ink) 45%);
+  --callout-warning: color-mix(in srgb, var(--ink-mute) 55%, var(--accent) 45%);
+  --callout-caution: color-mix(in srgb, var(--ink) 55%, var(--ink-mute) 45%);
+  --callout-note-bg: color-mix(in srgb, var(--accent) 8%, var(--paper));
+  --callout-tip-bg: color-mix(in srgb, var(--accent) 6%, var(--paper));
+  --callout-important-bg: color-mix(in srgb, var(--accent) 10%, var(--paper));
+  --callout-warning-bg: color-mix(in srgb, var(--ink-mute) 10%, var(--paper));
+  --callout-caution-bg: color-mix(in srgb, var(--ink-mute) 14%, var(--paper));
+}
 * { box-sizing: border-box; }
 [hidden] { display: none !important; } /* hidden属性はどのdisplay指定よりも優先する */
 html, body { margin: 0; height: 100%; overflow: hidden; } /* スクロールはサイドバー/エディタ内のみ */
@@ -346,6 +363,67 @@ html[data-theme="dark"] .cm-line.cm-codeblock-line { background: var(--code-bg);
 .cm-line.cm-table-row { background: var(--code-bg); font-family: var(--font-mono); font-size: .9em; padding-left: 8px !important; padding-right: 8px !important; }
 .cm-line.cm-table-header { font-weight: 700; border-bottom: 2px solid var(--line); }
 html[data-theme="dark"] .tok-mark { background: #8A7A2E; color: #F2EFDF; }
+
+/* ===== マークダウン記法拡張(仕様書 第2.9節) ===== */
+
+/* YAML Front Matter(M-11): 本文と異なる背景色を充てるだけで、記法の装飾はしない */
+.cm-line.cm-frontmatter { background: var(--frontmatter-bg); font-family: var(--font-mono); font-size: .88em; padding-left: 12px !important; padding-right: 12px !important; }
+.cm-line.cm-fm-first { border-radius: 8px 8px 0 0; padding-top: 4px !important; }
+.cm-line.cm-fm-last { border-radius: 0 0 8px 8px; padding-bottom: 4px !important; }
+
+/* 目次 [toc](M-12) */
+.cm-toc { border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; margin: 4px 0; background: var(--surface); }
+.cm-toc-list { display: flex; flex-direction: column; gap: 4px; }
+.cm-toc-item { color: var(--ink); text-decoration: none; font-size: .92em; padding: 2px 0; border-radius: 4px; }
+.cm-toc-item:hover { color: var(--accent); }
+.cm-toc-h1 { padding-left: 0; font-weight: 700; }
+.cm-toc-h2 { padding-left: 14px; }
+.cm-toc-h3 { padding-left: 28px; }
+.cm-toc-h4 { padding-left: 42px; color: var(--ink-sub); }
+.cm-toc-h5 { padding-left: 56px; color: var(--ink-sub); }
+.cm-toc-h6 { padding-left: 70px; color: var(--ink-sub); }
+.cm-toc-empty { color: var(--ink-sub); font-size: .9em; }
+
+/* 脚注(M-09) */
+.cm-footnote-ref { position: relative; display: inline-block; }
+.cm-footnote-num { color: var(--accent); font-size: .78em; font-weight: 700; padding: 0 2px; cursor: default; border-bottom: 1px dotted var(--accent); }
+.cm-footnote-popup {
+  display: none; position: absolute; bottom: 125%; left: 50%; transform: translateX(-50%);
+  min-width: 160px; max-width: 320px; padding: 8px 10px; border-radius: 6px;
+  background: var(--ink); color: var(--paper); font-size: 12px; line-height: 1.5;
+  white-space: normal; z-index: 20; box-shadow: var(--shadow-pop);
+}
+.cm-footnote-ref:hover .cm-footnote-popup { display: block; }
+.cm-line.cm-footnote-def { background: var(--code-bg); font-size: .92em; padding-left: 10px !important; }
+.cm-line.cm-footnote-def-first { border-radius: 6px 6px 0 0; }
+.cm-footnote-def-label { color: var(--accent); font-weight: 700; font-size: .85em; margin-right: 4px; }
+
+/* Callouts / GitHub式アラート(M-13) */
+.cm-callout { display: block; border-radius: 6px; padding-left: 12px !important; border-left: 3px solid transparent; }
+.cm-callout-note { border-left-color: var(--callout-note); background: var(--callout-note-bg); }
+.cm-callout-tip { border-left-color: var(--callout-tip); background: var(--callout-tip-bg); }
+.cm-callout-important { border-left-color: var(--callout-important); background: var(--callout-important-bg); }
+.cm-callout-warning { border-left-color: var(--callout-warning); background: var(--callout-warning-bg); }
+.cm-callout-caution { border-left-color: var(--callout-caution); background: var(--callout-caution-bg); }
+.cm-callout-marker { display: inline-flex; align-items: center; gap: 6px; font-size: .9em; }
+.cm-callout-marker svg { flex: none; }
+.cm-callout-marker-note svg, .cm-callout-marker-tip svg, .cm-callout-marker-important svg { color: var(--callout-note); }
+.cm-callout-marker-warning svg { color: var(--callout-warning); }
+.cm-callout-marker-caution svg { color: var(--callout-caution); }
+
+/* 上付き・下付き(M-24・M-25) */
+.tok-sup { vertical-align: super; font-size: .78em; }
+.tok-sub { vertical-align: sub; font-size: .78em; }
+
+/* 絵文字ショートコード(M-22) */
+.cm-emoji { font-size: 1.05em; }
+
+/* 数式(MathJax、仕様書 第5章・第2.9.1節) */
+.cm-math-block { display: block; text-align: center; padding: 10px 4px; overflow-x: auto; }
+.cm-math-block svg { max-width: 100%; }
+.cm-math-inline { display: inline-block; vertical-align: middle; }
+.cm-math-inline svg { vertical-align: middle; }
+.cm-math-error { color: var(--danger); font-family: var(--font-mono); font-size: .85em; }
 
 /* ホバー装飾はホバー可能なデバイス限定(iOSはタップ後:hoverが残留し色が戻らないため) */
 @media (hover: hover) {

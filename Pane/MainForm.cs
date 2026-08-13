@@ -139,6 +139,7 @@ internal sealed class MainForm : Form
         switch (type)
         {
             case "ready":
+                PostExtensionToggles();
                 if (_recoverFrom is not null) RestoreFromSnapshot(_recoverFrom);
                 else if (_initialPath is not null) OpenFile(_initialPath);
                 else OpenNewDocument();
@@ -503,6 +504,30 @@ internal sealed class MainForm : Form
         }
 
         settings.StartupBehavior = dialog.RestoreSessionOnStartup ? "restoreSession" : "blank";
+        settings.CalloutsEnabled = dialog.CalloutsEnabled;
+        settings.SuperSubscriptEnabled = dialog.SuperSubscriptEnabled;
+        settings.HighlightEnabled = dialog.HighlightEnabled;
+        settings.InlineMathEnabled = dialog.InlineMathEnabled;
+        settings.MathAutoNumberEnabled = dialog.MathAutoNumberEnabled;
         SettingsService.Save(settings);
+        PostExtensionToggles();
+    }
+
+    /// <summary>
+    /// マークダウン記法拡張のON/OFF(仕様書 第2.10節 C-01)をJS側へ伝える。
+    /// 起動時("ready"受信直後)と、設定画面でOKが押されるたびに送る。
+    /// </summary>
+    private void PostExtensionToggles()
+    {
+        AppSettings settings = SettingsService.Load();
+        PostToWeb(new
+        {
+            type = "apply-settings",
+            calloutsEnabled = settings.CalloutsEnabled,
+            superSubEnabled = settings.SuperSubscriptEnabled,
+            highlightEnabled = settings.HighlightEnabled,
+            inlineMathEnabled = settings.InlineMathEnabled,
+            mathAutoNumberEnabled = settings.MathAutoNumberEnabled,
+        });
     }
 }

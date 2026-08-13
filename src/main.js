@@ -95,6 +95,16 @@ async function handleHostMessage(msg) {
       // 自動保存(仕様書 N-06): C#側は本文を持たないため、要求されたら都度返す。
       bridge?.postMessage({ type: "text-response", text: editor.getValue() });
       break;
+    case "apply-settings":
+      // マークダウン記法拡張のON/OFF(仕様書 第2.10節 C-01)。起動時と設定変更時に届く。
+      editor.setExtensionToggles({
+        callouts: msg.calloutsEnabled,
+        superSub: msg.superSubEnabled,
+        highlight: msg.highlightEnabled,
+        inlineMath: msg.inlineMathEnabled,
+        mathAutoNumber: msg.mathAutoNumberEnabled,
+      });
+      break;
   }
 }
 
