@@ -199,6 +199,33 @@ internal sealed class MainForm : Form
         ApplyTitleBarTheme();
     }
 
+    private const int WM_SYSCOMMAND = 0x0112;
+    private const int SC_KEYMENU = 0xF100;
+
+    /// <summary>
+    /// Altの単押しでWindowsが「メニューモード」へ入るのを止める。
+    ///
+    /// PaneのメニューバーはWebView2の中のHTMLで、Alt単押しはその表示/非表示の切替に
+    /// 割り当てている(src/commands.js)。ところがAltがこのウィンドウのウィンドウプロシージャまで
+    /// 届くと、DefWindowProcがWM_SYSCOMMAND(SC_KEYMENU)を投げてシステムメニューの
+    /// メニューモードに入ってしまう。その間はキーボードフォーカスがWebView2から外れるため、
+    /// 次のAltはメニューモードを抜けるだけでJS側に届かず、「初回は1回、以降は2回押さないと
+    /// 切り替わらない」という挙動になっていた。
+    ///
+    /// JS側でもAltのkeydown/keyupをpreventDefault()して外へ通さないようにしているが、
+    /// WebView2の版によっては素通りし得るため、ここでも保険として捨てる。
+    /// このアプリはWinForms側にメニューストリップを持たないため、SC_KEYMENUを無視しても
+    /// 失われる機能は無い(Alt+F4のSC_CLOSE等は別のwParamなので影響しない)。
+    /// </summary>
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == WM_SYSCOMMAND && ((int)m.WParam & 0xFFF0) == SC_KEYMENU)
+        {
+            return;
+        }
+        base.WndProc(ref m);
+    }
+
     /// <summary>
     /// タイトルバー(ネイティブキャプション)の配色を現在の設定に合わせて塗り直す。
     /// 呼び出しタイミング: (1)ウィンドウ生成直後(<see cref="OnHandleCreated"/>)、

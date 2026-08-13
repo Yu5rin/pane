@@ -244,6 +244,52 @@ function applyCustomCss(css) {
   }
   customCssEl.textContent = css || "";
 }
+
+// ---- タイトルバーの配色を本文エリアに合わせる(ユーザー要望) ----
+// ネイティブのタイトルバーはWinForms側(Pane/WindowChrome.cs)がDWMのAPIで塗るため、
+// 「いまHTML側で実際に描画されている色」をJSから教えてやる必要がある。テーマ切替・
+// テーマプリセット・カスタムCSSのどれで色が変わっても、CSS変数の定義を読むのではなく
+// getComputedStyleで実際の描画色を読むことで、どの経路の変更にも同じ仕組みで追従できる。
+// 受け口はPane/MainForm.csの case "titlebar-color"。
+function rgbToHex(value) {
+  const m = /^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)/.exec(value || "");
+  if (!m) return null;
+  const hex = (n) => Math.max(0, Math.min(255, Math.round(Number(n)))).toString(16).padStart(2, "0");
+  return `#${hex(m[1])}${hex(m[2])}${hex(m[3])}`;
+}
+// 候補セレクタを順に見て、最初に「実際に塗られている」色を返す。
+// 透明(rgba(0,0,0,0) / transparent)は「その要素では塗っていない」という意味のため次の候補へ送る。
+function readPaintedColor(selectors, prop) {
+  for (const sel of selectors) {
+    const el = sel === "body" ? document.body : document.querySelector(sel);
+    if (!el) continue;
+    const value = getComputedStyle(el)[prop];
+    if (!value || value === "transparent" || /rgba\(\s*0,\s*0,\s*0,\s*0\s*\)/.test(value)) continue;
+    const hex = rgbToHex(value);
+    if (hex) return hex;
+  }
+  return null;
+}
+let titleBarSyncTimer = null;
+function syncTitleBarColor() {
+  if (!bridge) return;
+  // 背景色と文字色にはCSSのtransition(style.css: transition: background .2s, color .2s)が
+  // 掛かっているため、テーマを切り替えた直後にgetComputedStyleすると「遷移中の中間色」が返る。
+  // そのまま送るとタイトルバーだけ半端な色で固定されてしまうので、遷移が終わってから読む。
+  // 待ち時間は決め打ちにせず実際のtransition-durationから求める
+  // (prefers-reduced-motion時は0sになるため待たない。CSS側を変えてもここは追従する)。
+  clearTimeout(titleBarSyncTimer);
+  const durations = getComputedStyle(document.body).transitionDuration || "0s";
+  const maxSeconds = durations.split(",").reduce((max, s) => Math.max(max, parseFloat(s) || 0), 0);
+  titleBarSyncTimer = setTimeout(() => {
+    const background = readPaintedColor([".cm-editor", "#cm-host", "body"], "backgroundColor");
+    const foreground = readPaintedColor([".cm-content", ".cm-editor", "body"], "color");
+    if (!background && !foreground) return;
+    console.log(`[titlebar] 本文エリアの実描画色をタイトルバーへ反映: background=${background}, foreground=${foreground}`);
+    bridge.postMessage({ type: "titlebar-color", background, foreground });
+  }, Math.round(maxSeconds * 1000) + 60);
+}
+
 function updateStatusMeta() {
   statusEncoding.textContent = currentEncoding ? `文字コード: ${currentEncoding}` : "";
   statusLineEnding.textContent = currentLineEnding ? `改行コード: ${currentLineEnding}` : "";
@@ -510,6 +556,18 @@ const editor = createEditor(host, {
   onPaste: (e) => {
     const html = e.clipboardData?.getData("text/html");
     const plain = e.clipboardData?.getData("text/plain") || "";
+    const imageFile = findClipboardImage(e.clipboardData);
+    // クリップボードに画像の実体があり、かつHTML側に文章が無い(実質<img>だけ)場合は、
+    // HTMLより画像を優先する。ブラウザで画像を右クリックして「画像をコピー」すると、
+    // 画像のバイト列と一緒に <img src="https://..."> というHTMLも載る。HTMLを先に見ると
+    // URL参照のMarkdownになってしまい、せっかく手元にある画像の実体が捨てられて
+    // オフラインでは表示できなくなる。ここで画像を優先することで、外部へ一切接続せずに
+    // ローカルへ保存できる(Webページの文章と画像をまとめてコピーした場合はHTMLに文章が
+    // あるため、従来どおりMarkdownへの変換に回る)。
+    if (imageFile && !htmlHasText(html)) {
+      insertImageFile(imageFile);
+      return true;
+    }
     if (html) {
       const md = htmlToMarkdown(html).trim();
       if (md) {
@@ -518,14 +576,12 @@ const editor = createEditor(host, {
         return true;
       }
     }
-    if (!plain) {
-      // html/plainどちらも無く、画像ファイルが乗っている場合(スクリーンショットのコピー等)。
-      // 仕様書 docs/設定項目一覧.md「画像」節: クリップボードからの貼り付けも画像挿入の経路の1つ。
-      const imageFile = Array.from(e.clipboardData?.files ?? []).find((f) => isImageFile(f));
-      if (imageFile) {
-        insertImageFile(imageFile);
-        return true;
-      }
+    // HTMLが無い(または変換結果が空)場合。プレーンテキストより画像を優先する
+    // (画像をコピーしたときにファイル名だけが貼られる、という取りこぼしを防ぐ)。
+    // 仕様書 docs/設定項目一覧.md「画像」節: クリップボードからの貼り付けも画像挿入の経路の1つ。
+    if (imageFile) {
+      insertImageFile(imageFile);
+      return true;
     }
     lastPasteLength = plain.length;
     return false;
@@ -1292,6 +1348,9 @@ async function handleHostMessage(msg) {
       // (file://は仮想ホスト配下から読めないため)。<head>内の専用<style>要素のtextContentへ
       // 反映する(innerHTMLは使わない)。要素が無ければここで生成する。
       applyCustomCss(msg.customCss ?? "");
+      // ここまでで本文エリアの色が確定する(テーマ・プリセット・カスタムCSSのすべて)。
+      // その実描画色をネイティブのタイトルバーへ反映する。
+      syncTitleBarColor();
       // キーバインド(仕様書 C-10)。既存のcommands配列を直接書き換えるため、メニューバー・
       // コマンドパレット・ショートカット待受けはいずれも再起動なしに新しい割り当てを拾う。
       keyBindings = msg.keyBindings ?? {};
@@ -1448,6 +1507,29 @@ function isImageFile(file) {
   if (file.type && file.type.startsWith("image/")) return true;
   return /\.(png|jpe?g|gif|svg|webp|bmp)$/i.test(file.name || "");
 }
+// クリップボードから画像の実体を取り出す。
+// filesだけでは取りこぼす場合があるためitemsも見る(スクリーンショットのように
+// ファイル名を持たないビットマップは、環境によってfilesに現れないことがある)。
+function findClipboardImage(clipboardData) {
+  if (!clipboardData) return null;
+  const fromFiles = Array.from(clipboardData.files ?? []).find((f) => isImageFile(f));
+  if (fromFiles) return fromFiles;
+  for (const item of Array.from(clipboardData.items ?? [])) {
+    if (item.kind !== "file") continue;
+    if (!item.type || !item.type.startsWith("image/")) continue;
+    const file = item.getAsFile();
+    if (file) return file;
+  }
+  return null;
+}
+// クリップボードのHTMLに「文章」が含まれているかどうか。
+// ブラウザで画像を右クリックして「画像をコピー」した場合のHTMLは実質<img>だけで、
+// タグを取り除くと何も残らない。この判定で「画像のコピー」と「文章ごとのコピー」を見分ける。
+function htmlHasText(html) {
+  if (!html) return false;
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  return (doc.body?.textContent ?? "").trim().length > 0;
+}
 imageInput.addEventListener("change", async () => {
   const file = imageInput.files[0];
   if (!file) return;
@@ -1568,6 +1650,8 @@ document.getElementById("btn-theme").addEventListener("click", () => {
   editor.refreshTheme();
   // 手動選択を永続化する(仕様書 第10.2節)。次回起動時もOS設定に戻らないようにする。
   bridge?.postMessage({ type: "set-theme", theme: next });
+  // タイトルバーも本文エリアと同じ色に切り替える。
+  syncTitleBarColor();
 });
 // 設定画面(仕様書 第2.10節)はHTML製で、ブリッジが無いブラウザ単体動作でも開ける
 // (保存はできないが画面自体は操作できる。ctx.actions.openSettings参照)ため、常に表示する。
