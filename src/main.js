@@ -448,15 +448,21 @@ function arrayBufferToBase64(buffer) {
 function hasFileDrag(e) {
   return !!e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files");
 }
-window.addEventListener("dragenter", (e) => { if (hasFileDrag(e)) e.preventDefault(); });
-window.addEventListener("dragover", (e) => { if (hasFileDrag(e)) e.preventDefault(); });
+// captureフェーズ(第3引数true)で登録する。CodeMirror自身がエディタ内テキストの
+// ドラッグ移動用にdragover/drop相当を独自処理しており、bubbleフェーズで登録すると
+// そちらが先に処理してこちらまで届かない(stopPropagation等で握りつぶされる)ことがある。
+window.addEventListener("dragenter", (e) => { if (hasFileDrag(e)) e.preventDefault(); }, true);
+window.addEventListener("dragover", (e) => { if (hasFileDrag(e)) e.preventDefault(); }, true);
 window.addEventListener("drop", async (e) => {
+  logToHost("log", `drop event: hasFileDrag=${hasFileDrag(e)}, filesCount=${e.dataTransfer?.files?.length ?? 0}`);
   if (!hasFileDrag(e) || !e.dataTransfer.files.length) return;
   e.preventDefault();
+  e.stopPropagation();
   const file = e.dataTransfer.files[0];
   if (bridge) {
     if (isDirty && !window.confirm("保存されていない変更があります。ドロップしたファイルを開くと失われますが、よろしいですか?")) return;
     const buf = await file.arrayBuffer();
+    logToHost("log", `open-dropped-fileを送信: name=${file.name}, size=${buf.byteLength}`);
     bridge.postMessage({ type: "open-dropped-file", name: file.name, dataBase64: arrayBufferToBase64(buf) });
     return;
   }
@@ -469,7 +475,7 @@ window.addEventListener("drop", async (e) => {
   setDirty(false);
   updateCount();
   updateStatusMode();
-});
+}, true);
 
 async function saveFile(forcePicker) {
   const text = editor.getValue();
