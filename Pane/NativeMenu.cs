@@ -43,6 +43,20 @@ internal static class NativeMenu
     /// ・項目を選ぶと<paramref name="onCommand"/>(id)を、選ばずに閉じると<paramref name="onClosed"/>を
     ///   呼ぶ(どちらか一方だけが必ず1回呼ばれる)。
     /// </summary>
+    /// <summary>いま表示しているポップアップ。WebView2の中(本文・ステータスバー)がクリック
+    /// されたときは、ポップアップ側からはそれを検知できないため、JS側から close-menu を
+    /// 受け取ってここから閉じる。</summary>
+    private static ToolStripDropDown? _current;
+
+    /// <summary>開いているポップアップがあれば閉じる。無ければ何もしない。</summary>
+    public static void CloseCurrent()
+    {
+        ToolStripDropDown? current = _current;
+        _current = null;
+        try { current?.Close(); }
+        catch (Exception ex) { Logger.WriteException("NativeMenu.CloseCurrent失敗", ex); }
+    }
+
     public static void Show(
         Point screenLocation,
         bool isDark,
@@ -114,9 +128,23 @@ internal static class NativeMenu
 
         dropDown.Closed += (_, _) =>
         {
+            if (ReferenceEquals(_current, dropDown)) _current = null;
             if (!commandFired) onClosed();
         };
 
+        // メニューの文字はWindowsのメニューフォントに合わせつつ、わずかに大きくする
+        // (既定のままだと本文やメニューバーの文字に対して小さく見えるため)。
+        try
+        {
+            Font baseFont = SystemFonts.MenuFont ?? Control.DefaultFont;
+            dropDown.Font = new Font(baseFont.FontFamily, baseFont.SizeInPoints + 0.5f, baseFont.Style);
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException("NativeMenu: メニューフォントの設定に失敗", ex);
+        }
+
+        _current = dropDown;
         dropDown.Show(screenLocation, ToolStripDropDownDirection.BelowRight);
     }
 }
@@ -281,7 +309,13 @@ internal sealed class PaneMenuRenderer : ToolStripRenderer
         using var brush = new SolidBrush(e.Item?.Enabled != false ? _ink : _inkDisabled);
         var oldSmoothing = e.Graphics.SmoothingMode;
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        Rectangle bounds = e.ArrowRectangle;
+        // ArrowRectangle をそのまま使うと三角が大きくなりすぎるため、中央に小さく描く
+        // (文字の高さに対して控えめな大きさにする)。
+        Rectangle r = e.ArrowRectangle;
+        int size = Math.Max(4, Math.Min(7, r.Height / 2));
+        int cx = r.Left + r.Width / 2;
+        int cy = r.Top + r.Height / 2;
+        Rectangle bounds = new(cx - size / 2, cy - size, size, size * 2);
         Point p1 = new(bounds.Left, bounds.Top);
         Point p2 = new(bounds.Left, bounds.Bottom);
         Point p3 = new(bounds.Right, bounds.Top + bounds.Height / 2);

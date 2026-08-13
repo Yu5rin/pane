@@ -255,9 +255,32 @@ export function initMenuBar(container, commands, ctx) {
     // DeviceDpiとWebView2の画面上の位置(_webView.PointToScreen)を使って画面座標へ変換する。
     const rect = btn.getBoundingClientRect();
     ctx.bridge.postMessage({ type: "open-menu", menu: menuName, x: rect.left, y: rect.bottom, items });
+    watchOutsideClick();
+  }
+
+  // ネイティブポップアップは別のウィンドウとして表示されるため、WebView2の中(=本文や
+  // ステータスバー)をクリックしてもポップアップ側はそれを検知できず、開いたままになる。
+  // 本文側でクリックを拾ってC#へ「閉じて」と伝える。
+  let outsideClickHandler = null;
+  function watchOutsideClick() {
+    stopOutsideClickWatch();
+    outsideClickHandler = (e) => {
+      // メニューバーの見出し自体のクリックは、そちらのハンドラが開き直しを行うので無視する。
+      if (e.target instanceof Element && e.target.closest(".menu-top")) return;
+      stopOutsideClickWatch();
+      clearNativeHighlight();
+      ctx.bridge?.postMessage({ type: "close-menu" });
+    };
+    window.addEventListener("pointerdown", outsideClickHandler, true);
+  }
+  function stopOutsideClickWatch() {
+    if (!outsideClickHandler) return;
+    window.removeEventListener("pointerdown", outsideClickHandler, true);
+    outsideClickHandler = null;
   }
 
   function clearNativeHighlight() {
+    stopOutsideClickWatch();
     nativeOpenBtn?.classList.remove("open");
     nativeOpenBtn = null;
   }
