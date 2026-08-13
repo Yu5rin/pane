@@ -35,6 +35,15 @@
     </Content>
   </ItemGroup>
 
+  <!-- FileTypes.generated.cs は `npm run build`(scripts/build.js)が src/file-types.js から
+       生成する。Gitで追跡するとビルドのたびに差分が出てpullを妨げるため追跡対象から外してあり、
+       クローン直後には存在しない。先に `npm run build` を実行する必要があることを、
+       分かりにくいコンパイルエラーではなく明示的なメッセージで伝える。 -->
+  <Target Name="EnsureFileTypesGenerated" BeforeTargets="BeforeCompile">
+    <Error Condition="!Exists('$(MSBuildProjectDirectory)\FileTypes.generated.cs')"
+           Text="Pane/FileTypes.generated.cs がありません。先にリポジトリ直下で `npm install` と `npm run build` を実行してください(src/file-types.js から自動生成されます)。" />
+  </Target>
+
   <!-- リリースビルド(dotnet publish)は実行ファイルと同階層のdist/を探す(MainForm.ResolveDistPath参照)。
        PublishSingleFileはContent項目を単一exeへ埋め込むためdist/(npm run buildの成果物)は対象外になるので、
        publish完了後に手動でリポジトリ直下のdist/をpublish出力へコピーする(先に `npm run build` 済みであること)。 -->

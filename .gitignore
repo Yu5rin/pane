@@ -7,3 +7,6 @@ obj/
 
 # ローカル検証用のPlaywrightスクリプト(コミット対象外)
 .verify-*.mjs
+
+# npm run build が自動生成する。追跡するとビルドのたびに差分が出てpullを妨げるため対象外にする
+Pane/FileTypes.generated.cs
