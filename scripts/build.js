@@ -18,12 +18,19 @@ function copyStaticFiles() {
   }
 }
 
+// mathjax-full の components/version.js は、バンドル時に PACKAGE_VERSION が定義されて
+// いないと eval("require") 経由でNode専用コード(package.jsonの動的読み込み)を実行しよう
+// とし、ブラウザ上で "require is not defined" を投げる。MathJax公式のwebpack設定と同様に、
+// ビルド時定数として注入して回避する(mathjax-full自身のドキュメントに明記された対処法)。
+const mathjaxVersion = require("mathjax-full/package.json").version;
+
 const buildOptions = {
   entryPoints: ["src/main.js"],
   bundle: true,
   format: "esm",
   splitting: true,
   outdir: "dist",
+  define: { PACKAGE_VERSION: JSON.stringify(mathjaxVersion) },
 };
 
 async function run() {

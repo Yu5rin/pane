@@ -4,11 +4,14 @@
 import { EditorView, keymap, Decoration, ViewPlugin, WidgetType } from "@codemirror/view";
 import { EditorState, Compartment, StateEffect, StateField } from "@codemirror/state";
 import { markdown } from "@codemirror/lang-markdown";
-import { Strikethrough, Table } from "@lezer/markdown";
+import { Strikethrough, Table, Superscript, Subscript, Emoji } from "@lezer/markdown";
 import { defaultKeymap, history, historyKeymap, indentWithTab, insertNewline, undo, redo, moveLineUp, moveLineDown, copyLineDown, deleteLine } from "@codemirror/commands";
 import { syntaxTree, syntaxHighlighting, HighlightStyle, LanguageDescription } from "@codemirror/language";
+import { autocompletion } from "@codemirror/autocomplete";
 import { tags as t } from "@lezer/highlight";
 import { codeLanguages, resolveFileMode } from "./languages.js";
+import { extractHeadings, findHeadingBySlug, findEmojiCompletions, EMOJI_SHORTCODES, CALLOUT_TYPES } from "./markdown-extras.js";
+import { renderMathToHtml } from "./math.js";
 
 // コードのハイライト配色(仕様書 第5章・第10.2節)。色は単独で決め打ちせず、
 // style.cssで定義した--code-*トークン(--ink/--ink-mute/--accentから派生)を参照する。
@@ -28,6 +31,92 @@ function cursorInside(view, from, to) {
   if (!view.hasFocus) return false;
   for (const r of view.state.selection.ranges) if (r.from <= to && r.to >= from) return true;
   return false;
+}
+
+// マークダウン記法拡張のON/OFF(仕様書 第2.10節 C-01)。既定はすべてON
+// (導入前の挙動を変えないため)。C#設定画面からの変更は setExtensionToggles() 経由で届く。
+// インライン数式・自動採番はTypora準拠で既定OFF。
+const setExtToggles = StateEffect.define();
+const DEFAULT_EXT_TOGGLES = { callouts: true, superSub: true, highlight: true, inlineMath: false, mathAutoNumber: false };
+const extTogglesField = StateField.define({
+  create: () => DEFAULT_EXT_TOGGLES,
+  update: (v, tr) => { for (const ef of tr.effects) if (ef.is(setExtToggles)) v = { ...v, ...ef.value }; return v; },
+});
+
+// ---- YAML Front Matter(仕様書 M-11) ----
+// 先頭が正確に "---" の行から始まる場合のみ検出する。閉じの "---" が
+// 見つかるまで走査するが、上限行数を設けて巨大文書での際限のない走査を防ぐ。
+const FRONTMATTER_SCAN_CAP = 1000;
+function computeFrontmatter(state) {
+  const doc = state.doc;
+  if (doc.lines < 1 || doc.line(1).text !== "---") return null;
+  const cap = Math.min(doc.lines, FRONTMATTER_SCAN_CAP);
+  for (let n = 2; n <= cap; n++) {
+    if (doc.line(n).text === "---") return { from: 0, to: doc.line(n).to };
+  }
+  return null;
+}
+const frontmatterField = StateField.define({
+  create: computeFrontmatter,
+  update: (v, tr) => {
+    if (!tr.docChanged) return v;
+    // 先頭付近(front matter判定に影響しうる範囲)以外の変更では再計算しない
+    const boundary = Math.max(4, v ? v.to : 0);
+    return tr.changes.touchesRange(0, boundary) ? computeFrontmatter(tr.state) : v;
+  },
+});
+
+// ---- 参照リンク(M-16)・脚注定義(M-09)の収集 ----
+// LinkReference ノード([id]: url 形式)を1回の木走査でまとめて集める。
+// ラベルが "^" で始まるものは脚注定義として区別する。
+function collectReferences(state) {
+  const links = new Map();
+  const footnotes = new Map();
+  syntaxTree(state).iterate({
+    enter: (node) => {
+      if (node.name !== "LinkReference") return;
+      const labelNode = node.node.getChild("LinkLabel");
+      if (!labelNode) return false;
+      const label = state.doc.sliceString(labelNode.from, labelNode.to).slice(1, -1);
+      const urlNode = node.node.getChild("URL");
+      const url = urlNode ? state.doc.sliceString(urlNode.from, urlNode.to) : "";
+      if (label.startsWith("^")) footnotes.set(label.slice(1), { content: url, from: node.from, to: node.to });
+      else links.set(label.trim().toLowerCase(), url);
+      return false;
+    },
+  });
+  return { links, footnotes };
+}
+
+// ---- Callouts / GitHub式アラート(M-13) ----
+// Blockquoteの最初の行が "> [!TYPE]" のみの場合にその種別を返す。
+function detectCalloutType(state, blockquoteNode) {
+  const firstLine = state.doc.lineAt(blockquoteNode.from);
+  const m = firstLine.text.match(/^ {0,3}>\s?\[!(\w+)\]\s*$/i);
+  if (!m) return null;
+  const type = m[1].toLowerCase();
+  return CALLOUT_TYPES[type] ? type : null;
+}
+
+// 内部アンカー([text](#heading))はCtrl/Cmd+クリックでジャンプし(仕様書 M-15)、
+// それ以外の外部リンクは従来どおりクリックで新規タブに開く。
+function openOrJumpLink(view, href, modifierKey) {
+  if (!href) return;
+  if (href.startsWith("#")) {
+    if (!modifierKey) return;
+    const heading = findHeadingBySlug(view.state, decodeURIComponent(href.slice(1)));
+    if (heading) {
+      view.dispatch({
+        selection: { anchor: heading.from },
+        effects: EditorView.scrollIntoView(heading.from, { y: "center" }),
+      });
+      view.focus();
+    }
+    return;
+  }
+  let url = href;
+  if (!/^[a-zA-Z][\w+.-]*:/.test(url)) url = "https://" + url;
+  window.open(url, "_blank", "noopener");
 }
 
 class BulletWidget extends WidgetType {
@@ -56,6 +145,115 @@ class CodeCopyWidget extends WidgetType {
     return btn;
   }
   ignoreEvent() { return false; }
+}
+class CalloutMarkerWidget extends WidgetType {
+  constructor(type) { super(); this.type = type; }
+  eq(o) { return o.type === this.type; }
+  toDOM() {
+    const info = CALLOUT_TYPES[this.type];
+    const span = document.createElement("span");
+    span.className = `cm-callout-marker cm-callout-marker-${this.type}`;
+    const icon = info.shape === "alert"
+      ? '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5 21.5 20h-19z"/><path d="M12 9.5v5"/><circle cx="12" cy="17.2" r=".6" fill="currentColor" stroke="none"/></svg>'
+      : '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><circle cx="12" cy="7.8" r=".6" fill="currentColor" stroke="none"/></svg>';
+    span.innerHTML = `${icon}<b>${info.label}</b>`;
+    return span;
+  }
+  ignoreEvent() { return false; }
+}
+class FootnoteRefWidget extends WidgetType {
+  constructor(id, content) { super(); this.id = id; this.content = content; }
+  eq(o) { return o.id === this.id && o.content === this.content; }
+  toDOM() {
+    const sup = document.createElement("sup");
+    sup.className = "cm-footnote-ref";
+    const num = document.createElement("span");
+    num.className = "cm-footnote-num";
+    num.textContent = this.id;
+    sup.appendChild(num);
+    if (this.content) {
+      const pop = document.createElement("span");
+      pop.className = "cm-footnote-popup";
+      pop.textContent = this.content;
+      sup.appendChild(pop);
+    }
+    return sup;
+  }
+  ignoreEvent() { return false; }
+}
+class FootnoteDefLabelWidget extends WidgetType {
+  constructor(id) { super(); this.id = id; }
+  eq(o) { return o.id === this.id; }
+  toDOM() {
+    const span = document.createElement("span");
+    span.className = "cm-footnote-def-label";
+    span.textContent = this.id;
+    return span;
+  }
+  ignoreEvent() { return false; }
+}
+class EmojiWidget extends WidgetType {
+  constructor(glyph, code) { super(); this.glyph = glyph; this.code = code; }
+  eq(o) { return o.glyph === this.glyph && o.code === this.code; }
+  toDOM() {
+    const span = document.createElement("span");
+    span.className = "cm-emoji";
+    span.textContent = this.glyph;
+    span.title = `:${this.code}:`;
+    return span;
+  }
+  ignoreEvent() { return false; }
+}
+class MathWidget extends WidgetType {
+  constructor(tex, display, autoNumber) { super(); this.tex = tex; this.display = display; this.autoNumber = autoNumber; }
+  eq(o) { return o.tex === this.tex && o.display === this.display && o.autoNumber === this.autoNumber; }
+  toDOM() {
+    const wrap = document.createElement(this.display ? "div" : "span");
+    wrap.className = this.display ? "cm-math-block" : "cm-math-inline";
+    wrap.textContent = "…";
+    renderMathToHtml(this.tex, { display: this.display, autoNumber: this.autoNumber }).then(({ html, error, message }) => {
+      if (error) {
+        wrap.textContent = `数式エラー: ${message}`;
+        wrap.classList.add("cm-math-error");
+        return;
+      }
+      wrap.innerHTML = html;
+    });
+    return wrap;
+  }
+  ignoreEvent() { return true; }
+}
+class TocWidget extends WidgetType {
+  constructor(headings) { super(); this.headings = headings; this.key = JSON.stringify(headings.map((h) => [h.level, h.text, h.slug])); }
+  eq(o) { return o.key === this.key; }
+  ignoreEvent() { return true; }
+  toDOM(view) {
+    const wrap = document.createElement("div");
+    wrap.className = "cm-toc";
+    if (!this.headings.length) {
+      const empty = document.createElement("div");
+      empty.className = "cm-toc-empty";
+      empty.textContent = "見出しがありません";
+      wrap.appendChild(empty);
+      return wrap;
+    }
+    const list = document.createElement("div");
+    list.className = "cm-toc-list";
+    for (const h of this.headings) {
+      const a = document.createElement("a");
+      a.href = "#" + h.slug;
+      a.className = `cm-toc-item cm-toc-h${h.level}`;
+      a.textContent = h.text;
+      a.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        view.dispatch({ selection: { anchor: h.from }, effects: EditorView.scrollIntoView(h.from, { y: "center" }) });
+        view.focus();
+      });
+      list.appendChild(a);
+    }
+    wrap.appendChild(list);
+    return wrap;
+  }
 }
 class CheckboxWidget extends WidgetType {
   constructor(checked, pos) { super(); this.checked = checked; this.pos = pos; }
@@ -91,10 +289,16 @@ const livePreview = ViewPlugin.fromClass(class {
     const quotedLines = new Set();
     const seenFences = new Set();
     const seenTables = new Set();
+    const toggles = state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
+    const fm = state.field(frontmatterField, false);
+    const mathBlocks = state.field(mathBlocksField, false) ?? [];
+    const inMathBlock = (pos) => mathBlocks.some((b) => pos >= b.from && pos < b.to);
+    const { links: linkRefs, footnotes: footnoteDefs } = collectReferences(state);
     const tree = syntaxTree(state);
     for (const { from, to } of view.visibleRanges) {
       tree.iterate({ from, to, enter: (node) => {
         const name = node.name, nf = node.from, nt = node.to;
+        if (fm && nt <= fm.to) return false; // YAML Front Matter内は生テキスト扱い(M-11)
         const live = cursorInside(view, nf, nt);
         if (name === "FencedCode") {
           // コードフェンス検出: 構文木のFencedCodeノードを可視範囲だけ辿る(全行走査はしない)
@@ -167,21 +371,83 @@ const livePreview = ViewPlugin.fromClass(class {
           if (!live) { marks.push({ from: nf, to: nf + 1, deco: Decoration.replace({}) }); marks.push({ from: nt - 1, to: nt, deco: Decoration.replace({}) }); }
           return;
         }
-        if (name === "Link" && !live) {
+        if (name === "Link") {
           const text = state.doc.sliceString(nf, nt);
-          const mm = text.match(/^\[([^\]]*)\]\(([^)]*)\)$/);
-          if (mm) {
+          // 脚注の本文中参照 [^id] (仕様書 M-09)。ホバーで内容をポップアップ表示する。
+          const fnm = text.match(/^\[\^([^\]]+)\]$/);
+          if (fnm) {
+            if (!live) {
+              const def = footnoteDefs.get(fnm[1]);
+              marks.push({ from: nf, to: nt, deco: Decoration.replace({ widget: new FootnoteRefWidget(fnm[1], def?.content ?? "") }) });
+            }
+            return false;
+          }
+          if (live) return;
+          // 直接リンク [text](url)
+          const direct = text.match(/^\[([^\]]*)\]\(([^)]*)\)$/);
+          if (direct) {
             marks.push({ from: nf, to: nf + 1, deco: Decoration.replace({}) });
-            const cb = nf + 1 + mm[1].length;
+            const cb = nf + 1 + direct[1].length;
             marks.push({ from: cb, to: nt, deco: Decoration.replace({}) });
-            marks.push({ from: nf + 1, to: cb, deco: Decoration.mark({ class: "tok-link", attributes: { "data-href": mm[2] } }) });
+            marks.push({ from: nf + 1, to: cb, deco: Decoration.mark({ class: "tok-link", attributes: { "data-href": direct[2] } }) });
+            return;
+          }
+          // 参照リンク [text][id] およびショートカット参照 [id](仕様書 M-16)
+          const refExplicit = text.match(/^\[([^\]]*)\]\[([^\]]*)\]$/);
+          if (refExplicit || /^\[[^\]]*\]$/.test(text)) {
+            const linkText = refExplicit ? refExplicit[1] : text.slice(1, -1);
+            const label = refExplicit ? (refExplicit[2] || refExplicit[1]) : linkText;
+            const url = linkRefs.get(label.trim().toLowerCase());
+            if (url !== undefined) {
+              const textFrom = nf + 1;
+              const textTo = textFrom + linkText.length;
+              marks.push({ from: nf, to: textFrom, deco: Decoration.replace({}) });
+              if (textTo < nt) marks.push({ from: textTo, to: nt, deco: Decoration.replace({}) });
+              marks.push({ from: textFrom, to: textTo, deco: Decoration.mark({ class: "tok-link", attributes: { "data-href": url } }) });
+            }
           }
           return;
         }
+        if (name === "LinkReference") {
+          // 脚注定義ブロック [^id]: 内容 (仕様書 M-09)。通常の段落と区別できる見た目にする。
+          const labelNode = node.node.getChild("LinkLabel");
+          if (!labelNode) return;
+          const label = state.doc.sliceString(labelNode.from, labelNode.to).slice(1, -1);
+          if (!label.startsWith("^")) return; // 通常の参照リンク定義(M-16)は特別な装飾をしない
+          const id = label.slice(1);
+          const startLn = state.doc.lineAt(nf).number;
+          const endLn = state.doc.lineAt(Math.max(nf, nt - 1)).number;
+          for (let ln = startLn; ln <= endLn; ln++) {
+            const l = state.doc.line(ln);
+            marks.push({ from: l.from, to: l.from, deco: Decoration.line({ class: "cm-footnote-def" + (ln === startLn ? " cm-footnote-def-first" : "") }), line: true });
+          }
+          if (!live) {
+            const markEnd = Math.min(nt, labelNode.to + 1); // "[^id]:" までを隠す
+            marks.push({ from: nf, to: markEnd, deco: Decoration.replace({ widget: new FootnoteDefLabelWidget(id) }) });
+          }
+          return;
+        }
+        if (name === "Superscript" || name === "Subscript") {
+          if (!toggles.superSub) return;
+          const cls = name === "Superscript" ? "tok-sup" : "tok-sub";
+          marks.push({ from: nf, to: nt, deco: Decoration.mark({ class: cls }) });
+          if (!live) { marks.push({ from: nf, to: nf + 1, deco: Decoration.replace({}) }); marks.push({ from: nt - 1, to: nt, deco: Decoration.replace({}) }); }
+          return;
+        }
+        if (name === "Emoji") {
+          if (live) return;
+          const code = state.doc.sliceString(nf + 1, nt - 1);
+          const glyph = EMOJI_SHORTCODES[code];
+          if (glyph) marks.push({ from: nf, to: nt, deco: Decoration.replace({ widget: new EmojiWidget(glyph, code) }) });
+          return; // 未対応のショートコードはプレーン表示のまま
+        }
         if (name === "Blockquote") {
-          // 複数行の引用は行ごとに装飾。「>」の無い行(仕様上の遅延継続)は引用装飾しない
+          // 複数行の引用は行ごとに装飾。「>」の無い行(仕様上の遅延継続)は引用装飾しない。
+          // 先頭行が "> [!TYPE]" ならCallouts(仕様書 M-13)として種別ごとの見た目にする。
+          const calloutType = toggles.callouts ? detectCalloutType(state, node.node) : null;
           const lastLn = state.doc.lineAt(Math.min(nt, state.doc.length)).number;
-          for (let ln = state.doc.lineAt(nf).number; ln <= lastLn; ln++) {
+          const markerLn = state.doc.lineAt(nf).number;
+          for (let ln = markerLn; ln <= lastLn; ln++) {
             if (quotedLines.has(ln)) continue; // 入れ子ノードでの二重装飾を防ぐ
             const line = state.doc.line(ln);
             const m = line.text.match(/^ {0,3}>\s?/);
@@ -191,8 +457,14 @@ const livePreview = ViewPlugin.fromClass(class {
               const cl = state.doc.lineAt(r.head);
               return cl.number === line.number || (r.from !== r.to && r.from <= line.to && r.to >= line.from);
             });
-            if (!lineLive) marks.push({ from: line.from, to: line.from + m[0].length, deco: Decoration.replace({}) });
-            marks.push({ from: line.from, to: line.to, deco: Decoration.mark({ class: "tok-quote" }) });
+            const isMarker = calloutType && ln === markerLn;
+            if (isMarker && !lineLive) {
+              marks.push({ from: line.from, to: line.to, deco: Decoration.replace({ widget: new CalloutMarkerWidget(calloutType) }) });
+            } else if (!lineLive) {
+              marks.push({ from: line.from, to: line.from + m[0].length, deco: Decoration.replace({}) });
+            }
+            const cls = calloutType ? `tok-quote cm-callout cm-callout-${calloutType}` : "tok-quote";
+            marks.push({ from: line.from, to: line.to, deco: Decoration.mark({ class: cls }) });
           }
           return;
         }
@@ -202,6 +474,20 @@ const livePreview = ViewPlugin.fromClass(class {
       let pos = from;
       while (pos <= to) {
         const line = state.doc.lineAt(pos);
+        if (fm && line.from < fm.to) {
+          // YAML Front Matter(M-11): 本文と異なる背景色を充てるだけで、記法解釈はしない
+          const cls = "cm-frontmatter" + (line.number === 1 ? " cm-fm-first" : "") + (line.to === fm.to ? " cm-fm-last" : "");
+          marks.push({ from: line.from, to: line.from, deco: Decoration.line({ class: cls }), line: true });
+          if (line.to + 1 > to) break;
+          pos = line.to + 1;
+          continue;
+        }
+        if (inMathBlock(line.from)) {
+          // 数式ブロック内(mathBlockDecoFieldが描画を担当)は他の記法解釈をしない
+          if (line.to + 1 > to) break;
+          pos = line.to + 1;
+          continue;
+        }
         const lineLive = view.hasFocus && state.selection.ranges.some(r => {
           const cl = state.doc.lineAt(r.head);
           return cl.number === line.number || (r.from !== r.to && r.from <= line.to && r.to >= line.from);
@@ -224,8 +510,21 @@ const livePreview = ViewPlugin.fromClass(class {
           const lm = line.text.match(/^(\s*)([-*+])(\s)/);
           if (lm) { const mkFrom = line.from + lm[1].length, mkTo = mkFrom + 1 + lm[3].length; marks.push({ from: mkFrom, to: mkTo, deco: Decoration.replace({ widget: new BulletWidget() }) }); }
         }
-        let hm; const re = /==([^=\n]+)==/g;
-        while ((hm = re.exec(line.text))) { const hf = line.from + hm.index, ht = hf + hm[0].length; marks.push({ from: hf, to: ht, deco: Decoration.mark({ class: "tok-mark" }) }); if (!cursorInside(view, hf, ht)) { marks.push({ from: hf, to: hf + 2, deco: Decoration.replace({}) }); marks.push({ from: ht - 2, to: ht, deco: Decoration.replace({}) }); } }
+        if (toggles.highlight) {
+          let hm; const re = /==([^=\n]+)==/g;
+          while ((hm = re.exec(line.text))) { const hf = line.from + hm.index, ht = hf + hm[0].length; marks.push({ from: hf, to: ht, deco: Decoration.mark({ class: "tok-mark" }) }); if (!cursorInside(view, hf, ht)) { marks.push({ from: hf, to: hf + 2, deco: Decoration.replace({}) }); marks.push({ from: ht - 2, to: ht, deco: Decoration.replace({}) }); } }
+        }
+        if (toggles.inlineMath) {
+          // インライン数式 $...$(仕様書 M-23)。前後に空白を含まない($による通貨表記等との
+          // 誤爆を避けるTypora同様のルール)。カーソルが乗っている間は生記法のまま。
+          let mm; const mre = /\$([^\s$](?:[^$\n]*[^\s$])?)\$/g;
+          while ((mm = mre.exec(line.text))) {
+            const mf = line.from + mm.index, mt = mf + mm[0].length;
+            if (!cursorInside(view, mf, mt)) {
+              marks.push({ from: mf, to: mt, deco: Decoration.replace({ widget: new MathWidget(mm[1], false, false) }) });
+            }
+          }
+        }
         // リスト系の折り返し行を1行目のテキスト開始位置に揃える(ハンギングインデント)
         const hang = line.text.match(/^(\s*)(?:[-*+]\s+\[[ xX]\]\s?|[-*+]\s|\d+\.\s)/);
         if (hang) marks.push({ from: line.from, to: line.from, deco: Decoration.line({ attributes: { class: "cm-hang", style: `--hang:${hang[0].length}ch` } }), line: true });
@@ -416,7 +715,7 @@ class TableWidget extends WidgetType {
     // セル内リンクのクリック
     wrap.addEventListener("mousedown", (e) => {
       const a = e.target.closest?.("[data-href]");
-      if (a) { e.preventDefault(); let href = a.getAttribute("data-href"); if (href && !/^[a-zA-Z][\w+.-]*:/.test(href)) href = "https://" + href; if (href) window.open(href, "_blank", "noopener"); }
+      if (a) { e.preventDefault(); openOrJumpLink(view, a.getAttribute("data-href") || "", e.ctrlKey || e.metaKey); }
     });
     return wrap;
   }
@@ -441,6 +740,101 @@ function buildTableDeco(state) {
   }
   return Decoration.set(decos);
 }
+// ---- 目次 [toc](仕様書 M-12) ----
+// [toc] だけの段落を見出し一覧ウィジェットに置換する。見出しの追加・削除・レベル変更は
+// docChangedのたびに extractHeadings() を呼び直すため自動的に反映される。
+function findTocParagraphs(state) {
+  const paras = [];
+  syntaxTree(state).iterate({
+    enter: (node) => {
+      if (node.name !== "Paragraph") return;
+      const txt = state.doc.sliceString(node.from, node.to).trim();
+      if (/^\[toc\]$/i.test(txt)) paras.push({ from: node.from, to: node.to });
+      return false;
+    },
+  });
+  return paras;
+}
+function buildTocDeco(state) {
+  const paras = findTocParagraphs(state);
+  if (!paras.length) return Decoration.none;
+  const focused = state.field(focusField, false) ?? false;
+  const sel = state.selection.main;
+  const headings = extractHeadings(state);
+  const decos = [];
+  for (const p of paras) {
+    if (focused && sel.from <= p.to && sel.to >= p.from) continue; // 編集モード(生テキスト)
+    decos.push(Decoration.replace({ widget: new TocWidget(headings), block: true }).range(p.from, p.to));
+  }
+  return Decoration.set(decos);
+}
+const tocField = StateField.define({
+  create: buildTocDeco,
+  update: (v, tr) => (tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect))) ? buildTocDeco(tr.state) : v,
+  provide: (f) => EditorView.decorations.from(f),
+});
+
+// ---- 数式ブロック $$...$$(仕様書 M-07・第5章) ----
+// "$$"だけの行から次の"$$"だけの行までを1ブロックとする。構文木に数式ノードは
+// 存在しないため行走査になるが、全文書を毎回走査しないよう、既存ブロックに触れる
+// 変更・新たに"$"を含む変更があった場合だけ findMathBlocks() で全体を再計算する
+// (§8.2と同じ考え方: 通常の入力ではO(変更量)で済ませる)。
+const MATH_BLOCK_SCAN_CAP = 500;
+function findMathBlockEnd(doc, openLineNumber) {
+  const capLine = Math.min(doc.lines, openLineNumber + MATH_BLOCK_SCAN_CAP);
+  for (let n = openLineNumber + 1; n <= capLine; n++) {
+    if (doc.line(n).text.trim() === "$$") return n;
+  }
+  return null;
+}
+function findMathBlocks(state) {
+  const doc = state.doc;
+  const blocks = [];
+  for (let n = 1; n <= doc.lines; n++) {
+    if (doc.line(n).text.trim() !== "$$") continue;
+    const endLn = findMathBlockEnd(doc, n);
+    if (!endLn) continue;
+    const openLine = doc.line(n), closeLine = doc.line(endLn);
+    const textFrom = openLine.to + 1;
+    const textTo = Math.max(textFrom, closeLine.from - 1);
+    blocks.push({ from: openLine.from, to: closeLine.to, text: doc.sliceString(textFrom, textTo) });
+    n = endLn;
+  }
+  return blocks;
+}
+function buildMathBlockDeco(state, blocks) {
+  const focused = state.field(focusField, false) ?? false;
+  const sel = state.selection.main;
+  const toggles = state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
+  const decos = [];
+  for (const b of blocks) {
+    if (focused && sel.from <= b.to && sel.to >= b.from) continue; // 編集モード(生テキスト)
+    decos.push(Decoration.replace({ widget: new MathWidget(b.text, true, toggles.mathAutoNumber), block: true }).range(b.from, b.to));
+  }
+  return Decoration.set(decos);
+}
+const mathBlocksField = StateField.define({
+  create: (state) => findMathBlocks(state),
+  update: (v, tr) => {
+    if (!tr.docChanged) return v;
+    let needsRecompute = false;
+    tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+      if (needsRecompute) return;
+      if (inserted.toString().includes("$")) { needsRecompute = true; return; }
+      for (const b of v) { if (fromA <= b.to && toA >= b.from) { needsRecompute = true; return; } }
+    });
+    if (needsRecompute) return findMathBlocks(tr.state);
+    return v.map((b) => ({ from: tr.changes.mapPos(b.from), to: tr.changes.mapPos(b.to, 1), text: b.text }));
+  },
+});
+const mathBlockDecoField = StateField.define({
+  create: (state) => buildMathBlockDeco(state, state.field(mathBlocksField)),
+  update: (v, tr) => (tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect) || e.is(setExtToggles)))
+    ? buildMathBlockDeco(tr.state, tr.state.field(mathBlocksField))
+    : v,
+  provide: (f) => EditorView.decorations.from(f),
+});
+
 // テーブルから離れたら自動整形(編集中は整形しない)
 const tableAutoFormat = EditorView.updateListener.of((u) => {
   if (!u.selectionSet && !u.focusChanged) return;
@@ -516,9 +910,27 @@ const searchHighlight = EditorView.decorations.compute([searchTermsField, "doc",
   }), true);
 });
 
+// ---- 絵文字ショートコードの入力補完(仕様書 M-22) ----
+function emojiCompletionSource(context) {
+  const word = context.matchBefore(/:[a-zA-Z0-9_+-]*$/);
+  if (!word || (word.from === word.to && !context.explicit)) return null;
+  const query = word.text.slice(1);
+  if (!query) return null;
+  const options = findEmojiCompletions(query).map(({ code, emoji }) => ({
+    label: `:${code}:`, displayLabel: `${emoji} :${code}:`, apply: `:${code}:`, type: "text",
+  }));
+  if (!options.length) return null;
+  return { from: word.from, options };
+}
+const emojiCompletion = autocompletion({ override: [emojiCompletionSource], icons: false });
+
 // Markdown文書(ライブプレビュー一式)の拡張子集合。docModeComp/livePreviewCompの既定値。
-const markdownLanguageExt = () => markdown({ extensions: [Strikethrough, Table], codeLanguages });
-const livePreviewExt = () => [livePreview, focusField, focusNotifier, tableField, tableAutoFormat];
+const markdownLanguageExt = () => markdown({ extensions: [Strikethrough, Table, Superscript, Subscript, Emoji], codeLanguages });
+const livePreviewExt = () => [
+  livePreview, focusField, focusNotifier, tableField, tableAutoFormat,
+  frontmatterField, tocField, extTogglesField, emojiCompletion,
+  mathBlocksField, mathBlockDecoField,
+];
 
 export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionChange, onRender, onKeydown } = {}) {
   const editable = new Compartment();
@@ -570,14 +982,13 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
           compositionend: () => { composing = false; onCompositionChange?.(false); },
           // アプリ側ショートカット(Md装飾/Tab/リスト継続)をCMの既定キー処理より先に評価
           keydown: (e) => { if (onKeydown && onKeydown(e)) { e.preventDefault(); return true; } return false; },
-          // リンク装飾のタップでリンク先を開く(mousedownで先取りしてカーソル移動を抑止)
+          // リンク装飾のタップでリンク先を開く(mousedownで先取りしてカーソル移動を抑止)。
+          // 内部アンカー(#見出し)はCtrl/Cmd+クリック時のみジャンプする(仕様書 M-15)。
           mousedown: (e) => {
             const el = e.target?.closest?.(".tok-link[data-href]");
             if (!el) return false;
             e.preventDefault();
-            let href = el.getAttribute("data-href") || "";
-            if (href && !/^[a-zA-Z][\w+.-]*:/.test(href)) href = "https://" + href;
-            if (href) window.open(href, "_blank", "noopener");
+            openOrJumpLink(view, el.getAttribute("data-href") || "", e.ctrlKey || e.metaKey);
             return true;
           },
         }),
@@ -609,6 +1020,8 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
                       effects: EditorView.scrollIntoView(target[0], { y: "center" }) });
     },
     setEditable: (on) => view.dispatch({ effects: editable.reconfigure(EditorView.editable.of(on)) }),
+    // マークダウン記法拡張のON/OFF(仕様書 第2.10節 C-01)。設定ダイアログでの変更を反映する。
+    setExtensionToggles: (toggles) => view.dispatch({ effects: setExtToggles.of(toggles) }),
     // ファイルを開いた際に拡張子から編集モードを切り替える(仕様書 第1章)。
     // markdown: 従来どおりライブプレビュー一式。code: 該当言語を動的ロードして
     // シンタックスハイライトのみ適用(ライブプレビュー装飾は外す)。plain: 装飾なし。

@@ -23,4 +23,24 @@ internal sealed class AppSettings
 
     /// <summary>既定のMarkdownエディタとしてファイル関連付け登録済みか(仕様書 N-09 / 第7.1節)。</summary>
     public bool FileAssociationEnabled { get; set; }
+
+    // ---- マークダウン記法拡張のON/OFF(仕様書 第2.10節 C-01) ----
+    // 既存のライブプレビュー挙動を変えないため、既存機能(Callouts以外は元々常時有効だった
+    // ハイライト・上付き下付き)の既定値はすべてtrueにする。数式(第9項)はTypora準拠で
+    // インライン数式・自動採番とも既定OFF。
+
+    /// <summary>Callouts / GitHub式アラート(M-13)。</summary>
+    public bool CalloutsEnabled { get; set; } = true;
+
+    /// <summary>上付き文字・下付き文字(M-24・M-25)。</summary>
+    public bool SuperSubscriptEnabled { get; set; } = true;
+
+    /// <summary>ハイライト `==text==`(M-26)。</summary>
+    public bool HighlightEnabled { get; set; } = true;
+
+    /// <summary>インライン数式 `$...$`(M-23)。Typora準拠で既定OFF。</summary>
+    public bool InlineMathEnabled { get; set; }
+
+    /// <summary>数式の自動採番(C-04)。既定OFF。</summary>
+    public bool MathAutoNumberEnabled { get; set; }
 }
