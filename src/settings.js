@@ -470,7 +470,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
       <div class="settings-modal${isPage ? " settings-modal-page" : ""}"${dialogAttrs}>
         <div class="settings-modal-head">
           <div class="settings-modal-title">設定</div>
-          <button type="button" class="settings-modal-close" aria-label="閉じる">${ICON_CLOSE}</button>
+          ${mode === "page" ? "" : `<button type="button" class="settings-modal-close" aria-label="閉じる">${ICON_CLOSE}</button>`}
         </div>
         <div class="settings-search-row">
           ${ICON_SEARCH}
@@ -494,7 +494,8 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     msgEl = overlay.querySelector(".settings-modal-msg");
     saveBtn = overlay.querySelector('[data-act="save"]');
     searchInput = overlay.querySelector(".settings-search-input");
-    overlay.querySelector(".settings-modal-close").addEventListener("click", requestClose);
+    // ページ表示モード(専用ウィンドウ)では画面内の×を出していない(ウィンドウの×と二重になるため)。
+    overlay.querySelector(".settings-modal-close")?.addEventListener("click", requestClose);
     overlay.querySelector('[data-act="cancel"]').addEventListener("click", requestClose);
     saveBtn.addEventListener("click", save);
     searchInput.addEventListener("input", onSearchInput);

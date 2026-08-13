@@ -144,6 +144,9 @@ internal static class NativeMenu
             Logger.WriteException("NativeMenu: メニューフォントの設定に失敗", ex);
         }
 
+        // 同時に開くポップアップは常に1つだけにする。見出しを連打したときに
+        // ポップアップが積み重なって消すのに手間取る、という状態を防ぐ。
+        CloseCurrent();
         _current = dropDown;
         dropDown.Show(screenLocation, ToolStripDropDownDirection.BelowRight);
     }
