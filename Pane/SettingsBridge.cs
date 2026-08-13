@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.Reflection;
 using System.Text.Json;
+using Microsoft.Web.WebView2.Core;
 
 namespace Pane;
 
@@ -143,6 +145,7 @@ internal static class SettingsBridge
             editorFontSize = settings.EditorFontSize,
             editorLineHeight = settings.EditorLineHeight,
             editorMaxWidthPx = settings.EditorMaxWidthPx,
+            editorPaddingX = settings.EditorPaddingX,
             showWordCount = settings.ShowWordCount,
 
             // ---- ファイルの関連付け ----
@@ -163,7 +166,51 @@ internal static class SettingsBridge
             monospaceFonts = FontService.MonospaceFamilies,
             pandocAvailable = DetectPandocAvailable(),
             settingsFilePath = SettingsService.SettingsFilePath,
+
+            // ---- 設定画面「バージョン情報」カテゴリ用の環境情報 ----
+            appVersion = DetectAppVersion(),
+            webView2Version = DetectWebView2Version(),
+            dotNetVersion = Environment.Version.ToString(),
+            logFolderPath = Path.GetDirectoryName(Logger.FilePath) ?? "",
+            themeFolderPath = ThemeFolderService.FolderPath,
+            licenses = Licenses,
         });
+    }
+
+    /// <summary>
+    /// 「バージョン情報」カテゴリのライセンス一覧(Pane本体 + 主要な同梱OSS)。
+    /// 各OSSのライセンス種別は node_modules/&lt;パッケージ&gt;/package.json の license
+    /// フィールドを実際に確認して転記したもの(推測で書かない)。配布物には含まれない
+    /// devDependencies(esbuild等、ビルド時のみ使用)はここに含めない。
+    /// </summary>
+    private static readonly object[] Licenses =
+    {
+        new { name = "Pane 本体", license = "プロプライエタリ(未公開。package.jsonのlicenseは\"UNLICENSED\")" },
+        new { name = "CodeMirror 6 (@codemirror/*)", license = "MIT License" },
+        new { name = "Lezer (@lezer/*)", license = "MIT License" },
+        new { name = "MathJax (mathjax-full)", license = "Apache License 2.0" },
+        new { name = "Mermaid", license = "MIT License" },
+    };
+
+    /// <summary>アセンブリのバージョン(AssemblyName.Version)を "x.y.z" 形式で返す。取得できなければ「不明」。</summary>
+    private static string DetectAppVersion()
+    {
+        Version? v = Assembly.GetExecutingAssembly().GetName().Version;
+        return v?.ToString() ?? "不明";
+    }
+
+    /// <summary>WebView2ランタイムのバージョン。未導入等で取得できない場合は「不明」。</summary>
+    private static string DetectWebView2Version()
+    {
+        try
+        {
+            return CoreWebView2Environment.GetAvailableBrowserVersionString();
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException("WebView2バージョンの取得に失敗", ex);
+            return "不明";
+        }
     }
 
     /// <summary>
@@ -332,6 +379,7 @@ internal static class SettingsBridge
         if (TryGetInt(s, "editorFontSize", out int editorFontSize)) settings.EditorFontSize = editorFontSize;
         if (TryGetDouble(s, "editorLineHeight", out double editorLineHeight)) settings.EditorLineHeight = editorLineHeight;
         if (TryGetInt(s, "editorMaxWidthPx", out int editorMaxWidthPx)) settings.EditorMaxWidthPx = editorMaxWidthPx;
+        if (TryGetInt(s, "editorPaddingX", out int editorPaddingX)) settings.EditorPaddingX = editorPaddingX;
         if (TryGetBool(s, "showWordCount", out bool showWordCount)) settings.ShowWordCount = showWordCount;
 
         // ---- キーボード ----
@@ -462,6 +510,51 @@ internal static class SettingsBridge
         }
     }
 
+    /// <summary>{ type: "open-log-folder" } を受け取り、ログフォルダ(<see cref="Logger.FilePath"/>の
+    /// 親フォルダ)をエクスプローラーで開く(設定画面「バージョン情報」カテゴリ)。</summary>
+    public static void OpenLogFolderInExplorer()
+    {
+        try
+        {
+            string dir = Path.GetDirectoryName(Logger.FilePath) ?? "";
+            if (dir.Length == 0) return;
+            Directory.CreateDirectory(dir);
+            using var proc = Process.Start(new ProcessStartInfo("explorer.exe", $"\"{dir}\"") { UseShellExecute = true });
+            Logger.Write($"open-log-folder: エクスプローラーでログフォルダを開いた: {dir}");
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException("open-log-folder失敗", ex);
+        }
+    }
+
+    /// <summary>{ type: "open-today-log" } を受け取り、今日のログファイルを既定のアプリ
+    /// (通常はメモ帳)で開く(設定画面「バージョン情報」カテゴリ)。まだ何も書き込まれておらず
+    /// ファイルが存在しない場合は、開けるように空ファイルを作ってから開く。</summary>
+    public static void OpenTodayLogFile()
+    {
+        try
+        {
+            string path = Logger.FilePath;
+            if (!File.Exists(path))
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path) ?? ".");
+                File.WriteAllText(path, "");
+            }
+            using var proc = Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+            Logger.Write($"open-today-log: 今日のログファイルを開いた: {path}");
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException("open-today-log失敗", ex);
+        }
+    }
+
+    /// <summary>{ type: "open-theme-folder" } を受け取り、カスタムCSSの既定の置き場
+    /// (<see cref="ThemeFolderService.FolderPath"/>、サンプルCSSの置き場でもある)を
+    /// エクスプローラーで開く(設定画面「外観」「バージョン情報」カテゴリ)。</summary>
+    public static void OpenThemeFolderInExplorer() => ThemeFolderService.OpenInExplorer();
+
     /// <summary>
     /// { type: "reset-settings" } を受け取り、AppSettingsを新規インスタンス(=すべて既定値)で
     /// 置き換えて保存する。ウィンドウ位置・サイズと開いていたファイルパス(OpenFilePaths)は
@@ -541,6 +634,11 @@ internal static class SettingsBridge
                 ? "CSSファイル (*.css)|*.css|すべてのファイル (*.*)|*.*"
                 : "すべてのファイル (*.*)|*.*";
             using var dialog = new OpenFileDialog { Filter = filter };
+            // カスタムCSSは「何もない状態から書くのは無理」なため、参考にできるサンプルCSSを
+            // 置いてある既定フォルダ(ThemeFolderService.FolderPath)を初期位置にする。
+            // 存在しなくてもOpenFileDialog側が無視してユーザーフォルダ等へフォールバックするだけなので、
+            // ここで事前にフォルダの存在確認・作成はしない。
+            if (field == "customCssPath") dialog.InitialDirectory = ThemeFolderService.FolderPath;
             if (dialog.ShowDialog(owner) == DialogResult.OK) selectedPath = dialog.FileName;
         }
 

@@ -36,6 +36,14 @@
       <svg id="theme-icon-light" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2.5v2.5M12 19v2.5M4.2 4.2l1.8 1.8M18 18l1.8 1.8M2.5 12H5M19 12h2.5M4.2 19.8 6 18M18 6l1.8-1.8"/></svg>
       <svg id="theme-icon-dark" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" hidden><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/></svg>
     </button>
+    <!-- メニューバー右端の残り2つ: 設定・ヘルプ(Graftと同じ並び)。クリック時の配線は
+         src/commands.js の initMenuBar が行う(main.jsが持つctx.commands/ctx.actionsを使うため)。 -->
+    <button id="btn-menu-settings" class="menu-theme-btn" type="button" title="設定 (Ctrl+,)" aria-label="設定">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 13a7.5 7.5 0 0 0 0-2l1.9-1.4-2-3.4-2.2.6a7.6 7.6 0 0 0-1.7-1L14.9 3.5h-4l-.5 2.3a7.6 7.6 0 0 0-1.7 1l-2.2-.6-2 3.4L6.4 11a7.5 7.5 0 0 0 0 2l-1.9 1.4 2 3.4 2.2-.6a7.6 7.6 0 0 0 1.7 1l.5 2.3h4l.5-2.3a7.6 7.6 0 0 0 1.7-1l2.2.6 2-3.4z"/></svg>
+    </button>
+    <button id="btn-menu-help" class="menu-theme-btn" type="button" title="ヘルプ" aria-label="ヘルプ">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.3 9.2a2.7 2.7 0 1 1 4.4 2.1c-.9.7-1.7 1.2-1.7 2.4"/><circle cx="12" cy="17" r="1" fill="currentColor" stroke="none"/></svg>
+    </button>
   </div>
   <div id="main-area">
     <div id="sidebar" class="collapsed">

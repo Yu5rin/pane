@@ -410,6 +410,35 @@ export function initMenuBar(container, commands, ctx) {
     container.insertBefore(btn, anchor);
   }
 
+  // ---- メニューバー右端の設定・ヘルプアイコン(Graftと同じ並び。テーマ切替の右隣) ----
+  // ボタン自体は静的HTML側(index.html)に既に置かれているため、ここではクリック時の
+  // 配線だけを行う。テーマ切替ボタン(#btn-theme)自体の配線は従来どおりmain.jsが持つ。
+  const settingsBtn = container.querySelector("#btn-menu-settings");
+  if (settingsBtn) {
+    // 「file.settingsコマンドと同じ動作」にする指示どおり、commands配列から引いて実行する
+    // (ctx.actions.openSettings()を直接呼んでも結果は同じだが、メニュー/コマンドパレットと
+    // 完全に同じ経路を通すことで将来コマンド側だけ変更されても追従できるようにする)。
+    settingsBtn.addEventListener("click", () => {
+      commands.find((c) => c.id === "file.settings")?.run();
+    });
+  }
+  const helpBtn = container.querySelector("#btn-menu-help");
+  if (helpBtn) {
+    // ヘルプ本体(F1相当の説明画面)はまだ無いため、暫定的に設定画面の
+    // 「バージョン情報」カテゴリを開く。ブリッジがある場合は専用ウィンドウ(SettingsWindow)を
+    // 開かせるため、通常のopenSettings()と同じくopen-settings-windowを送る
+    // (カテゴリ指定を追加で載せておくが、現状SettingsWindow側は未対応でも実害はない)。
+    // ブリッジが無いブラウザ単体動作ではctx.actions.openSettings(category)がその場で
+    // モーダルを開き、バージョン情報カテゴリが選択された状態で表示される。
+    helpBtn.addEventListener("click", () => {
+      if (ctx.bridge) {
+        ctx.bridge.postMessage({ type: "open-settings-window", category: "versionInfo" });
+      } else {
+        ctx.actions?.openSettings?.("versionInfo");
+      }
+    });
+  }
+
   // Altキーでの表示・非表示トグル(仕様書 第10.1節・第10.4節)。
   // 単押しのAltのみを対象とし、Alt+他キーの組み合わせ(OS標準ショートカット等)は無視する。
   let altArmed = false;

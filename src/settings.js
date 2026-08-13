@@ -41,13 +41,20 @@ const ICON_APPEARANCE = `<svg ${ICON_ATTRS}><path d="M12 3a9 9 0 1 0 0 18c1.4 0 
 const ICON_FILETYPES = `<svg ${ICON_ATTRS}><path d="M9 15l6-6"/><path d="M10 6l.7-.7a4 4 0 1 1 5.7 5.7l-.7.7"/><path d="M14 18l-.7.7a4 4 0 1 1-5.7-5.7l.7-.7"/></svg>`;
 const ICON_KEYBOARD = `<svg ${ICON_ATTRS}><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.01M9.5 10h.01M13 10h.01M16.5 10h.01M6 14h12"/></svg>`;
 const ICON_ADVANCED = `<svg ${ICON_ATTRS}><path d="M4 6h9M17 6h3M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="15" cy="6" r="2"/><circle cx="8" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>`;
+const ICON_VERSION_INFO = `<svg ${ICON_ATTRS}><circle cx="12" cy="12" r="9"/><path d="M12 11v6"/><path d="M12 7.5v.01"/></svg>`;
 const ICON_CHEVRON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>';
 const ICON_SEARCH = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>';
 
 // 編集モードの自動判定(仕様: C#側AppSettings.AutoDetectModeと同じ4値、既定はstandard)。
 const AUTO_DETECT_MODES = ["off", "suggest", "standard", "aggressive"];
 
-// ---- 左サイドバーのカテゴリ(仕様書の指定どおり10カテゴリ、この並び順) ----
+// ---- 左サイドバーのカテゴリ ----
+// 元は仕様書指定の10カテゴリだったが、使いやすさ改善(よく使う順・関連性の高い順への
+// 並び替え)の一環でGraftと同じく末尾に「バージョン情報」を追加し、11カテゴリとした。
+// カテゴリ自体の並びは元のまま(一般→ファイル→編集→Markdown→画像→エクスポート→外観→
+// 関連付け→キーボード→詳細という「基本→内容→見た目→システム連携→高度な設定」の流れが
+// 一般的なエディタ(VS Code・Typora)の構成に近く合理的なため)。「バージョン情報」のみ
+// 必ず最後に置く。
 const NAV_ITEMS = [
   { id: "general", label: "一般", icon: ICON_GENERAL },
   { id: "file", label: "ファイル", icon: ICON_FILE },
@@ -59,6 +66,7 @@ const NAV_ITEMS = [
   { id: "fileTypes", label: "ファイルの関連付け", icon: ICON_FILETYPES },
   { id: "keyboard", label: "キーボード", icon: ICON_KEYBOARD },
   { id: "advanced", label: "詳細", icon: ICON_ADVANCED },
+  { id: "versionInfo", label: "バージョン情報", icon: ICON_VERSION_INFO },
 ];
 
 // ---- 検索欄用の索引(カテゴリID → そのカテゴリ内に出てくる語)。厳密な自動生成はせず、
@@ -74,6 +82,7 @@ const SEARCH_INDEX = {
   fileTypes: ["拡張子", "関連付け", "エクスプローラー", "新規作成メニュー", "既定のアプリ"],
   keyboard: ["キーバインド", "ショートカット", "キー割り当て"],
   advanced: ["デバッグ", "隠しファイル", "除外パターン", "設定ファイルの場所", "既定に戻す", "リセット", "履歴を消去", "編集モードの記憶", "既定のアプリ設定"],
+  versionInfo: ["バージョン", "アプリのバージョン", "WebView2", "ランタイム", ".NET", "設定ファイルの場所", "ログファイル", "ログの場所", "カスタムCSSフォルダ", "テーマフォルダ", "ライセンス", "OSS", "オープンソース", "About"],
 };
 
 // ---- 設定項目のスキーマ(docs/設定項目一覧.mdをそのままJSにしたもの) ----
@@ -188,6 +197,7 @@ const FIELD_DEFS = {
   editorFontSize: { kind: "number", def: DEFAULT_FONT_SIZE, min: 8, max: 72 },
   editorLineHeight: { kind: "number", def: 1.85, min: 1.0, max: 3.0, step: 0.05 },
   editorMaxWidthPx: { kind: "number", def: 0, min: 0, max: 5000 },
+  editorPaddingX: { kind: "number", def: 32, min: 0, max: 200 },
   showWordCount: { kind: "bool", def: true },
 
   // ---- ファイルの関連付け ----
@@ -244,6 +254,13 @@ const DEFAULTS = {
   monospaceFonts: [],
   pandocAvailable: false,
   settingsFilePath: "",
+  // ---- 「バージョン情報」カテゴリ表示専用(保存対象ではない環境情報) ----
+  appVersion: "",
+  webView2Version: "",
+  dotNetVersion: "",
+  logFolderPath: "",
+  themeFolderPath: "",
+  licenses: [],
 };
 
 function clone(value) {
@@ -584,6 +601,13 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     draft.monospaceFonts = Array.isArray(msg.monospaceFonts) ? msg.monospaceFonts.slice() : [];
     draft.pandocAvailable = !!msg.pandocAvailable;
     draft.settingsFilePath = typeof msg.settingsFilePath === "string" ? msg.settingsFilePath : "";
+    // 「バージョン情報」カテゴリ表示専用(保存対象ではない環境情報)。
+    draft.appVersion = typeof msg.appVersion === "string" ? msg.appVersion : "";
+    draft.webView2Version = typeof msg.webView2Version === "string" ? msg.webView2Version : "";
+    draft.dotNetVersion = typeof msg.dotNetVersion === "string" ? msg.dotNetVersion : "";
+    draft.logFolderPath = typeof msg.logFolderPath === "string" ? msg.logFolderPath : "";
+    draft.themeFolderPath = typeof msg.themeFolderPath === "string" ? msg.themeFolderPath : "";
+    draft.licenses = Array.isArray(msg.licenses) ? msg.licenses.slice() : [];
 
     selectedExtensions = new Set(draft.associatedExtensions);
     fmRows = buildFmRows(draft.fileModeOverrides);
@@ -805,6 +829,11 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
   }
 
   // ---- 各カテゴリの描画 ----
+  // 並び順(使いやすさ改善): 「起動時の動作」は最初に一度決めたらほぼ変えない設定だが、
+  // アプリを開いてまず目に入る動作のため先頭に据え置く。次に画面表示まわり(ステータスバー・
+  // アウトライン・表示形式・ズーム)をひとまとめにし、その次にファイル履歴、最後に
+  // 「常駐」「終了時の挙動」という頻度の低い起動・終了系の設定を置いた
+  // (元は表示系・履歴・起動終了系が1つの平らなグループに混在していたのを3グループへ分割)。
   function renderGeneral(el) {
     el.innerHTML = `
       <div class="settings-group">
@@ -815,18 +844,22 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
         ${fieldPath(ctx, "startupFolderPath", "folder", "起動時に開くフォルダ", "(未設定)")}
       </div>
       <div class="settings-group">
-        <div class="settings-group-title">表示形式</div>
+        <div class="settings-group-title">画面の表示</div>
+        ${fieldCheckbox("showStatusBar", "ステータスバーを表示する")}
+        ${fieldCheckbox("showOutlineByDefault", "アウトラインを既定で表示する")}
+        ${fieldCheckbox("collapsibleOutline", "アウトラインの見出しを折りたためるようにする")}
+        ${fieldCheckbox("zoomWithCtrlWheel", "Ctrl+マウスホイールで文字サイズを拡大縮小する")}
         <label class="settings-radio"><input type="radio" name="displayMode" value="window"><span>ウィンドウ形式</span></label>
         <label class="settings-radio settings-radio-disabled"><input type="radio" name="displayMode" value="tab" disabled><span>タブ形式<span class="settings-badge">準備中</span></span></label>
       </div>
       <div class="settings-group">
+        <div class="settings-group-title">ファイル履歴</div>
+        ${fieldCheckbox("recordRecentFiles", "最近使ったファイルを記録する")}
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title">起動・終了</div>
         ${fieldCheckbox("quitOnLastWindowClosed", "最後のウィンドウを閉じたら終了する")}
         ${fieldCheckbox("preloadOnStartup", "PCの起動時に常駐して起動を速くする")}
-        ${fieldCheckbox("showStatusBar", "ステータスバーを表示する")}
-        ${fieldCheckbox("showOutlineByDefault", "アウトラインを既定で表示する")}
-        ${fieldCheckbox("collapsibleOutline", "アウトラインの見出しを折りたためるようにする")}
-        ${fieldCheckbox("recordRecentFiles", "最近使ったファイルを記録する")}
-        ${fieldCheckbox("zoomWithCtrlWheel", "Ctrl+マウスホイールで文字サイズを拡大縮小する")}
       </div>`;
     wireCommonFields(el);
     wireBrowseButtons(el);
@@ -850,24 +883,30 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     wireCommonFields(el);
   }
 
+  // 並び順(使いやすさ改善): 入力中に常に効いてくる「入力補助」(自動ペアリング等)を先頭に、
+  // 次にインデント・折り返しという構造系の設定、次にコピー・タイプライター等の編集体験、
+  // 最後にスペルチェック・自動判定・拡張子ごとの上書きという頻度の低い/上級者向け設定という順に
+  // した。元は「インデント→自動ペアリング→絵文字/コピー/読了速度→スペルチェック→自動判定→
+  // 拡張子上書き」の順だったが、日常的に効果を体感しやすい入力補助を最優先にした。
   function renderEdit(el) {
     el.innerHTML = `
       <div class="settings-group">
+        <div class="settings-group-title">入力補助</div>
+        <label class="settings-checkbox-row"><input type="checkbox" data-field="autoPairing"><span class="settings-checkbox-title">自動ペアリング<span class="settings-field-desc">括弧・引用符を入力すると自動的に閉じます</span></span></label>
+        ${fieldCheckbox("autoPairMarkdown", "Markdown記法の自動ペアリング", "例: <code>**</code> <code>_</code> などを自動的に閉じます")}
+        ${fieldSelect("emojiAutocomplete", "絵文字の自動補完", [["off", "オフ"], ["esc", "Escで確定"], ["auto", "自動確定"]])}
+        ${fieldCheckbox("liveRenderingShowSourceOnFocus", "カーソル行の記法を生表示する")}
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title">インデント・折り返し</div>
         ${fieldNumericSelect("indentSizeOnSave", "引用・リストのインデント幅")}
         ${fieldNumericSelect("codeIndentSize", "コードブロックのインデント幅")}
         ${fieldCheckbox("codeAutoWrap", "コードブロックの長い行を折り返す")}
         ${fieldCheckbox("shiftTabAutoIndent", "Shift+Tabでインデントを解除する")}
-      </div>
-      <div class="settings-group">
-        <label class="settings-checkbox-row"><input type="checkbox" data-field="autoPairing"><span class="settings-checkbox-title">自動ペアリング<span class="settings-field-desc">括弧・引用符を入力すると自動的に閉じます</span></span></label>
-        ${fieldCheckbox("autoPairMarkdown", "Markdown記法の自動ペアリング", "例: <code>**</code> <code>_</code> などを自動的に閉じます")}
         <label class="settings-checkbox-row"><input type="checkbox" data-field="strictMode"><span class="settings-checkbox-title">厳格モード<span class="settings-field-desc">見出しやリスト記号の記法を厳密に解釈します</span></span></label>
-        ${fieldCheckbox("liveRenderingShowSourceOnFocus", "カーソル行の記法を生表示する")}
-        ${fieldCheckbox("copyWholeLineWhenNoSelection", "選択が無いときはCtrl+C/Xで行全体をコピーする")}
-        ${fieldCheckbox("typewriterKeepCaretCentered", "タイプライターモード(カーソル行を画面中央に保つ)")}
       </div>
       <div class="settings-group">
-        ${fieldSelect("emojiAutocomplete", "絵文字の自動補完", [["off", "オフ"], ["esc", "Escで確定"], ["auto", "自動確定"]])}
+        <div class="settings-group-title">コピー・カーソル</div>
         <label class="settings-select-row">コピー形式
           <select data-field="defaultCopyFormat">
             <option value="markdown">マークダウン</option>
@@ -875,9 +914,12 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
           </select>
           <span class="settings-field-desc">他アプリへ貼り付けるときに書式を保つか</span>
         </label>
+        ${fieldCheckbox("copyWholeLineWhenNoSelection", "選択が無いときはCtrl+C/Xで行全体をコピーする")}
+        ${fieldCheckbox("typewriterKeepCaretCentered", "タイプライターモード(カーソル行を画面中央に保つ)")}
         ${fieldNumber("readingSpeedWpm", "読了速度(分あたりの文字数)", "0を指定すると自動計算します")}
       </div>
       <div class="settings-group">
+        <div class="settings-group-title">スペルチェック</div>
         ${fieldCheckbox("spellCheckEnabled", "スペルチェックを有効にする")}
         ${fieldCheckbox("spellCheckAutoCorrect", "スペルチェックの自動修正を有効にする")}
       </div>
@@ -965,17 +1007,20 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     }
   }
 
+  // 記法サポートの並び順(使いやすさ改善): 一般的な文書でよく使う記法(自動リンク・
+  // ハイライト・Callouts・作図)を上に、専門的・利用頻度が低い記法(上付き下付き・数式)を
+  // 下に寄せた。元は特に意図のない並びだった。
   function renderMarkdownCategory(el) {
     el.innerHTML = `
       <div class="settings-group">
         <div class="settings-group-title">記法サポート</div>
-        <label class="settings-checkbox-row"><input type="checkbox" data-field="calloutsEnabled"><span class="settings-checkbox-title">Callouts<span class="settings-field-desc">例: <code>&gt; [!NOTE]</code></span></span></label>
-        <label class="settings-checkbox-row"><input type="checkbox" data-field="superSubscriptEnabled"><span class="settings-checkbox-title">上付き・下付き<span class="settings-field-desc">例: <code>x^2^</code>、<code>H~2~O</code></span></span></label>
+        ${fieldCheckbox("autoLinksEnabled", "URLの自動リンク化")}
         <label class="settings-checkbox-row"><input type="checkbox" data-field="highlightEnabled"><span class="settings-checkbox-title">ハイライト<span class="settings-field-desc">例: <code>==ハイライト==</code></span></span></label>
+        <label class="settings-checkbox-row"><input type="checkbox" data-field="calloutsEnabled"><span class="settings-checkbox-title">Callouts<span class="settings-field-desc">例: <code>&gt; [!NOTE]</code></span></span></label>
+        ${fieldCheckbox("diagramsEnabled", "作図(Mermaidなどのダイアグラム)")}
+        <label class="settings-checkbox-row"><input type="checkbox" data-field="superSubscriptEnabled"><span class="settings-checkbox-title">上付き・下付き<span class="settings-field-desc">例: <code>x^2^</code>、<code>H~2~O</code></span></span></label>
         <label class="settings-checkbox-row"><input type="checkbox" data-field="inlineMathEnabled"><span class="settings-checkbox-title">インライン数式<span class="settings-field-desc">例: <code>$E=mc^2$</code></span></span></label>
         ${fieldCheckbox("codeBlockMathEnabled", "コードブロック内の数式記法")}
-        ${fieldCheckbox("diagramsEnabled", "作図(Mermaidなどのダイアグラム)")}
-        ${fieldCheckbox("autoLinksEnabled", "URLの自動リンク化")}
       </div>
       <div class="settings-group">
         <div class="settings-group-title">記法の書き方</div>
@@ -1003,13 +1048,20 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     wireCommonFields(el);
   }
 
+  // 並び順(使いやすさ改善): 「まず何をするか」を決める保存先(imageInsertAction/
+  // imageCustomFolder)を先頭に置くのはそのまま、パスの書き方に関する細かい挙動は
+  // 別グループへ分け、どちらが主設定でどちらが微調整かを見出しで分かるようにした。
   function renderImage(el) {
     el.innerHTML = `
       <div class="settings-group">
+        <div class="settings-group-title">保存先</div>
         ${fieldSelect("imageInsertAction", "画像を挿入したときの動作", [["none", "何もしない"], ["currentFolder", "現在のフォルダにコピー"], ["assets", "assetsフォルダにコピー"], ["filenameAssets", "ファイル名.assetsフォルダにコピー"], ["custom", "指定したフォルダにコピー"]])}
         ${fieldPath(ctx, "imageCustomFolder", "folder", "画像のコピー先フォルダ", "./assets", "<code>./</code> <code>../</code> で始まる相対パスか絶対パス。<code>${filename}</code>は現在のファイル名(拡張子なし)に展開します")}
         ${fieldCheckbox("imageApplyToLocal", "ローカルの画像に適用する")}
         ${fieldCheckbox("imageApplyToOnline", "オンライン(URL)の画像にも適用する")}
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title">パスの書き方</div>
         ${fieldCheckbox("imagePreferRelativePath", "できるだけ相対パスで記述する")}
         ${fieldCheckbox("imageAddDotSlash", "相対パスの先頭に ./ を付ける")}
         ${fieldCheckbox("imageAutoEscapeUrl", "画像URLの空白などを自動的にエスケープする")}
@@ -1106,9 +1158,14 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     }
   }
 
+  // 並び順(使いやすさ改善): テーマ関連(ライト/ダークのプリセットも含めて1か所にまとめる)→
+  // フォント・文字サイズ(よく触る)→ 余白・最大幅(細かい調整、下の方)→ カスタムCSS(上級者向け)→
+  // 文字数カウント表示。従来はライト/ダークのプリセットがテーマ選択と別グループになっていたのを
+  // 1つの「テーマ」グループへ統合し、本文の余白・最大幅は「レイアウト」として独立させ下側へ移した。
   function renderAppearance(el) {
     el.innerHTML = `
       <div class="settings-group">
+        <div class="settings-group-title">テーマ</div>
         <label class="settings-select-row">テーマ
           <select data-field="theme">
             <option value="system">システムに合わせる</option>
@@ -1116,16 +1173,6 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
             <option value="dark">ダーク</option>
           </select>
         </label>
-        ${renderFontField("editorFontFamily", draft.installedFonts, "本文フォント", "(既定のフォントを使用)")}
-        <div class="settings-field-desc">プレビュー: <span data-font-preview-target="editorFontFamily" style="font-size: 15px;">あア亜 Aa Bb Cc 0123</span></div>
-        ${renderFontField("editorMonospaceFontFamily", draft.monospaceFonts, "等幅フォント", "(既定のフォントを使用)")}
-        <div class="settings-field-desc">プレビュー: <span data-font-preview-target="editorMonospaceFontFamily" style="font-size: 15px;">あア亜 Aa Bb Cc 0123</span></div>
-        ${fieldNumber("editorFontSize", "文字サイズ")}
-        ${fieldNumber("editorLineHeight", "行の高さ")}
-        ${fieldNumber("editorMaxWidthPx", "本文の最大幅(px)", "0を指定するとテーマの既定値を使います")}
-        ${fieldPath(ctx, "customCssPath", "file", "カスタムCSS", "(未設定)", "指定したCSSファイルを本文に追加で適用します")}
-      </div>
-      <div class="settings-group">
         <label class="settings-select-row">ライトテーマ
           <select data-field="lightTheme">
             <option value="default">標準</option>
@@ -1145,11 +1192,36 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
         </label>
       </div>
       <div class="settings-group">
+        <div class="settings-group-title">フォント</div>
+        ${renderFontField("editorFontFamily", draft.installedFonts, "本文フォント", "(既定のフォントを使用)")}
+        <div class="settings-field-desc">プレビュー: <span data-font-preview-target="editorFontFamily" style="font-size: 15px;">あア亜 Aa Bb Cc 0123</span></div>
+        ${renderFontField("editorMonospaceFontFamily", draft.monospaceFonts, "等幅フォント", "(既定のフォントを使用)")}
+        <div class="settings-field-desc">プレビュー: <span data-font-preview-target="editorMonospaceFontFamily" style="font-size: 15px;">あア亜 Aa Bb Cc 0123</span></div>
+        ${fieldNumber("editorFontSize", "文字サイズ")}
+        ${fieldNumber("editorLineHeight", "行の高さ")}
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title">レイアウト</div>
+        ${fieldNumber("editorPaddingX", "本文の左右の余白(px)")}
+        ${fieldNumber("editorMaxWidthPx", "本文の最大幅(px)", "0を指定するとテーマの既定値を使います")}
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title">カスタムCSS</div>
+        ${fieldPath(ctx, "customCssPath", "file", "カスタムCSS", "(未設定)", "指定したCSSファイルを本文に追加で適用します")}
+        <div class="settings-info-row">
+          <span class="settings-field-desc">何もない状態から書くのは大変なので、参考になるサンプルCSSを用意しています。</span>
+          <button type="button" class="btn tiny" data-action="open-theme-folder">サンプルのあるフォルダを開く</button>
+        </div>
+      </div>
+      <div class="settings-group">
         <label class="settings-checkbox-row"><input type="checkbox" data-field="showWordCount"><span class="settings-checkbox-title">文字数カウントを常に表示</span></label>
       </div>`;
     wireCommonFields(el);
     wireFontPreviews(el);
     wireBrowseButtons(el);
+    el.querySelector('[data-action="open-theme-folder"]')?.addEventListener("click", () => {
+      ctx.bridge?.postMessage({ type: "open-theme-folder" });
+    });
   }
 
   // ---- ファイルの関連付け(3階層チェックボックス、仕様書 C-13) ----
@@ -1479,6 +1551,50 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     }
   }
 
+  // ---- バージョン情報(Graftと同じく設定の最後にまとめる。C-01〜C-14には無い追加カテゴリ) ----
+  // すべて表示専用(保存対象ではない)。値はSettingsBridge.PostSettingsSnapshotが
+  // "settings"応答に含める(appVersion/webView2Version/dotNetVersion/logFolderPath/
+  // themeFolderPath/licenses。既存のsettingsFilePathも流用)。ボタンはブリッジへ
+  // メッセージを送るだけで、応答を待たず押した側だけ完結する(advanced操作ボタンと同じ作法)。
+  function renderVersionInfo(el) {
+    const licensesHtml = (draft.licenses ?? []).map((lic) => `
+      <div class="settings-license-row">
+        <span class="settings-license-name">${escapeHtml(lic.name ?? "")}</span>
+        <span class="settings-license-type">${escapeHtml(lic.license ?? "")}</span>
+      </div>`).join("");
+    el.innerHTML = `
+      <div class="settings-group">
+        <div class="settings-group-title">Pane</div>
+        <div class="settings-field-desc">バージョン: ${escapeHtml(draft.appVersion || "不明")}</div>
+        <div class="settings-field-desc">WebView2ランタイム: ${escapeHtml(draft.webView2Version || "不明")}</div>
+        <div class="settings-field-desc">.NET: ${escapeHtml(draft.dotNetVersion || "不明")}</div>
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title">場所</div>
+        <div class="settings-info-row">
+          <span class="settings-info-label">設定ファイル: ${draft.settingsFilePath ? escapeHtml(draft.settingsFilePath) : "(不明)"}</span>
+          <button type="button" class="btn tiny" data-action="open-settings-file">開く</button>
+        </div>
+        <div class="settings-info-row">
+          <span class="settings-info-label">ログファイル: ${draft.logFolderPath ? escapeHtml(draft.logFolderPath) : "(不明)"}</span>
+          <button type="button" class="btn tiny" data-action="open-log-folder">フォルダを開く</button>
+          <button type="button" class="btn tiny" data-action="open-today-log">今日のログを開く</button>
+        </div>
+        <div class="settings-info-row">
+          <span class="settings-info-label">カスタムCSSフォルダ: ${draft.themeFolderPath ? escapeHtml(draft.themeFolderPath) : "(不明)"}</span>
+          <button type="button" class="btn tiny" data-action="open-theme-folder">開く</button>
+        </div>
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title">ライセンス</div>
+        <p class="settings-intro">Pane本体、および同梱している主要なオープンソースソフトウェアのライセンスです。</p>
+        <div class="settings-license-list">${licensesHtml || '<span class="settings-field-desc">(読み込み中…)</span>'}</div>
+      </div>`;
+    for (const btn of el.querySelectorAll("[data-action]")) {
+      btn.addEventListener("click", () => ctx.bridge?.postMessage({ type: btn.dataset.action }));
+    }
+  }
+
   // ---- カテゴリ切替のディスパッチ ----
   function renderContent() {
     if (!contentEl || !draft) return;
@@ -1493,6 +1609,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
       case "fileTypes": renderFileTypes(contentEl); break;
       case "keyboard": renderKeybindings(contentEl); break;
       case "advanced": renderAdvanced(contentEl); break;
+      case "versionInfo": renderVersionInfo(contentEl); break;
       default: renderGeneral(contentEl); break;
     }
   }

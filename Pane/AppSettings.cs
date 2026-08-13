@@ -600,6 +600,17 @@ internal sealed class AppSettings
         set => _editorMaxWidthPx = Math.Max(0, value);
     }
 
+    private int _editorPaddingX = 32;
+
+    /// <summary>本文の左右の余白(px)。0〜200の範囲でクランプする。既定32。
+    /// CSS変数 --editor-padding-x として src/style.css の #cm-host .cm-content へ反映される
+    /// (実際にCSS変数へ設定する処理はJS側main.jsが担当。ここでは値の保持と検証のみ)。</summary>
+    public int EditorPaddingX
+    {
+        get => _editorPaddingX;
+        set => _editorPaddingX = Math.Clamp(value, 0, 200);
+    }
+
     /// <summary>文字数カウントの常時表示(仕様書 C-09)。既定ON。</summary>
     public bool ShowWordCount { get; set; } = true;
 
