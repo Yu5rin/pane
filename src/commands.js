@@ -218,6 +218,9 @@ export function initMenuBar(container, commands, ctx) {
   // 元の実行関数へ辿れるようにする。
   let nativeRunRegistry = new Map();
   let nativeOpenBtn = null;
+  // いま開いているネイティブメニューの名前("File"等)。C#から遅れて届く「前のメニューが
+  // 閉じた」通知(menu-closed)と、いま開いているメニューを取り違えないために持つ。
+  let nativeOpenMenuName = null;
 
   function buildNativeItem(item) {
     const grayed = item.grayed?.(ctx) ?? false;
@@ -256,6 +259,7 @@ export function initMenuBar(container, commands, ctx) {
     nativeRunRegistry = new Map();
     const items = commands.filter((c) => c.menu === menuName && !c.contextOnly).map(buildNativeItem);
     nativeOpenBtn = btn;
+    nativeOpenMenuName = menuName;
     btn.classList.add("open");
     // WebView2内のCSSピクセル座標で送る。C#側(Pane/MainForm.HandleOpenMenuRequest)で
     // DeviceDpiとWebView2の画面上の位置(_webView.PointToScreen)を使って画面座標へ変換する。
@@ -289,6 +293,7 @@ export function initMenuBar(container, commands, ctx) {
     stopOutsideClickWatch();
     nativeOpenBtn?.classList.remove("open");
     nativeOpenBtn = null;
+    nativeOpenMenuName = null;
   }
 
   // C#(Pane/NativeMenu.cs)からの応答。main.jsのhandleHostMessageから呼ばれる。
@@ -297,7 +302,19 @@ export function initMenuBar(container, commands, ctx) {
     clearNativeHighlight();
     nativeRunRegistry.get(id)?.();
   }
-  function handleMenuClosed() {
+  // menu-closed には閉じられたメニュー名(C#側 MainForm.HandleOpenMenuRequest が
+  // onClosed で付ける menu)が入っている。
+  //
+  // 「ファイル」を開いたまま「編集」を押すと、C#側は新しいポップアップを出す前に前の
+  // ポップアップを閉じるため、"編集"を開いた直後に「"ファイル"が閉じた」という遅れた通知が
+  // 届く。これを無条件にclearNativeHighlight()すると、実際には編集メニューが開いている
+  // のにJS側は「どのメニューも開いていない」状態になり、画面外クリックの監視
+  // (watchOutsideClick)まで解除されてしまう。結果として
+  //   ・メニュー外をクリックしても閉じない
+  //   ・見出しを連続して押すと1回で消えない
+  // という不具合になっていた。いま開いているメニュー名と一致しない通知は無視する。
+  function handleMenuClosed(menuName) {
+    if (menuName && nativeOpenMenuName && menuName !== nativeOpenMenuName) return;
     clearNativeHighlight();
   }
 
@@ -441,17 +458,28 @@ export function initMenuBar(container, commands, ctx) {
 
   // Altキーでの表示・非表示トグル(仕様書 第10.1節・第10.4節)。
   // 単押しのAltのみを対象とし、Alt+他キーの組み合わせ(OS標準ショートカット等)は無視する。
+  //
+  // preventDefault()を必ず呼ぶのは、Alt単押しをWebView2の外(WinForms本体のウィンドウ
+  // プロシージャ)へ伝えないため。伝わるとWindowsが「メニューモード」(SC_KEYMENU)に入って
+  // WebView2からキーボードフォーカスが外れ、次のAltはメニューモードを抜けるだけで
+  // JS側に届かなくなる。そのため「初回は1回、以降は2回押さないと切り替わらない」という
+  // 挙動になっていた。
   let altArmed = false;
   window.addEventListener("keydown", (e) => {
-    if (e.key === "Alt" && !e.repeat) altArmed = true;
-    else if (e.key !== "Alt") altArmed = false;
+    if (e.key === "Alt" && !e.repeat && !e.ctrlKey && !e.shiftKey && !e.metaKey) {
+      altArmed = true;
+      e.preventDefault();
+    } else if (e.key !== "Alt") {
+      altArmed = false;
+    }
   });
   window.addEventListener("keyup", (e) => {
-    if (e.key === "Alt" && altArmed) {
-      altArmed = false;
-      container.classList.toggle("hidden");
-      closeAll();
-    }
+    if (e.key !== "Alt") return;
+    if (!altArmed) return;
+    altArmed = false;
+    e.preventDefault();
+    container.classList.toggle("hidden");
+    closeAll();
   });
 
   return { closeAll, handleMenuCommand, handleMenuClosed };
