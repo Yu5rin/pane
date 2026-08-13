@@ -129,21 +129,57 @@ const LEZER_MD_DELIMITER_LINE_ORIGINAL =
 const LEZER_MD_DELIMITER_LINE_PATCHED =
   String.raw`/^[>\s]*\|?(\s*:?-+:?\s*\|)+(\s*:?-+:?\s*)?\s*$/`;
 
+// 同じく @lezer/markdown の不具合。表の直後に空行を挟まず「---」を書くと、
+// その行がsetext見出しの下線として先に解釈され、表全体がH2見出しに化けてしまう。
+//
+//   | 項目 | 内容 |
+//   | --- | --- |
+//   | a | b |
+//   ---            ← ここで表が見出しに化ける
+//
+// SetextHeadingParser.nextLine が、同じリーフブロックを既に表パーサが掴んでいるか
+// どうかを見ていないのが原因。表として確定している(TableParserのrowsが配列)場合は
+// setext見出しとして扱わないようにする。GitHubでは同じ入力が表+水平線として描画される。
+const LEZER_MD_SETEXT_ORIGINAL =
+  "let underline = line.depth < cx.stack.length ? -1 : isSetextUnderline(line);";
+const LEZER_MD_SETEXT_PATCHED =
+  "let underline = (line.depth < cx.stack.length || (leaf.parsers && leaf.parsers.some(p => p && Array.isArray(p.rows)))) ? -1 : isSetextUnderline(line);";
+
+// 上記だけだと表は壊れなくなるものの、今度は「---」の行が表の3列目のない行として
+// 表の中に吸い込まれてしまう(表の最後に「---」だけの行が増えて見える)。
+// リーフブロックの終了判定(endLeafBlock)にある水平線の判定が、breaking=true のときに
+// 「setext見出しの下線を優先する」例外を通ってしまい、水平線として表を終わらせられない
+// のが原因。表として確定しているリーフでは、その例外を通さない(breaking=false)ようにして
+// 「---」で表を終わらせ、水平線として描画されるようにする。
+const LEZER_MD_ENDLEAF_HR_ORIGINAL =
+  "(p, line) => isHorizontalRule(line, p, true) >= 0,";
+const LEZER_MD_ENDLEAF_HR_PATCHED =
+  "(p, line, leaf) => isHorizontalRule(line, p, !(leaf && leaf.parsers && leaf.parsers.some(x => x && Array.isArray(x.rows)))) >= 0,";
+
 const patchLezerMarkdownTable = {
   name: "patch-lezer-markdown-table",
   setup(build) {
     build.onLoad({ filter: /@lezer[\\/]markdown[\\/].*\.js$/ }, (args) => {
       const source = fs.readFileSync(args.path, "utf8");
       if (!source.includes("delimiterLine")) return null;
-      if (!source.includes(LEZER_MD_DELIMITER_LINE_ORIGINAL)) {
-        throw new Error(
-          `@lezer/markdown の表の区切り行の正規表現が見つかりませんでした(${args.path})。` +
-          "ライブラリの更新で該当箇所が変わった可能性があります。" +
-          "scripts/build.js の patchLezerMarkdownTable を見直してください。"
-        );
+      for (const [label, needle] of [
+        ["表の区切り行の正規表現", LEZER_MD_DELIMITER_LINE_ORIGINAL],
+        ["setext見出しの判定", LEZER_MD_SETEXT_ORIGINAL],
+        ["リーフブロック終了判定の水平線", LEZER_MD_ENDLEAF_HR_ORIGINAL],
+      ]) {
+        if (!source.includes(needle)) {
+          throw new Error(
+            `@lezer/markdown の「${label}」が見つかりませんでした(${args.path})。` +
+            "ライブラリの更新で該当箇所が変わった可能性があります。" +
+            "scripts/build.js の patchLezerMarkdownTable を見直してください。"
+          );
+        }
       }
       return {
-        contents: source.replace(LEZER_MD_DELIMITER_LINE_ORIGINAL, LEZER_MD_DELIMITER_LINE_PATCHED),
+        contents: source
+          .replace(LEZER_MD_DELIMITER_LINE_ORIGINAL, LEZER_MD_DELIMITER_LINE_PATCHED)
+          .replace(LEZER_MD_SETEXT_ORIGINAL, LEZER_MD_SETEXT_PATCHED)
+          .replace(LEZER_MD_ENDLEAF_HR_ORIGINAL, LEZER_MD_ENDLEAF_HR_PATCHED),
         loader: "js",
       };
     });
