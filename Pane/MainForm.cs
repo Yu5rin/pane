@@ -136,8 +136,13 @@ internal sealed class MainForm : Form
         throw new DirectoryNotFoundException(
             "開発ビルド用のdist/が見つかりません。リポジトリ直下で `npm run build` を実行してください。");
 #else
-        // リリース時: exeと同階層のdist/(仕様書 第7章)
-        return Path.Combine(AppContext.BaseDirectory, "dist");
+        // リリース時: exeと同階層のdist/(仕様書 第7章)。
+        // 単一ファイル発行(PublishSingleFile + IncludeAllContentForSelfExtract)では、
+        // AppContext.BaseDirectoryは実行のたびに自己展開される一時フォルダ
+        // (%TEMP%\.net\Pane\...)を指してしまい、exeの隣に置いたdist/には辿り着けない。
+        // 実際にexeが置かれている場所はEnvironment.ProcessPathから取得する。
+        string? exeDir = Path.GetDirectoryName(Environment.ProcessPath);
+        return Path.Combine(exeDir ?? AppContext.BaseDirectory, "dist");
 #endif
     }
 
