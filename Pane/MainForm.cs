@@ -1689,7 +1689,14 @@ internal sealed class MainForm : Form
 #endif
     }
 
-    // ---- 印刷(仕様書 File項目「印刷」)。WebView2既定の印刷ダイアログを開く。 ----
+    // ---- 印刷(仕様書 File項目「印刷」)。WebView2既定の印刷ダイアログを開く。
+    //
+    // 制約(WebView2のAPIで実現できない項目): ShowPrintUI()は「印刷ダイアログを表示する」だけの
+    // メソッドで、CoreWebView2PrintSettingsを渡す引数が無い(用紙サイズ・余白・ヘッダー/フッター
+    // 等の既定値を事前設定する手段がAPI上に存在しない)。設定を確実に反映できるのは
+    // PrintToPdfAsync(path, printSettings)のみのため、docs/設定項目一覧.md「エクスポート・印刷」節の
+    // 詳細設定はPDFエクスポート(HandleExportRequestAsync)にのみ適用し、この「印刷」コマンド
+    // (Ctrl+Alt+P・File>印刷)には適用しない。印刷ダイアログ上でユーザー自身が設定し直す前提。 ----
     private Task HandlePrintRequestAsync()
     {
         try
@@ -1703,8 +1710,13 @@ internal sealed class MainForm : Form
         return Task.CompletedTask;
     }
 
-    // ---- エクスポート(仕様書 F-XX)。PDFはWebView2のネイティブ機能、HTMLは
-    // JS側で組み立て済みのHTML文字列をそのまま保存、Word/EPUBはPandocに委譲する。
+    /// <summary>1インチ=25.4mm。CoreWebView2PrintSettingsの寸法・余白はすべてインチ単位のため、
+    /// 設定(mm単位)からの変換に使う。</summary>
+    private const double MmPerInch = 25.4;
+
+    // ---- エクスポート(仕様書「エクスポート・印刷」節)。PDFはWebView2のネイティブ機能(用紙サイズ・
+    // 余白・ヘッダー/フッターをCoreWebView2PrintSettings+CSSで反映)、HTMLはJS側で組み立て済みの
+    // HTML文字列をそのまま保存、Word/EPUBはPandocに委譲する。
     // PDFはJS側が"export"送信前にメニューバー等を隠し文書全体をレイアウトへ展開している
     // (enterExportLayout)ため、このメソッドを抜ける経路(保存キャンセルを含む)すべてで
     // 必ず"export-done"を返し、JS側の表示を元に戻せるようにする。 ----
@@ -1712,6 +1724,9 @@ internal sealed class MainForm : Form
     {
         string format = message.TryGetProperty("format", out JsonElement fmtProp) ? fmtProp.GetString() ?? "" : "";
         string text = message.TryGetProperty("text", out JsonElement textProp) ? textProp.GetString() ?? "" : "";
+        JsonElement pageOptions = message.TryGetProperty("pageOptions", out JsonElement poProp) && poProp.ValueKind == JsonValueKind.Object
+            ? poProp
+            : default;
         string baseName = _currentPath is null ? "無題" : Path.GetFileNameWithoutExtension(_currentPath);
 
         (string filter, string ext) = format switch
@@ -1722,16 +1737,26 @@ internal sealed class MainForm : Form
             "epub" => ("EPUB (*.epub)|*.epub", ".epub"),
             _ => ("すべてのファイル (*.*)|*.*", ""),
         };
+        string? targetPath = null;
         try
         {
-            using var dialog = new SaveFileDialog { Filter = filter, FileName = baseName + ext };
-            if (dialog.ShowDialog(this) != DialogResult.OK) return;
-            string targetPath = dialog.FileName;
+            // exportShowSaveDialog(既定true): falseならダイアログを出さずexportDefaultFolder/
+            // exportCustomFolderの場所へ直接書き出す。
+            targetPath = ResolveExportTargetPath(filter, baseName, ext, pageOptions);
+            if (targetPath is null) return; // ダイアログでキャンセルされた
 
             switch (format)
             {
                 case "pdf":
-                    await _webView.CoreWebView2.PrintToPdfAsync(targetPath);
+                    // ヘッダー・フッター(仕様書 exportHeaderText/exportFooterText、{page}/{pages}を含む)は
+                    // CoreWebView2PrintSettings.ShouldPrintHeaderAndFooter(HeaderTitle/FooterUri)では
+                    // 日時・タイトル・URL・ページ番号という固定書式しか出せず、置換文字列を自由な位置に
+                    // 差し込めないため使わない。代わりにCSSの @page 内マージンボックス(@top-center等)へ
+                    // counter(page)/counter(pages)を使って差し込む(印刷対象はライブプレビューのDOMその
+                    // ものなので、印刷直前にスタイルを注入する)。
+                    await InjectPrintHeaderFooterCssAsync(pageOptions);
+                    CoreWebView2PrintSettings printSettings = BuildPrintSettings(pageOptions);
+                    await _webView.CoreWebView2.PrintToPdfAsync(targetPath, printSettings);
                     break;
                 case "html":
                 case "html-plain":
@@ -1742,9 +1767,14 @@ internal sealed class MainForm : Form
                     await ExportViaPandocAsync(text, targetPath);
                     break;
             }
+
+            // exportAfter(仕様書、既定none): 書き出し後にファイル/フォルダを開く。
+            string exportAfter = GetStringProp(pageOptions, "exportAfter", "none");
+            ApplyExportAfter(exportAfter, targetPath);
         }
         catch (Exception ex)
         {
+            Logger.WriteException($"エクスポートに失敗: format={format}, targetPath={targetPath}", ex);
             MessageBox.Show(this, $"エクスポートに失敗しました。\n{ex.Message}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
@@ -1752,6 +1782,208 @@ internal sealed class MainForm : Form
             PostToWeb(new { type = "export-done" });
         }
     }
+
+    /// <summary>
+    /// エクスポート先のファイルパスを決める。exportShowSaveDialogがtrue(既定)ならダイアログを表示し
+    /// (初期フォルダはexportDefaultFolder/exportCustomFolderから)、falseならダイアログを出さず
+    /// その場所へ直接書き出す(ファイル名は文書名のまま。既存ファイルは上書きする)。
+    /// ダイアログでキャンセルされた場合のみnullを返す。
+    /// </summary>
+    private string? ResolveExportTargetPath(string filter, string baseName, string ext, JsonElement pageOptions)
+    {
+        string defaultFolder = GetStringProp(pageOptions, "exportDefaultFolder", "sameAsFile");
+        string customFolder = GetStringProp(pageOptions, "exportCustomFolder", "");
+        string suggestedDir = ResolveExportFolder(defaultFolder, customFolder);
+
+        bool showDialog = !(pageOptions.ValueKind == JsonValueKind.Object &&
+            pageOptions.TryGetProperty("exportShowSaveDialog", out JsonElement sd) && sd.ValueKind == JsonValueKind.False);
+        if (!showDialog)
+        {
+            try
+            {
+                Directory.CreateDirectory(suggestedDir);
+            }
+            catch (Exception ex)
+            {
+                Logger.WriteException($"エクスポート先フォルダを作成できませんでした: {suggestedDir}", ex);
+            }
+            return Path.Combine(suggestedDir, baseName + ext);
+        }
+
+        using var dialog = new SaveFileDialog { Filter = filter, FileName = baseName + ext };
+        if (Directory.Exists(suggestedDir)) dialog.InitialDirectory = suggestedDir;
+        return dialog.ShowDialog(this) == DialogResult.OK ? dialog.FileName : null;
+    }
+
+    /// <summary>exportDefaultFolder("sameAsFile"|"custom")とexportCustomFolderから実フォルダを求める。
+    /// "custom"かつ相対パス(`./` `../` 等)のときは編集中ファイルのフォルダ基準にする
+    /// (仕様書ではexportCustomFolderの相対パス記法は明記されていないが、imageCustomFolderと
+    /// 同じ流儀に揃える)。編集中ファイルが未保存の場合はドキュメントフォルダへフォールバックする。</summary>
+    private string ResolveExportFolder(string defaultFolder, string customFolder)
+    {
+        string fallback = _currentPath is not null
+            ? Path.GetDirectoryName(Path.GetFullPath(_currentPath))!
+            : Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        if (defaultFolder != "custom" || string.IsNullOrWhiteSpace(customFolder)) return fallback;
+        return Path.IsPathRooted(customFolder)
+            ? Path.GetFullPath(customFolder)
+            : Path.GetFullPath(Path.Combine(fallback, customFolder));
+    }
+
+    /// <summary>exportAfter(仕様書、既定none)を実行する。失敗はベストエフォート(ログのみ)。</summary>
+    private static void ApplyExportAfter(string exportAfter, string targetPath)
+    {
+        try
+        {
+            switch (exportAfter)
+            {
+                case "openFile":
+                    using (Process.Start(new ProcessStartInfo(targetPath) { UseShellExecute = true })) { }
+                    break;
+                case "openFolder":
+                    using (Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{targetPath}\"") { UseShellExecute = true })) { }
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException($"exportAfter({exportAfter})の実行に失敗: {targetPath}", ex);
+        }
+    }
+
+    /// <summary>
+    /// pageOptions(JS側main.jsのbuildExportPageOptions)から用紙サイズ・向き・余白を反映した
+    /// CoreWebView2PrintSettingsを作る(仕様書 exportPaperSize/exportOrientation/exportMargin*Mm)。
+    /// 用紙サイズはCoreWebView2PrintMediaSizeに列挙値が無い(Default/Customのみ)ため、
+    /// 既知サイズもすべてCustom+PageWidth/PageHeight(インチ)で表現する。
+    /// </summary>
+    private CoreWebView2PrintSettings BuildPrintSettings(JsonElement pageOptions)
+    {
+        CoreWebView2PrintSettings settings = _webView.CoreWebView2.Environment.CreatePrintSettings();
+
+        string paperSize = GetStringProp(pageOptions, "paperSize", "a4");
+        string orientation = GetStringProp(pageOptions, "orientation", "portrait");
+        double customWidthMm = GetDoubleProp(pageOptions, "customWidthMm", 210);
+        double customHeightMm = GetDoubleProp(pageOptions, "customHeightMm", 297);
+
+        // 既知の用紙サイズ(mm、常に縦長=ポートレート基準で持つ)。B5は日本語圏向けアプリのため
+        // JIS B5(182×257mm)を採用する(ISO B5=176×250mmとは異なるので注意)。
+        (double widthMm, double heightMm) = paperSize switch
+        {
+            "a4" => (210.0, 297.0),
+            "a3" => (297.0, 420.0),
+            "b5" => (182.0, 257.0),
+            "letter" => (215.9, 279.4),
+            "legal" => (215.9, 355.6),
+            "tabloid" => (279.4, 431.8),
+            "custom" => (customWidthMm > 0 ? customWidthMm : 210, customHeightMm > 0 ? customHeightMm : 297),
+            _ => (210.0, 297.0),
+        };
+        bool landscape = orientation == "landscape";
+        if (landscape && widthMm < heightMm) (widthMm, heightMm) = (heightMm, widthMm);
+
+        settings.MediaSize = CoreWebView2PrintMediaSize.Custom;
+        settings.PageWidth = widthMm / MmPerInch;
+        settings.PageHeight = heightMm / MmPerInch;
+        settings.Orientation = landscape ? CoreWebView2PrintOrientation.Landscape : CoreWebView2PrintOrientation.Portrait;
+
+        settings.MarginTop = GetDoubleProp(pageOptions, "marginTopMm", 20) / MmPerInch;
+        settings.MarginBottom = GetDoubleProp(pageOptions, "marginBottomMm", 20) / MmPerInch;
+        settings.MarginLeft = GetDoubleProp(pageOptions, "marginLeftMm", 20) / MmPerInch;
+        settings.MarginRight = GetDoubleProp(pageOptions, "marginRightMm", 20) / MmPerInch;
+
+        settings.ShouldPrintBackgrounds = true; // テーマの配色を含めて出力する(既定falseだと背景が抜ける)
+        // ヘッダー・フッターはCSS側(InjectPrintHeaderFooterCssAsync)で実現するため、WebView2ネイティブの
+        // 固定書式(ShouldPrintHeaderAndFooter)は使わない。
+        settings.ShouldPrintHeaderAndFooter = false;
+
+        return settings;
+    }
+
+    /// <summary>
+    /// ヘッダー・フッター(仕様書 exportHeaderText/exportFooterText)をCSSの @page 内マージンボックス
+    /// (@top-center/@bottom-center)へ注入する。{page}/{pages}はJS側で展開されずそのまま届くため、
+    /// ここでCSSの counter(page)/counter(pages) に変換する(ページ番号・総数は印刷処理そのものが
+    /// 進むまで確定しないため、JS側では展開できない)。
+    ///
+    /// 注意(報告に明記): @page マージンボックス(@top-center等)は比較的新しいCSS Paged Media機能で、
+    /// 対応していないバージョンのChromium(WebView2ランタイム)では単に無視され、ヘッダー・フッターが
+    /// 出ないだけで他の項目(用紙サイズ・余白等)には影響しない。この環境(Linux)ではWebView2を実行
+    /// できないため実機での表示確認はできておらず、コードレビューでの自己確認に留まる。
+    /// </summary>
+    private async Task InjectPrintHeaderFooterCssAsync(JsonElement pageOptions)
+    {
+        string headerTemplate = GetStringProp(pageOptions, "headerTemplate", "");
+        string footerTemplate = GetStringProp(pageOptions, "footerTemplate", "");
+        if (headerTemplate.Length == 0 && footerTemplate.Length == 0)
+        {
+            // 空にする(前回の印刷で入った内容が残らないようにする)
+            headerTemplate = "";
+            footerTemplate = "";
+        }
+
+        string css = $"@page {{ @top-center {{ content: {BuildPageContentCss(headerTemplate)}; font-size: 9px; }} " +
+            $"@bottom-center {{ content: {BuildPageContentCss(footerTemplate)}; font-size: 9px; }} }}";
+        string js = "(function(){" +
+            "var id='pane-print-header-footer-style';" +
+            "var el=document.getElementById(id);" +
+            "if(!el){el=document.createElement('style');el.id=id;document.head.appendChild(el);}" +
+            $"el.textContent={JsonSerializer.Serialize(css)};" +
+            "})();";
+        try
+        {
+            await _webView.CoreWebView2.ExecuteScriptAsync(js);
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException("印刷用ヘッダー/フッターCSSの注入に失敗", ex);
+        }
+    }
+
+    /// <summary>テンプレート文字列を、"{page}"/"{pages}"を境にCSSの content プロパティ用の値へ変換する。
+    /// 例: "p.{page}/{pages}" → "\"p.\" counter(page) \"/\" counter(pages)"</summary>
+    private static string BuildPageContentCss(string template)
+    {
+        if (string.IsNullOrEmpty(template)) return "\"\"";
+        var parts = new List<string>();
+        int last = 0;
+        int i = 0;
+        while (i < template.Length)
+        {
+            if (template.AsSpan(i).StartsWith("{page}"))
+            {
+                if (i > last) parts.Add(CssString(template[last..i]));
+                parts.Add("counter(page)");
+                i += "{page}".Length;
+                last = i;
+            }
+            else if (template.AsSpan(i).StartsWith("{pages}"))
+            {
+                if (i > last) parts.Add(CssString(template[last..i]));
+                parts.Add("counter(pages)");
+                i += "{pages}".Length;
+                last = i;
+            }
+            else
+            {
+                i++;
+            }
+        }
+        if (last < template.Length) parts.Add(CssString(template[last..]));
+        return parts.Count == 0 ? "\"\"" : string.Join(" ", parts);
+    }
+
+    private static string CssString(string s) => "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+
+    private static string GetStringProp(JsonElement obj, string name, string fallback) =>
+        obj.ValueKind == JsonValueKind.Object && obj.TryGetProperty(name, out JsonElement p) && p.ValueKind == JsonValueKind.String
+            ? p.GetString() ?? fallback
+            : fallback;
+
+    private static double GetDoubleProp(JsonElement obj, string name, double fallback) =>
+        obj.ValueKind == JsonValueKind.Object && obj.TryGetProperty(name, out JsonElement p) && p.ValueKind == JsonValueKind.Number
+            ? p.GetDouble()
+            : fallback;
 
     private static async Task ExportViaPandocAsync(string markdownText, string targetPath)
     {
@@ -1780,23 +2012,19 @@ internal sealed class MainForm : Form
         }
     }
 
-    // ---- 画像挿入(仕様書 R-07)。文書と同じフォルダの images/ 配下へコピーし、相対パスを返す。 ----
+    // ---- 画像挿入(仕様書 docs/設定項目一覧.md「画像」節)。実体はImageInsertServiceに委譲する。
+    // メニューの「画像を挿入」(ファイルダイアログ、実パスあり)と、本文へのドラッグ&ドロップ・
+    // クリップボードからの貼り付け(JS側でバイト列化されたもの、実パス無し)の2経路がある。 ----
     private void HandleInsertImageRequest(JsonElement message)
     {
-        if (_currentPath is null)
-        {
-            MessageBox.Show(this, "画像を挿入する前に、文書を一度保存してください。", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
-        }
-        string docDir = Path.GetDirectoryName(Path.GetFullPath(_currentPath))!;
-        string imagesDir = Path.Combine(docDir, "images");
-
         string? sourcePath = null;
         byte[]? bytes = null;
         string suggestedName = "image.png";
 
         if (message.TryGetProperty("dataBase64", out JsonElement dataProp) && dataProp.ValueKind == JsonValueKind.String)
         {
+            // ドラッグ&ドロップ・クリップボード貼り付け(src/main.jsのinsertImageFile経由)。
+            // WebView2の標準DOM File APIでは実パスが取れないため、常にバイト列で届く。
             bytes = Convert.FromBase64String(dataProp.GetString() ?? "");
             if (message.TryGetProperty("name", out JsonElement nameProp) && nameProp.GetString() is string n && n.Length > 0)
             {
@@ -1805,6 +2033,7 @@ internal sealed class MainForm : Form
         }
         else
         {
+            // メニュー「画像を挿入」: ファイル選択ダイアログで実パスを得る。
             using var dialog = new OpenFileDialog
             {
                 Filter = "画像ファイル (*.png;*.jpg;*.jpeg;*.gif;*.svg;*.webp)|*.png;*.jpg;*.jpeg;*.gif;*.svg;*.webp",
@@ -1814,31 +2043,31 @@ internal sealed class MainForm : Form
             suggestedName = Path.GetFileName(sourcePath);
         }
 
+        AppSettings settings = SettingsService.Load();
         try
         {
-            Directory.CreateDirectory(imagesDir);
-            string destPath = UniqueDestinationPath(imagesDir, suggestedName);
-            if (sourcePath is not null) File.Copy(sourcePath, destPath);
-            else File.WriteAllBytes(destPath, bytes!);
+            ImageInsertService.InsertResult result = ImageInsertService.InsertLocalImage(
+                sourcePath, bytes, suggestedName, settings, _currentPath,
+                log: reason => Logger.Write($"画像挿入: {reason}"));
 
-            string relative = Path.GetRelativePath(docDir, destPath).Replace(Path.DirectorySeparatorChar, '/');
-            PostToWeb(new { type = "image-inserted", alt = Path.GetFileNameWithoutExtension(destPath), path = relative });
+            if (!result.Ok)
+            {
+                MessageBox.Show(this, result.ErrorMessage, "Pane", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            Logger.Write($"画像挿入完了: path={result.MarkdownPath}");
+            PostToWeb(new
+            {
+                type = "image-inserted",
+                alt = Path.GetFileNameWithoutExtension(suggestedName),
+                path = result.MarkdownPath,
+            });
         }
         catch (Exception ex)
         {
+            Logger.WriteException("画像挿入に失敗", ex);
             MessageBox.Show(this, $"画像を挿入できませんでした。\n{ex.Message}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
-    }
-
-    private static string UniqueDestinationPath(string dir, string fileName)
-    {
-        string name = Path.GetFileNameWithoutExtension(fileName);
-        string ext = Path.GetExtension(fileName);
-        string candidate = Path.Combine(dir, fileName);
-        for (int i = 1; File.Exists(candidate); i++)
-        {
-            candidate = Path.Combine(dir, $"{name}-{i}{ext}");
-        }
-        return candidate;
     }
 }
