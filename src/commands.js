@@ -193,7 +193,8 @@ export function isAssignableShortcut(shortcutString) {
 // (多言語対応は将来別途行う予定のため、ここでは決め打ちの日本語のみとする)。
 export const MENU_LABELS = { File: "ファイル", Edit: "編集", Paragraph: "段落", Format: "書式", View: "表示" };
 export function initMenuBar(container, commands, ctx) {
-  const menus = ["File", "Edit", "Paragraph", "Format", "View"];
+  // 並びは「ファイル、編集、表示、段落、書式」。
+  const menus = ["File", "Edit", "View", "Paragraph", "Format"];
   // コンテナ末尾には右端寄せ用のスペーサーとテーマ切替ボタンが静的HTML側で既に置かれているため、
   // それらは残したまま、メニュー項目だけをその手前に挿入する。
   const anchor = container.firstChild;
