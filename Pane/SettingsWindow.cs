@@ -170,6 +170,18 @@ internal sealed class SettingsWindow : Form
             case "open-with-dialog":
                 SettingsBridge.HandleOpenWithDialog(root, this);
                 break;
+            // 「バージョン情報」「外観」カテゴリの各ボタン。設定画面はこの専用ウィンドウで
+            // 表示されるため、これらの受け口は本体ウィンドウ側だけでなくここにも必要
+            // (無いとボタンを押しても何も起きない)。
+            case "open-log-folder":
+                SettingsBridge.OpenLogFolderInExplorer();
+                break;
+            case "open-today-log":
+                SettingsBridge.OpenTodayLogFile();
+                break;
+            case "open-theme-folder":
+                SettingsBridge.OpenThemeFolderInExplorer();
+                break;
             case "close-settings-window":
                 // JS側(settings.js、page表示モード)がキャンセル・保存完了・Escape等で
                 // 「閉じる」操作をしたときの受け口。このウィンドウ自身を閉じるだけで、
