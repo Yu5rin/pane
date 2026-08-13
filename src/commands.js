@@ -331,37 +331,32 @@ export function initContextMenu(hostEl, commands, ctx, resolveContextCommandIds)
 // メニューバーが非表示でもショートカットキー自体は常に有効(第10.4節: 表示中は一覧としても機能する、
 // であって非表示中は無効になるわけではない)。
 //
-// File系(新規・開く・保存等)はエディタにフォーカスが無くても効くよう window レベルで待ち受ける。
-// それ以外はCodeMirror既定のキーマップ(Ctrl+I/U/[/]等)と衝突するものがあるため、
-// createEditor() の onKeydown フック(CMの既定キー処理より先に評価される、既存のTab/Enter処理と
-// 同じ仕組み)経由でエディタ側から呼び出し、確実に自前の挙動を優先させる。
+// 全ショートカットをwindowのcaptureフェーズ(第3引数true)で1本にまとめて待ち受ける。
+// captureフェーズはターゲット(CodeMirrorのcontentDOM・検索ボックスのinput等)へ
+// イベントが届く前に発火するため、(1)CodeMirror既定のキーマップ(Ctrl+I/U/[/]等)より
+// 確実に先着でき、(2)検索ボックス等どのDOM要素にフォーカスがあっても素通りしない。
+// 割り当てているショートカットはすべてCtrl修飾または機能キーのみ(通常の文字入力と
+// 衝突しない)ため、入力欄にフォーカスがあってもここで奪って問題ない。
 function isShortcutEnabled(cmd, ctx) {
   const grayed = cmd.grayed?.(ctx) ?? false;
   return !grayed && (cmd.enabled ? cmd.enabled(ctx) : true);
 }
-export function createShortcutHandler(commands, ctx) {
-  const scoped = commands.filter((c) => c.shortcut && c.menu !== "File").map((c) => ({ cmd: c, combo: parseShortcut(c.shortcut) }));
-  return function onKeydown(e) {
-    for (const { cmd, combo } of scoped) {
-      if (!matchesShortcut(e, combo)) continue;
-      if (!isShortcutEnabled(cmd, ctx)) continue;
-      cmd.run();
-      return true;
-    }
-    return false;
-  };
-}
-export function bindGlobalShortcuts(commands, ctx) {
-  const scoped = commands.filter((c) => c.shortcut && c.menu === "File").map((c) => ({ cmd: c, combo: parseShortcut(c.shortcut) }));
+export function bindShortcuts(commands, ctx) {
+  const scoped = commands.filter((c) => c.shortcut).map((c) => ({ cmd: c, combo: parseShortcut(c.shortcut) }));
   window.addEventListener("keydown", (e) => {
     for (const { cmd, combo } of scoped) {
       if (!matchesShortcut(e, combo)) continue;
-      if (!isShortcutEnabled(cmd, ctx)) continue;
+      if (!isShortcutEnabled(cmd, ctx)) {
+        console.log(`[shortcut] ${cmd.shortcut} は一致したが無効(grayed/enabled=false): ${cmd.id}`);
+        continue;
+      }
       e.preventDefault();
+      e.stopPropagation();
+      console.log(`[shortcut] ${cmd.shortcut} -> ${cmd.id}`);
       cmd.run();
       return;
     }
-  });
+  }, true);
 }
 function parseShortcut(s) {
   const parts = s.split("+");

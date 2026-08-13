@@ -45,6 +45,11 @@ internal sealed class MainForm : Form
     private bool _isDirty;
     private bool _isReadOnly;
 
+    /// <summary>ConfirmDiscardDirtyAsyncの「保存する」選択時、JS側の保存完了(save-result)を待つための待機口。</summary>
+    private TaskCompletionSource<bool>? _saveCompletionSource;
+    /// <summary>ConfirmDiscardDirtyAsyncを通過した後、確認を再表示せずにClose()を通すためのフラグ。</summary>
+    private bool _forceClose;
+
     /// <summary>自動保存スナップショットの識別子。ウィンドウごとに一意。</summary>
     public Guid WindowId { get; } = Guid.NewGuid();
 
@@ -57,6 +62,7 @@ internal sealed class MainForm : Form
         _initialPath = initialPath;
         _recoverFrom = recoverFrom;
         _requestNewWindow = requestNewWindow;
+        Logger.Write($"MainForm生成: initialPath={initialPath ?? "(なし)"}, recoverFrom={(recoverFrom is null ? "なし" : recoverFrom.OriginalPath ?? "無題")}");
 
         Text = "Pane";
         Width = 960;
@@ -80,15 +86,19 @@ internal sealed class MainForm : Form
         // (Formではなく)このコントロール自身のHWNDが受け取る。WebView2.AllowDropは読み取り専用
         // (AllowExternalDrop=false設定時にコントロール自身が自動でOLEドロップターゲット登録する)
         // ため、こちらから明示的にAllowDrop=trueへは出来ないが、DragEnter/DragDropイベント自体は
-        // Formと同じハンドラをそのまま登録できる。
+        // Formと同じハンドラをそのまま登録できる。AllowExternalDropはネイティブのWebView2
+        // コントローラー生成(EnsureCoreWebView2Async)より前に設定しないと、生成時点の既定値
+        // (true)でOLEドロップターゲット登録が確定してしまい、後から変更しても反映されない
+        // 可能性があるため、コントローラー生成前のこの時点で設定する。
+        _webView.AllowExternalDrop = false;
         _webView.DragEnter += OnDragEnter;
         _webView.DragDrop += OnDragDrop;
         Controls.Add(_webView);
 
         // 起動直後・ウィンドウ切替後の初回キー入力がWebView2内のコンテンツへ届かない
         // (フォーカスがネイティブのフォーム側に留まる)ことがあるため、明示的にフォーカスを移す。
-        Shown += (_, _) => _webView.Focus();
-        Activated += (_, _) => _webView.Focus();
+        Shown += (_, _) => { Logger.Write("Form.Shown: _webView.Focus()"); _webView.Focus(); };
+        Activated += (_, _) => { Logger.Write("Form.Activated: _webView.Focus()"); _webView.Focus(); };
 
         _autoSaveTimer = new System.Windows.Forms.Timer { Interval = AutoSaveIntervalMs };
         _autoSaveTimer.Tick += (_, _) => RequestAutoSaveSnapshot();
@@ -97,25 +107,69 @@ internal sealed class MainForm : Form
         _externalChangeDebounceTimer.Tick += OnExternalChangeDebounceElapsed;
 
         Load += OnLoadAsync;
+        // ウィンドウを閉じる操作(Xボタン・Alt+F4・File>閉じる)すべてがここを通る。
+        // 未保存の変更があれば保存するか確認してから閉じる(仕様書: 編集中のファイルを
+        // 閉じるときに保存を確認する)。
+        FormClosing += OnFormClosingAsync;
         FormClosed += (_, _) =>
         {
+            Logger.Write("Form.FormClosed");
             _autoSaveTimer.Stop();
             _watcher?.Dispose();
         };
     }
 
+    /// <summary>
+    /// 未保存の変更がある場合、閉じる・新規作成・別のファイルを開く等、現在の文書を
+    /// 置き換えるあらゆる操作の前に呼ぶ。保存する/しない/キャンセルを確認し、「保存する」が
+    /// 選ばれた場合はJS側に保存を依頼してその完了(save-result)を待つ。
+    /// 戻り値がtrueなら呼び出し元の操作を続行してよい。falseなら中止する。
+    /// </summary>
+    private async Task<bool> ConfirmDiscardDirtyAsync()
+    {
+        if (!_isDirty) return true;
+
+        DialogResult choice = MessageBox.Show(
+            this,
+            "保存されていない変更があります。保存しますか?",
+            "Pane",
+            MessageBoxButtons.YesNoCancel,
+            MessageBoxIcon.Warning);
+        Logger.Write($"ConfirmDiscardDirtyAsync: 選択={choice}");
+
+        if (choice == DialogResult.Cancel) return false;
+        if (choice == DialogResult.No) return true;
+
+        // 保存する: 本文はJS(CodeMirror)側にしか無いため、保存を要求して完了を待つ。
+        _saveCompletionSource = new TaskCompletionSource<bool>();
+        PostToWeb(new { type = "request-save" });
+        bool saved = await _saveCompletionSource.Task;
+        Logger.Write($"ConfirmDiscardDirtyAsync: 保存結果={saved}");
+        return saved;
+    }
+
+    private async void OnFormClosingAsync(object? sender, FormClosingEventArgs e)
+    {
+        if (_forceClose) return;
+        Logger.Write($"FormClosing: isDirty={_isDirty}");
+        e.Cancel = true; // 非同期の確認・保存が終わるまでいったん保留する
+        if (!await ConfirmDiscardDirtyAsync()) return;
+        _forceClose = true;
+        Close();
+    }
+
     private async void OnLoadAsync(object? sender, EventArgs e)
     {
+        Logger.Write("OnLoadAsync開始");
         string userDataFolder = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "Pane", "WebView2");
 
         CoreWebView2Environment env = await CoreWebView2Environment.CreateAsync(userDataFolder: userDataFolder);
         await _webView.EnsureCoreWebView2Async(env);
+        Logger.Write($"WebView2初期化完了: バージョン={_webView.CoreWebView2.Environment.BrowserVersionString}");
 
-        // Formのドラッグ&ドロップ(コマンドライン引数・D&Dと同じOpenFile経路)を使うため、
-        // WebView2自身にドロップを処理させない。
-        _webView.AllowExternalDrop = false;
+        // AllowExternalDropはコントローラー生成前(コンストラクタ)で既に設定済み。
         // ブラウザ既定のアクセラレータキー(Ctrl+U=ソース表示、Ctrl+F=検索、Ctrl+P=印刷、
         // F3=検索、F12=DevTools等)を無効化する。無効化しないとPane独自のショートカット
         // (仕様書 第2章のCtrl+U下線・Ctrl+F検索・Ctrl+Alt+P印刷等)より先にWebView2側の
@@ -125,9 +179,11 @@ internal sealed class MainForm : Form
         _webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
 
         string distPath = ResolveDistPath();
+        Logger.Write($"distPath={distPath} (存在={Directory.Exists(distPath)}, index.html存在={File.Exists(Path.Combine(distPath, "index.html"))})");
         _webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
             VirtualHostName, distPath, CoreWebView2HostResourceAccessKind.Allow);
         _webView.CoreWebView2.Navigate($"https://{VirtualHostName}/index.html");
+        Logger.Write("Navigate呼び出し完了");
     }
 
     private static string ResolveDistPath()
@@ -163,6 +219,8 @@ internal sealed class MainForm : Form
         using JsonDocument doc = JsonDocument.Parse(e.WebMessageAsJson);
         JsonElement root = doc.RootElement;
         string type = root.TryGetProperty("type", out JsonElement typeProp) ? typeProp.GetString() ?? "" : "";
+        // "dirty"は入力のたびに飛んでくるため、ログが埋もれないよう対象外にする。
+        if (type != "dirty") Logger.Write($"JSからのメッセージ受信: type={type}");
 
         switch (type)
         {
@@ -174,12 +232,12 @@ internal sealed class MainForm : Form
                 _autoSaveTimer.Start();
                 break;
             case "open":
-                HandleOpenRequest();
+                _ = HandleOpenRequestAsync();
                 break;
             case "open-path":
                 if (root.TryGetProperty("path", out JsonElement openPathProp))
                 {
-                    OpenFile(openPathProp.GetString() ?? "");
+                    _ = HandleOpenPathRequestAsync(openPathProp.GetString() ?? "");
                 }
                 break;
             case "save":
@@ -201,7 +259,7 @@ internal sealed class MainForm : Form
                 ShowSettingsDialog();
                 break;
             case "new":
-                OpenNewDocument();
+                _ = HandleNewRequestAsync();
                 break;
             case "new-window":
                 _requestNewWindow?.Invoke(null);
@@ -221,7 +279,31 @@ internal sealed class MainForm : Form
             case "insert-image":
                 HandleInsertImageRequest(root);
                 break;
+            case "log":
+                // JS側の不具合調査ログ(main.jsのlogToHost)をC#側と同じログファイルへ集約する。
+                string level = root.TryGetProperty("level", out JsonElement levelProp) ? levelProp.GetString() ?? "log" : "log";
+                string logMessage = root.TryGetProperty("message", out JsonElement msgProp) ? msgProp.GetString() ?? "" : "";
+                Logger.Write($"[JS:{level}] {logMessage}");
+                break;
         }
+    }
+
+    private async Task HandleNewRequestAsync()
+    {
+        if (!await ConfirmDiscardDirtyAsync()) return;
+        OpenNewDocument();
+    }
+
+    private async Task HandleOpenRequestAsync()
+    {
+        if (!await ConfirmDiscardDirtyAsync()) return;
+        HandleOpenRequest();
+    }
+
+    private async Task HandleOpenPathRequestAsync(string path)
+    {
+        if (!await ConfirmDiscardDirtyAsync()) return;
+        OpenFile(path);
     }
 
     private void HandleOpenRequest()
@@ -251,6 +333,7 @@ internal sealed class MainForm : Form
                 MessageBoxIcon.Warning);
             if (choice != DialogResult.Yes)
             {
+                CompleteSave(ok: false);
                 PostToWeb(new { type = "save-result", ok = false, canceled = true });
                 return;
             }
@@ -271,6 +354,7 @@ internal sealed class MainForm : Form
             }
             if (dialog.ShowDialog(this) != DialogResult.OK)
             {
+                CompleteSave(ok: false);
                 PostToWeb(new { type = "save-result", ok = false, canceled = true });
                 return;
             }
@@ -286,6 +370,8 @@ internal sealed class MainForm : Form
             SetDirty(false);
             AutoSaveService.DeleteSnapshot(WindowId);
             StartWatching(targetPath);
+            Logger.Write($"保存成功: {targetPath}");
+            CompleteSave(ok: true);
             PostToWeb(new
             {
                 type = "save-result",
@@ -298,8 +384,17 @@ internal sealed class MainForm : Form
         }
         catch (Exception ex)
         {
+            Logger.WriteException($"保存失敗: {targetPath}", ex);
+            CompleteSave(ok: false);
             PostToWeb(new { type = "save-result", ok = false, error = ex.Message });
         }
+    }
+
+    /// <summary>ConfirmDiscardDirtyAsyncが保存完了を待っていれば、その結果を通知する。</summary>
+    private void CompleteSave(bool ok)
+    {
+        _saveCompletionSource?.TrySetResult(ok);
+        _saveCompletionSource = null;
     }
 
     /// <summary>
@@ -307,6 +402,7 @@ internal sealed class MainForm : Form
     /// </summary>
     public void OpenFile(string path)
     {
+        Logger.Write($"OpenFile: {path}");
         try
         {
             LoadResult result = TextFileService.Load(path);
@@ -331,6 +427,7 @@ internal sealed class MainForm : Form
         }
         catch (Exception ex)
         {
+            Logger.WriteException($"ファイルを開けなかった: {path}", ex);
             MessageBox.Show(
                 this,
                 $"ファイルを開けませんでした。\n{ex.Message}",
@@ -415,15 +512,18 @@ internal sealed class MainForm : Form
 
     private void OnDragEnter(object? sender, DragEventArgs e)
     {
-        e.Effect = e.Data?.GetDataPresent(DataFormats.FileDrop) == true
-            ? DragDropEffects.Copy
-            : DragDropEffects.None;
+        bool hasFileDrop = e.Data?.GetDataPresent(DataFormats.FileDrop) == true;
+        Logger.Write($"OnDragEnter (sender={sender?.GetType().Name}): hasFileDrop={hasFileDrop}");
+        e.Effect = hasFileDrop ? DragDropEffects.Copy : DragDropEffects.None;
     }
 
-    private void OnDragDrop(object? sender, DragEventArgs e)
+    private async void OnDragDrop(object? sender, DragEventArgs e)
     {
+        Logger.Write($"OnDragDrop (sender={sender?.GetType().Name}): dataPresent={e.Data?.GetDataPresent(DataFormats.FileDrop)}");
         if (e.Data?.GetData(DataFormats.FileDrop) is string[] { Length: > 0 } paths)
         {
+            Logger.Write($"OnDragDrop: paths=[{string.Join(",", paths)}]");
+            if (!await ConfirmDiscardDirtyAsync()) return;
             // このウィンドウには先頭の1件を開く。複数ファイルは呼び出し元(D&D)が
             // 別ウィンドウとして開くかどうかを判断する(Phase 3のカスケード配置)。
             OpenFile(paths[0]);

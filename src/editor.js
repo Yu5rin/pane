@@ -963,7 +963,7 @@ const livePreviewExt = () => [
 // インデントガイドまで。矩形選択・コード補完・LSP連携・エラー診断は搭載しない)。
 const codeModeExtras = () => [lineNumbers(), bracketMatching(), indentGuides];
 
-export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionChange, onRender, onKeydown, onPaste, onCopy } = {}) {
+export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionChange, onRender, onPaste, onCopy } = {}) {
   const editable = new Compartment();
   const themeComp = new Compartment();
   // ファイル種別ごとの編集モード切り替え(仕様書 第1章: markdown / code / plain)。
@@ -1016,8 +1016,6 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
         EditorView.domEventHandlers({
           compositionstart: () => { composing = true; onCompositionChange?.(true); },
           compositionend: () => { composing = false; onCompositionChange?.(false); },
-          // アプリ側ショートカット(Md装飾/Tab/リスト継続)をCMの既定キー処理より先に評価
-          keydown: (e) => { if (onKeydown && onKeydown(e)) { e.preventDefault(); return true; } return false; },
           // スマートペースト(仕様書 第2.9.3節): HTML形式のクリップボードをMarkdownへ変換して
           // 挿入する。CMの既定貼り付け処理より先に評価し、変換しない場合は既定動作に委ねる。
           paste: (e) => { if (onPaste && onPaste(e)) { e.preventDefault(); return true; } return false; },

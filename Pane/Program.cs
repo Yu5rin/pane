@@ -7,6 +7,15 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        // 実機での不具合調査用ログ(%LOCALAPPDATA%\Pane\logs\)。ハンドルされない例外を
+        // JITデバッグダイアログだけでなくログにも残し、後から原因を追いやすくする。
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            Logger.Write($"未処理例外(AppDomain): {e.ExceptionObject}");
+        Application.ThreadException += (_, e) =>
+            Logger.WriteException("未処理例外(UIスレッド)", e.Exception);
+        Logger.Write($"=== Pane起動 args=[{string.Join(",", args)}] ===");
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+
         // Shift_JIS(コードページ932)等のANSI系エンコーディングを使えるようにする。
         // .NET (Core以降) は既定でこれらのコードページを同梱していないため必須。
         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
