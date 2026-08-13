@@ -243,6 +243,12 @@ export function initMenuBar(container, commands, ctx) {
   }
 
   function openNativeMenu(menuName, btn) {
+    // 開いている見出しをもう一度押したら閉じるだけにする(一般的なメニューの挙動)。
+    if (nativeOpenBtn === btn) {
+      clearNativeHighlight();
+      ctx.bridge?.postMessage({ type: "close-menu" });
+      return;
+    }
     // 前のメニューがmenu-closed/menu-commandを受け取らないまま次が開かれた場合に備え、
     // 念のため先にハイライトを解除しておく(通常はC#側が前のポップアップを閉じてから
     // 新しいポップアップを開くため起きないはずだが、取りこぼし防止)。
