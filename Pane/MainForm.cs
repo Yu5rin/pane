@@ -78,20 +78,26 @@ internal sealed class MainForm : Form
         }
 
         AllowDrop = true;
+        // DragEnterはドラッグがコントロール領域に入った瞬間に1回だけ発生し、その後カーソルが
+        // 領域内を動くたびにDragOverが繰り返し発生する。DragOverを登録していないと、
+        // (DragEnterで一度Copyを許可していても)以降のDragOverでは既定でNone扱いとなり、
+        // 本文エリア内では禁止マークが出続けてしまう。同じ判定でよいためOnDragEnterを両方に登録する。
         DragEnter += OnDragEnter;
+        DragOver += OnDragEnter;
         DragDrop += OnDragDrop;
 
         _webView.Dock = DockStyle.Fill;
         // WebView2はDock=Fillでクライアント領域全体を覆うため、実際のドラッグ&ドロップ通知は
         // (Formではなく)このコントロール自身のHWNDが受け取る。WebView2.AllowDropは読み取り専用
         // (AllowExternalDrop=false設定時にコントロール自身が自動でOLEドロップターゲット登録する)
-        // ため、こちらから明示的にAllowDrop=trueへは出来ないが、DragEnter/DragDropイベント自体は
-        // Formと同じハンドラをそのまま登録できる。AllowExternalDropはネイティブのWebView2
+        // ため、こちらから明示的にAllowDrop=trueへは出来ないが、DragEnter/DragOver/DragDropイベント
+        // 自体はFormと同じハンドラをそのまま登録できる。AllowExternalDropはネイティブのWebView2
         // コントローラー生成(EnsureCoreWebView2Async)より前に設定しないと、生成時点の既定値
         // (true)でOLEドロップターゲット登録が確定してしまい、後から変更しても反映されない
         // 可能性があるため、コントローラー生成前のこの時点で設定する。
         _webView.AllowExternalDrop = false;
         _webView.DragEnter += OnDragEnter;
+        _webView.DragOver += OnDragEnter;
         _webView.DragDrop += OnDragDrop;
         Controls.Add(_webView);
 
@@ -516,15 +522,25 @@ internal sealed class MainForm : Form
         _webView.CoreWebView2.PostWebMessageAsJson(json);
     }
 
+    private string? _lastDragLogKey;
+
     private void OnDragEnter(object? sender, DragEventArgs e)
     {
+        // DragEnter/DragOverの両方に登録しているため、ドラッグ中は同じ内容で大量に呼ばれる。
+        // 状態が変わった時だけログに残す(sender種別の切り替わりが分かれば十分な調査目的のため)。
         bool hasFileDrop = e.Data?.GetDataPresent(DataFormats.FileDrop) == true;
-        Logger.Write($"OnDragEnter (sender={sender?.GetType().Name}): hasFileDrop={hasFileDrop}");
+        string key = $"{sender?.GetType().Name}:{hasFileDrop}";
+        if (key != _lastDragLogKey)
+        {
+            _lastDragLogKey = key;
+            Logger.Write($"OnDragEnter/Over (sender={sender?.GetType().Name}): hasFileDrop={hasFileDrop}");
+        }
         e.Effect = hasFileDrop ? DragDropEffects.Copy : DragDropEffects.None;
     }
 
     private async void OnDragDrop(object? sender, DragEventArgs e)
     {
+        _lastDragLogKey = null; // 次のドラッグ操作でまた最初の状態からログを記録できるようにする
         Logger.Write($"OnDragDrop (sender={sender?.GetType().Name}): dataPresent={e.Data?.GetDataPresent(DataFormats.FileDrop)}");
         if (e.Data?.GetData(DataFormats.FileDrop) is string[] { Length: > 0 } paths)
         {

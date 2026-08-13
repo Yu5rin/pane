@@ -122,11 +122,12 @@ internal sealed class PaneApplicationContext : ApplicationContext
     private void OnWindowClosed(MainForm form)
     {
         bool isLastWindow = _windows.Count == 1 && _windows[0] == form;
+        List<string>? openFilePaths = null;
         if (isLastWindow)
         {
             // アプリ全体としての終了。次回のセッション復元用に、開いていたファイルパスを保存する
             // (仕様書 N-07: 復元スコープはファイルパスのみ、スクロール位置等は含めない)。
-            _settings.OpenFilePaths = _windows
+            openFilePaths = _windows
                 .Where(w => w.CurrentPath is not null)
                 .Select(w => w.CurrentPath!)
                 .ToList();
@@ -136,7 +137,18 @@ internal sealed class PaneApplicationContext : ApplicationContext
 
         if (_windows.Count == 0)
         {
-            SettingsService.Save(_settings);
+            // _settingsは起動時に一度読み込んだままのスナップショットのため、そのまま保存すると
+            // セッション中に他の経路(テーマ切替・最近使ったファイル・設定ダイアログ等、いずれも
+            // 都度SettingsService.Load/Saveで直接ディスクへ書いている)で変更された内容を
+            // 上書きして消してしまう。保存直前にディスクの最新設定を読み直し、このクラスが
+            // 責務を持つ項目(ウィンドウ位置・サイズ・セッション復元用パス)だけを反映する。
+            AppSettings latest = SettingsService.Load();
+            latest.WindowX = _settings.WindowX;
+            latest.WindowY = _settings.WindowY;
+            latest.WindowWidth = _settings.WindowWidth;
+            latest.WindowHeight = _settings.WindowHeight;
+            if (openFilePaths is not null) latest.OpenFilePaths = openFilePaths;
+            SettingsService.Save(latest);
             ExitThread();
         }
     }
