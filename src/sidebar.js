@@ -4,6 +4,7 @@
 // 検索欄に文字列が入っている間は、3パネルの代わりに検索結果を本体領域(#sidebar-body)へ表示する。
 import { extractHeadings } from "./markdown-extras.js";
 import { createGlobalSearch } from "./global-search.js";
+import { showContextMenu } from "./commands.js";
 
 // 入力のたびに構文木を全走査(extractHeadings)しないためのデバウンス幅(仕様書 性能要件)。
 // 第10.5節の「パネルとタブの切替:160ms」はCSSトランジションの値であり、これとは別。
@@ -155,6 +156,69 @@ export function createSidebar(editor, ctx) {
     return root.children;
   }
 
+  // ---- 右クリックメニュー(docs/コンテキストメニュー仕様.md 第4章) ----
+  // 各行のcontextmenuリスナーから直接呼ぶ小さな木を組み立てるだけの関数群。
+  // 本文(main.js)側の右クリックメニューと同じshowContextMenu(commands.js)を使い、
+  // ブリッジの有無で自動的にネイティブ/HTMLフォールバックが切り替わる。
+
+  // 4.1 アウトラインパネルの見出し行
+  function collapseAllHeadings() {
+    const forest = buildOutlineForest(extractHeadings(editor.view.state));
+    (function walk(nodes) {
+      for (const node of nodes) {
+        if (node.children.length) outlineCollapsed.add(node.heading.slug);
+        walk(node.children);
+      }
+    })(forest);
+  }
+  function buildOutlineMenu(heading) {
+    return [
+      { label: "ここへジャンプ", run: () => editor.jumpToHeading(heading) },
+      { label: "見出しをコピー", run: () => navigator.clipboard.writeText(heading.text).catch(() => {}), separatorAfter: true },
+      { label: "すべて展開", run: () => { outlineCollapsed.clear(); renderOutline(); } },
+      { label: "すべて折りたたむ", run: () => { collapseAllHeadings(); renderOutline(); } },
+    ];
+  }
+
+  // 4.2 記事リスト・ファイルツリーのファイル行(entry: { path, name, relativePath }相当)
+  function renameEntryFlow(entry) {
+    const name = window.prompt("新しい名前を入力してください", entry.name);
+    if (!name || name === entry.name) return;
+    ctx.bridge.postMessage({ type: "rename-path", path: entry.path, newName: name });
+  }
+  function deleteEntryFlow(entry) {
+    if (!window.confirm(`"${entry.name}" をごみ箱へ移動しますか?`)) return;
+    ctx.bridge.postMessage({ type: "delete-path", path: entry.path });
+  }
+  function buildFileRowMenu(entry) {
+    const hasBridge = !!ctx.bridge;
+    return [
+      { label: "開く", run: () => ctx.actions.switchFileFromSidebar(entry.path) },
+      { label: "新しいウィンドウで開く", enabled: hasBridge, run: () => ctx.bridge.postMessage({ type: "open-path-new-window", path: entry.path }), separatorAfter: true },
+      { label: "エクスプローラーで表示", enabled: hasBridge, run: () => ctx.bridge.postMessage({ type: "reveal-in-explorer", path: entry.path }) },
+      { label: "フルパスをコピー", run: () => navigator.clipboard.writeText(entry.path).catch(() => {}) },
+      { label: "ファイル名をコピー", run: () => navigator.clipboard.writeText(entry.name).catch(() => {}), separatorAfter: true },
+      { label: "名前の変更…", enabled: hasBridge, run: () => renameEntryFlow(entry) },
+      { label: "削除(ごみ箱へ)", enabled: hasBridge, run: () => deleteEntryFlow(entry) },
+    ];
+  }
+
+  // 4.3 ファイルツリーのフォルダ行
+  function createFileFlow(dirEntry) {
+    const name = window.prompt("新しいファイル名を入力してください(例: memo.md)");
+    if (!name) return;
+    ctx.bridge.postMessage({ type: "create-file-in-folder", dirPath: dirEntry.path, name });
+  }
+  function buildFolderRowMenu(entry, expanded) {
+    const hasBridge = !!ctx.bridge;
+    return [
+      { label: expanded ? "折りたたむ" : "展開", run: () => { if (expanded) expandedDirs.delete(entry.relativePath); else expandedDirs.add(entry.relativePath); renderActivePanelNow(); } },
+      { label: "エクスプローラーで表示", enabled: hasBridge, run: () => ctx.bridge.postMessage({ type: "reveal-in-explorer", path: entry.path }) },
+      { label: "フルパスをコピー", run: () => navigator.clipboard.writeText(entry.path).catch(() => {}) },
+      { label: "ここに新しいファイルを作成…", enabled: hasBridge, run: () => createFileFlow(entry) },
+    ];
+  }
+
   // アウトラインパネル本体。extractHeadings()は構文木の全走査のため、呼び出し元
   // (scheduleRefresh/renderActivePanelNow)側でタイミングを制御する。
   function renderOutline() {
@@ -176,6 +240,7 @@ export function createSidebar(editor, ctx) {
         item.textContent = heading.text;
         item.title = heading.text;
         item.addEventListener("click", () => editor.jumpToHeading(heading));
+        item.addEventListener("contextmenu", (e) => { e.preventDefault(); showContextMenu(ctx, e.clientX, e.clientY, buildOutlineMenu(heading)); });
         bodyEl.appendChild(item);
       }
       return;
@@ -233,6 +298,7 @@ export function createSidebar(editor, ctx) {
         item.textContent = heading.text;
       }
       item.addEventListener("click", () => editor.jumpToHeading(heading));
+      item.addEventListener("contextmenu", (e) => { e.preventDefault(); showContextMenu(ctx, e.clientX, e.clientY, buildOutlineMenu(heading)); });
       bodyEl.appendChild(item);
     }
   }
@@ -281,6 +347,7 @@ export function createSidebar(editor, ctx) {
       // 専用のswitchFileFromSidebarを通す(グローバル検索結果・クイックオープンは対象外のため
       // 従来通りopenFileByPathのまま)。
       item.addEventListener("click", () => ctx.actions.switchFileFromSidebar(entry.path));
+      item.addEventListener("contextmenu", (e) => { e.preventDefault(); showContextMenu(ctx, e.clientX, e.clientY, buildFileRowMenu(entry)); });
       bodyEl.appendChild(item);
     }
     if (files.length > FILE_LIST_LIMIT) {
@@ -336,6 +403,7 @@ export function createSidebar(editor, ctx) {
           else expandedDirs.add(child.entry.relativePath);
           renderActivePanelNow();
         });
+        row.addEventListener("contextmenu", (e) => { e.preventDefault(); showContextMenu(ctx, e.clientX, e.clientY, buildFolderRowMenu(child.entry, expanded)); });
         wrapper.appendChild(row);
         if (expanded) {
           const childContainer = document.createElement("div");
@@ -353,6 +421,7 @@ export function createSidebar(editor, ctx) {
         row.querySelector(".tree-item-name").textContent = child.entry.name;
         // ファイルツリーからの切替も同様にswitchFileFromSidebarを通す。
         row.addEventListener("click", () => ctx.actions.switchFileFromSidebar(child.entry.path));
+        row.addEventListener("contextmenu", (e) => { e.preventDefault(); showContextMenu(ctx, e.clientX, e.clientY, buildFileRowMenu(child.entry)); });
         container.appendChild(row);
       }
     }

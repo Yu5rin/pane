@@ -282,6 +282,10 @@ internal sealed class MainForm : Form
         // 本文だけでなくメニューバー・ステータスバーまで拡大縮小されてしまうため、
         // 文字サイズの変更はJS側で本文(CodeMirror)のフォントサイズのみを変える。
         _webView.CoreWebView2.Settings.IsZoomControlEnabled = false;
+        // ブラウザ既定の右クリックメニューを一切表示しない(docs/コンテキストメニュー仕様.md
+        // 大原則1)。代わりにJS側(src/main.js)が独自メニューを組み立て、"open-context-menu"で
+        // ネイティブポップアップ(Pane/NativeMenu.cs)を表示させる(HandleOpenContextMenuRequest参照)。
+        _webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
         _webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
 
         string distPath = ResolveDistPath();
@@ -546,6 +550,43 @@ internal sealed class MainForm : Form
                 // ウィンドウを小さくしても項目数の多いメニューが画面外へはみ出さないように)。
                 HandleOpenMenuRequest(root);
                 break;
+            case "open-context-menu":
+                // 本文・サイドバー等での右クリック(docs/コンテキストメニュー仕様.md)。
+                // メニューバーと同じネイティブポップアップを、クリック位置そのものに出す。
+                HandleOpenContextMenuRequest(root);
+                break;
+            case "open-in-default-app":
+                // 右クリックメニュー「画像を開く」(仕様書 2.4)。OSの既定アプリで開くだけで、
+                // 現在の編集内容には触れない(open-pathとは異なりウィンドウの中身は置き換えない)。
+                if (root.TryGetProperty("path", out JsonElement openDefaultPathProp))
+                {
+                    FolderService.OpenInDefaultApp(openDefaultPathProp.GetString() ?? "");
+                }
+                break;
+            case "reveal-in-explorer":
+                // サイドバーの右クリックメニュー「エクスプローラーで表示」(仕様書 4.2・4.3)。
+                if (root.TryGetProperty("path", out JsonElement revealPathProp))
+                {
+                    FolderService.RevealInExplorer(revealPathProp.GetString() ?? "");
+                }
+                break;
+            case "open-path-new-window":
+                // サイドバーの右クリックメニュー「新しいウィンドウで開く」(仕様書 4.2)。
+                // File > 開く(HandleOpenRequest)と同じ経路(_requestNewWindow)を使う。
+                if (root.TryGetProperty("path", out JsonElement newWinPathProp))
+                {
+                    _requestNewWindow?.Invoke(newWinPathProp.GetString());
+                }
+                break;
+            case "delete-path":
+                HandleDeletePathRequest(root);
+                break;
+            case "rename-path":
+                HandleRenamePathRequest(root);
+                break;
+            case "create-file-in-folder":
+                HandleCreateFileInFolderRequest(root);
+                break;
         }
     }
 
@@ -572,10 +613,8 @@ internal sealed class MainForm : Form
             ? ParseMenuItems(itemsProp)
             : new List<NativeMenu.MenuItemData>();
 
-        double dpiScale = DeviceDpi / 96.0;
-        var clientPoint = new Point((int)Math.Round(cssX * dpiScale), (int)Math.Round(cssY * dpiScale));
-        Point screenPoint = _webView.PointToScreen(clientPoint);
-        Logger.Write($"open-menu: menu={menuName}, 項目数={items.Count}, cssPoint=({cssX},{cssY}), DeviceDpi={DeviceDpi}, clientPoint=({clientPoint.X},{clientPoint.Y}), screenPoint=({screenPoint.X},{screenPoint.Y})");
+        Point screenPoint = CssPointToScreenPoint(cssX, cssY);
+        Logger.Write($"open-menu: menu={menuName}, 項目数={items.Count}, cssPoint=({cssX},{cssY}), DeviceDpi={DeviceDpi}, screenPoint=({screenPoint.X},{screenPoint.Y})");
 
         bool isDark = ResolveIsDarkTheme(SettingsService.Load().Theme);
         NativeMenu.Show(
@@ -586,7 +625,48 @@ internal sealed class MainForm : Form
             onClosed: () => PostToWeb(new { type = "menu-closed", menu = menuName }));
     }
 
-    /// <summary>"open-menu"のitems配列(入れ子のsubmenuを含む)をJSONから<see cref="NativeMenu.MenuItemData"/>へ変換する。</summary>
+    /// <summary>
+    /// { type: "open-context-menu", x, y, items } を受け取り、ToolStripDropDownMenuを表示する
+    /// (docs/コンテキストメニュー仕様.md 第1章)。座標変換は<see cref="HandleOpenMenuRequest"/>と
+    /// 全く同じ(<see cref="CssPointToScreenPoint"/>を共用)だが、"menu"というキー(見出し名)を
+    /// 持たない代わりに、menu-closedのmenuには固定値"__context__"を入れる(src/commands.js の
+    /// nativeOpenMenuName/showContextMenu との突き合わせにそのまま乗る。ここを外すと
+    /// 「メニュー外クリックで閉じない」という既知の不具合が再発するため、必ずこの値にすること)。
+    /// </summary>
+    private void HandleOpenContextMenuRequest(JsonElement root)
+    {
+        double cssX = root.TryGetProperty("x", out JsonElement xProp) && xProp.ValueKind == JsonValueKind.Number ? xProp.GetDouble() : 0;
+        double cssY = root.TryGetProperty("y", out JsonElement yProp) && yProp.ValueKind == JsonValueKind.Number ? yProp.GetDouble() : 0;
+        List<NativeMenu.MenuItemData> items = root.TryGetProperty("items", out JsonElement itemsProp) && itemsProp.ValueKind == JsonValueKind.Array
+            ? ParseMenuItems(itemsProp)
+            : new List<NativeMenu.MenuItemData>();
+
+        Point screenPoint = CssPointToScreenPoint(cssX, cssY);
+        Logger.Write($"open-context-menu: 項目数={items.Count}, cssPoint=({cssX},{cssY}), DeviceDpi={DeviceDpi}, screenPoint=({screenPoint.X},{screenPoint.Y})");
+
+        bool isDark = ResolveIsDarkTheme(SettingsService.Load().Theme);
+        NativeMenu.Show(
+            screenPoint,
+            isDark,
+            items,
+            onCommand: id => PostToWeb(new { type = "menu-command", id }),
+            onClosed: () => PostToWeb(new { type = "menu-closed", menu = "__context__" }));
+    }
+
+    /// <summary>
+    /// WebView2内のCSSピクセル座標を画面座標(スクリーン座標)へ変換する。
+    /// open-menu/open-context-menu共通の座標変換ロジック(<see cref="HandleOpenMenuRequest"/>の
+    /// XMLコメントに詳細あり): DeviceDpi(96分率)でデバイスピクセルへ換算してから
+    /// <see cref="Control.PointToScreen"/>で画面座標へ変換する2段階。
+    /// </summary>
+    private Point CssPointToScreenPoint(double cssX, double cssY)
+    {
+        double dpiScale = DeviceDpi / 96.0;
+        var clientPoint = new Point((int)Math.Round(cssX * dpiScale), (int)Math.Round(cssY * dpiScale));
+        return _webView.PointToScreen(clientPoint);
+    }
+
+    /// <summary>"open-menu"/"open-context-menu"のitems配列(入れ子のsubmenuを含む)をJSONから<see cref="NativeMenu.MenuItemData"/>へ変換する。</summary>
     private static List<NativeMenu.MenuItemData> ParseMenuItems(JsonElement arrayElement)
     {
         var list = new List<NativeMenu.MenuItemData>();
@@ -605,6 +685,55 @@ internal sealed class MainForm : Form
             list.Add(new NativeMenu.MenuItemData(id, label, shortcut, enabled, isChecked, separatorAfter, note, submenu));
         }
         return list;
+    }
+
+    // ---- サイドバーの右クリックメニュー(docs/コンテキストメニュー仕様.md 第4.2節・第4.3節) ----
+    // 実処理はFolderService(既存のフォルダ走査サービス)へ集約し、ここではJSONの取り出しと
+    // 完了後のフォルダ再読み込み・エラー表示だけを行う。
+
+    /// <summary>"delete-path": ファイル/フォルダをごみ箱へ送る。</summary>
+    private void HandleDeletePathRequest(JsonElement root)
+    {
+        string path = root.TryGetProperty("path", out JsonElement p) ? p.GetString() ?? "" : "";
+        if (path.Length == 0) return;
+        if (!FolderService.DeleteToRecycleBin(path, out string? error))
+        {
+            MessageBox.Show(this, $"削除できませんでした。\n{error}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        ReloadLoadedFolderIfAny();
+    }
+
+    /// <summary>"rename-path": 同じ親フォルダ内でファイル/フォルダの名前を変更する。</summary>
+    private void HandleRenamePathRequest(JsonElement root)
+    {
+        string path = root.TryGetProperty("path", out JsonElement p) ? p.GetString() ?? "" : "";
+        string newName = root.TryGetProperty("newName", out JsonElement n) ? n.GetString() ?? "" : "";
+        if (path.Length == 0 || newName.Length == 0) return;
+        if (!FolderService.RenamePath(path, newName, out string? error))
+        {
+            MessageBox.Show(this, $"名前を変更できませんでした。\n{error}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        ReloadLoadedFolderIfAny();
+    }
+
+    /// <summary>"create-file-in-folder": 指定フォルダ直下に空の新規ファイルを作る。</summary>
+    private void HandleCreateFileInFolderRequest(JsonElement root)
+    {
+        string dirPath = root.TryGetProperty("dirPath", out JsonElement d) ? d.GetString() ?? "" : "";
+        string name = root.TryGetProperty("name", out JsonElement n) ? n.GetString() ?? "" : "";
+        if (dirPath.Length == 0 || name.Length == 0) return;
+        if (!FolderService.CreateFile(dirPath, name, out string? error))
+        {
+            MessageBox.Show(this, $"ファイルを作成できませんでした。\n{error}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        ReloadLoadedFolderIfAny();
+    }
+
+    /// <summary>サイドバーに読み込み済みのフォルダがあれば再走査してJSへ送り直す
+    /// (削除/名前変更/新規作成の結果を一覧へ反映する)。</summary>
+    private void ReloadLoadedFolderIfAny()
+    {
+        if (_loadedFolderRootPath is not null) _ = LoadFolderAsync(_loadedFolderRootPath);
     }
 
     // ---- ウィンドウ制御(仕様書 第2.5節 V-08・V-11・V-12) ----

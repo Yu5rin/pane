@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace Pane;
 
 /// <summary>サイドバーのファイル一覧・ツリー表示に使う1エントリ。</summary>
@@ -157,5 +159,117 @@ internal static class FolderService
     private static string ToRelativePath(string rootPath, string fullPath)
     {
         return Path.GetRelativePath(rootPath, fullPath).Replace(Path.DirectorySeparatorChar, '/').Replace(Path.AltDirectorySeparatorChar, '/');
+    }
+
+    // ---- サイドバーの右クリックメニュー(docs/コンテキストメニュー仕様.md 第4.2節・第4.3節) ----
+
+    /// <summary>「開く」(既定のビューアで開く。仕様書 2.4「画像を開く」)。
+    /// エクスポート後の「開く」(MainForm.ApplyExportAfter)と同じ流儀(UseShellExecute=true)。</summary>
+    public static void OpenInDefaultApp(string path)
+    {
+        try
+        {
+            using var proc = Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+            Logger.Write($"open-in-default-app: {path}");
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException($"open-in-default-app失敗: {path}", ex);
+        }
+    }
+
+    /// <summary>「エクスプローラーで表示」(仕様書 4.2・4.3)。SettingsBridge.OpenSettingsFileInExplorer
+    /// と同じ /select, 方式。</summary>
+    public static void RevealInExplorer(string path)
+    {
+        try
+        {
+            using var proc = Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{path}\"") { UseShellExecute = true });
+            Logger.Write($"reveal-in-explorer: {path}");
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException($"reveal-in-explorer失敗: {path}", ex);
+        }
+    }
+
+    /// <summary>「削除(ごみ箱へ)」(仕様書 4.2)。Microsoft.VisualBasic.FileIOの
+    /// RecycleOption.SendToRecycleBinで、完全削除ではなくごみ箱へ送る(誤操作からの復旧余地を残す)。</summary>
+    public static bool DeleteToRecycleBin(string path, out string? error)
+    {
+        error = null;
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                Microsoft.VisualBasic.FileIO.FileSystem.DeleteDirectory(
+                    path, Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs, Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
+            }
+            else if (File.Exists(path))
+            {
+                Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(
+                    path, Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs, Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
+            }
+            else
+            {
+                error = "対象が見つかりません。";
+                return false;
+            }
+            Logger.Write($"delete-path: ごみ箱へ送った: {path}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException($"delete-path失敗: {path}", ex);
+            error = ex.Message;
+            return false;
+        }
+    }
+
+    /// <summary>「名前の変更…」(仕様書 4.2)。同じ親フォルダ内での改名のみ許可する
+    /// (移動は範囲外)。</summary>
+    public static bool RenamePath(string path, string newName, out string? error)
+    {
+        error = null;
+        try
+        {
+            string? dir = Path.GetDirectoryName(path);
+            if (dir is null) { error = "親フォルダを特定できません。"; return false; }
+            string dest = Path.Combine(dir, newName);
+            if (File.Exists(dest) || Directory.Exists(dest)) { error = "同名のファイル/フォルダが既にあります。"; return false; }
+            if (Directory.Exists(path)) Directory.Move(path, dest);
+            else if (File.Exists(path)) File.Move(path, dest);
+            else { error = "対象が見つかりません。"; return false; }
+            Logger.Write($"rename-path: {path} → {dest}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException($"rename-path失敗: {path} → {newName}", ex);
+            error = ex.Message;
+            return false;
+        }
+    }
+
+    /// <summary>「ここに新しいファイルを作成…」(仕様書 4.3)。既に同名のファイルがある場合は
+    /// 上書きしない(エラーにする)。</summary>
+    public static bool CreateFile(string dirPath, string name, out string? error)
+    {
+        error = null;
+        try
+        {
+            string dest = Path.Combine(dirPath, name);
+            if (File.Exists(dest)) { error = "同名のファイルが既にあります。"; return false; }
+            if (Directory.Exists(dest)) { error = "同名のフォルダが既にあります。"; return false; }
+            File.WriteAllText(dest, "");
+            Logger.Write($"create-file-in-folder: {dest}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException($"create-file-in-folder失敗: {dirPath}/{name}", ex);
+            error = ex.Message;
+            return false;
+        }
     }
 }
