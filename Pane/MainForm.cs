@@ -8,6 +8,12 @@ using Microsoft.Web.WebView2.WinForms;
 namespace Pane;
 
 /// <summary>
+/// 本文エリアへドラッグ&amp;ドロップされたファイルの中身。WebView2は標準のDOM File APIでは
+/// 実パスを公開しないため、パスではなくファイル名とバイト列で受け渡す。
+/// </summary>
+internal sealed record DroppedFileContent(string Name, byte[] Bytes);
+
+/// <summary>
 /// Paneのウィンドウ。WebView2でPhase 1のエディタ(dist/index.html)を表示し、
 /// postMessageのJSONブリッジでファイルの開閉・保存を仲介する。
 /// ファイルの実体はこのクラス(C#側)だけが触り、JS側へは本文文字列とモード情報のみを渡す。
@@ -30,7 +36,9 @@ internal sealed class MainForm : Form
     private readonly WebView2 _webView = new();
     private readonly string? _initialPath;
     private readonly AutoSaveSnapshot? _recoverFrom;
+    private readonly DroppedFileContent? _droppedFile;
     private readonly Action<string?>? _requestNewWindow;
+    private readonly Action<DroppedFileContent>? _requestNewWindowWithContent;
     private readonly System.Windows.Forms.Timer _autoSaveTimer;
     private readonly System.Windows.Forms.Timer _externalChangeDebounceTimer;
 
@@ -57,12 +65,19 @@ internal sealed class MainForm : Form
 
     public bool IsDirty => _isDirty;
 
-    public MainForm(string? initialPath, AutoSaveSnapshot? recoverFrom = null, Action<string?>? requestNewWindow = null)
+    public MainForm(
+        string? initialPath,
+        AutoSaveSnapshot? recoverFrom = null,
+        Action<string?>? requestNewWindow = null,
+        Action<DroppedFileContent>? requestNewWindowWithContent = null,
+        DroppedFileContent? droppedFile = null)
     {
         _initialPath = initialPath;
         _recoverFrom = recoverFrom;
+        _droppedFile = droppedFile;
         _requestNewWindow = requestNewWindow;
-        Logger.Write($"MainForm生成: initialPath={initialPath ?? "(なし)"}, recoverFrom={(recoverFrom is null ? "なし" : recoverFrom.OriginalPath ?? "無題")}");
+        _requestNewWindowWithContent = requestNewWindowWithContent;
+        Logger.Write($"MainForm生成: initialPath={initialPath ?? "(なし)"}, recoverFrom={(recoverFrom is null ? "なし" : recoverFrom.OriginalPath ?? "無題")}, droppedFile={droppedFile?.Name ?? "なし"}");
 
         Text = "Pane";
         Width = 960;
@@ -174,6 +189,10 @@ internal sealed class MainForm : Form
         // 既定動作が奪ってしまい、JS側のkeydownハンドラに届かない。開発者ツールは
         // Viewメニュー(Shift+F12、独自ハンドラ)から明示的に開けるようにしている。
         _webView.CoreWebView2.Settings.AreBrowserAcceleratorKeysEnabled = false;
+        // Ctrl+マウスホイールによるページ全体のズームを無効化する。有効なままだと
+        // 本文だけでなくメニューバー・ステータスバーまで拡大縮小されてしまうため、
+        // 文字サイズの変更はJS側で本文(CodeMirror)のフォントサイズのみを変える。
+        _webView.CoreWebView2.Settings.IsZoomControlEnabled = false;
         _webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
 
         string distPath = ResolveDistPath();
@@ -225,6 +244,7 @@ internal sealed class MainForm : Form
             case "ready":
                 PostCapabilities();
                 if (_recoverFrom is not null) RestoreFromSnapshot(_recoverFrom);
+                else if (_droppedFile is not null) OpenDroppedContent(_droppedFile.Name, _droppedFile.Bytes);
                 else if (_initialPath is not null) OpenFile(_initialPath);
                 else OpenNewDocument();
                 _autoSaveTimer.Start();
@@ -280,7 +300,7 @@ internal sealed class MainForm : Form
                 HandleInsertImageRequest(root);
                 break;
             case "open-dropped-file":
-                _ = HandleOpenDroppedFileAsync(root);
+                HandleOpenDroppedFile(root);
                 break;
             case "log":
                 // JS側の不具合調査ログ(main.jsのlogToHost)をC#側と同じログファイルへ集約する。
@@ -292,6 +312,12 @@ internal sealed class MainForm : Form
                 if (root.TryGetProperty("theme", out JsonElement themeProp))
                 {
                     SaveTheme(themeProp.GetString() ?? "system");
+                }
+                break;
+            case "set-font-size":
+                if (root.TryGetProperty("size", out JsonElement sizeProp) && sizeProp.ValueKind == JsonValueKind.Number)
+                {
+                    SaveFontSize(sizeProp.GetInt32());
                 }
                 break;
         }
@@ -440,44 +466,58 @@ internal sealed class MainForm : Form
 
     /// <summary>
     /// WebView2の本文エリア(Webページ側)へドラッグ&ドロップされたファイルを開く。
-    /// 標準のDOM File APIでは実パスが分からないため、JS側でバイト列化して送ってもらい、
-    /// ここで通常のOpenFile(path)と同じエンコーディング判定にかける。パスが無いため
-    /// 外部変更監視・上書き保存はできず、保存時は名前を付けて保存になる(仕様書外の代替経路)。
+    /// 現在の本文が空(失われる内容が無い)ならこのウィンドウで、何か書かれていれば
+    /// 新しいウィンドウで開く(空かどうかの判定はJS側が行い、newWindowで伝えてくる)。
     /// </summary>
-    private async Task HandleOpenDroppedFileAsync(JsonElement message)
+    private void HandleOpenDroppedFile(JsonElement message)
     {
-        if (!await ConfirmDiscardDirtyAsync()) return;
-
         string name = message.TryGetProperty("name", out JsonElement nameProp) ? nameProp.GetString() ?? "無題" : "無題";
         string dataBase64 = message.TryGetProperty("dataBase64", out JsonElement dataProp) ? dataProp.GetString() ?? "" : "";
-        Logger.Write($"HandleOpenDroppedFileAsync: name={name}");
+        bool newWindow = message.TryGetProperty("newWindow", out JsonElement nwProp) && nwProp.ValueKind == JsonValueKind.True;
+        Logger.Write($"HandleOpenDroppedFile: name={name}, newWindow={newWindow}");
         try
         {
             byte[] bytes = Convert.FromBase64String(dataBase64);
-            LoadResult result = TextFileService.LoadBytes(bytes);
-            _currentPath = null;
-            _currentEncoding = result.Encoding;
-            _currentLineEnding = result.LineEnding;
-            _hasTrailingNewline = result.HasTrailingNewline;
-            _isReadOnly = false;
-            StopWatching();
-            SetDirty(false);
-            PostToWeb(new
+            if (newWindow)
             {
-                type = "file-opened",
-                text = result.Text,
-                fileName = name,
-                path = (string?)null,
-                encoding = TextFileService.EncodingLabel(result.Encoding),
-                lineEnding = TextFileService.LineEndingLabel(result.LineEnding),
-                readOnly = false,
-            });
+                _requestNewWindowWithContent?.Invoke(new DroppedFileContent(name, bytes));
+                return;
+            }
+            OpenDroppedContent(name, bytes);
         }
         catch (Exception ex)
         {
             Logger.WriteException($"ドロップされたファイルを開けなかった: {name}", ex);
             MessageBox.Show(this, $"ファイルを開けませんでした。\n{ex.Message}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+    }
+
+    /// <summary>
+    /// ドロップされたファイルの中身をこのウィンドウで開く。標準のDOM File APIでは実パスが
+    /// 分からないため、JS側でバイト列化して送ってもらい、ここで通常のOpenFile(path)と同じ
+    /// エンコーディング判定にかける。パスが無いため外部変更監視・上書き保存はできず、
+    /// 保存時は名前を付けて保存になる(仕様書外の代替経路)。
+    /// </summary>
+    private void OpenDroppedContent(string name, byte[] bytes)
+    {
+        LoadResult result = TextFileService.LoadBytes(bytes);
+        _currentPath = null;
+        _currentEncoding = result.Encoding;
+        _currentLineEnding = result.LineEnding;
+        _hasTrailingNewline = result.HasTrailingNewline;
+        _isReadOnly = false;
+        StopWatching();
+        SetDirty(false);
+        PostToWeb(new
+        {
+            type = "file-opened",
+            text = result.Text,
+            fileName = name,
+            path = (string?)null,
+            encoding = TextFileService.EncodingLabel(result.Encoding),
+            lineEnding = TextFileService.LineEndingLabel(result.LineEnding),
+            readOnly = false,
+        });
     }
 
     private void OpenNewDocument()
@@ -756,6 +796,7 @@ internal sealed class MainForm : Form
             recentFiles = settings.RecentFiles,
             pandocAvailable = DetectPandocAvailable(),
             theme = settings.Theme,
+            editorFontSize = settings.EditorFontSize,
         });
     }
 
@@ -765,6 +806,15 @@ internal sealed class MainForm : Form
         if (theme != "light" && theme != "dark" && theme != "system") return;
         AppSettings settings = SettingsService.Load();
         settings.Theme = theme;
+        SettingsService.Save(settings);
+    }
+
+    /// <summary>本文の文字サイズ(Ctrl+マウスホイールでの変更)を永続化する。</summary>
+    private static void SaveFontSize(int size)
+    {
+        if (size < 8 || size > 40) return; // JS側(editor.js)と同じ範囲。想定外の値は無視する
+        AppSettings settings = SettingsService.Load();
+        settings.EditorFontSize = size;
         SettingsService.Save(settings);
     }
 

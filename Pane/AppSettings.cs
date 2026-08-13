@@ -52,4 +52,7 @@ internal sealed class AppSettings
 
     /// <summary>"system" | "light" | "dark"。手動でテーマを切り替えた場合に永続化する(仕様書 第10.2節)。</summary>
     public string Theme { get; set; } = "system";
+
+    /// <summary>本文の文字サイズ(px)。Ctrl+マウスホイールでの変更を永続化する。</summary>
+    public int EditorFontSize { get; set; } = 15;
 }

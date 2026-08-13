@@ -3,7 +3,7 @@
 // ファイルの開閉・保存・エクスポート・印刷・画像挿入等を委譲する(仕様書 第7章)。
 // 使えない場合(単体のブラウザで動作確認する場合)は File System Access API /
 // File API による仮実装にフォールバックする(Phase 1からの経路をそのまま維持)。
-import { createEditor } from "./editor.js";
+import { createEditor, DEFAULT_FONT_SIZE } from "./editor.js";
 import { buildCommands, initMenuBar, initCommandPalette, initContextMenu, bindShortcuts } from "./commands.js";
 import { createSearchUI } from "./search-ui.js";
 import { htmlToMarkdown } from "./html-to-markdown.js";
@@ -277,6 +277,16 @@ window.addEventListener("keydown", (e) => {
 });
 statusWrapBtn.addEventListener("click", () => ctx.actions.toggleWordWrap());
 
+// Ctrl+マウスホイールで本文の文字サイズを変更する。WebView2側のページズーム
+// (IsZoomControlEnabled=falseで無効化済み)はメニューバー・ステータスバーまで
+// 拡大してしまうため使わず、CodeMirrorのフォントサイズだけを変える。
+window.addEventListener("wheel", (e) => {
+  if (!e.ctrlKey) return;
+  e.preventDefault();
+  const applied = editor.setFontSize(editor.getFontSize() + (e.deltaY < 0 ? 1 : -1));
+  bridge?.postMessage({ type: "set-font-size", size: applied });
+}, { passive: false });
+
 // ---- WebView2ブリッジ(Phase 2) ----
 if (bridge) {
   bridge.addEventListener("message", (e) => {
@@ -363,6 +373,8 @@ async function handleHostMessage(msg) {
         document.documentElement.dataset.theme = msg.theme;
         editor.refreshTheme();
       }
+      // 本文の文字サイズ(Ctrl+マウスホイールでの変更を永続化している)
+      editor.setFontSize(msg.editorFontSize || DEFAULT_FONT_SIZE);
       break;
     case "image-inserted":
       // 画像挿入(仕様書 R-07)。C#側でファイルコピー・相対パス解決を終えたものが届く。
@@ -459,14 +471,22 @@ window.addEventListener("drop", async (e) => {
   e.preventDefault();
   e.stopPropagation();
   const file = e.dataTransfer.files[0];
+  // 本文が空(新規ファイル等、失われる内容が無い)ならこのウィンドウで開き、
+  // 何か書かれていれば新しいウィンドウで開く。
+  const isEmptyDocument = editor.getValue().trim() === "";
   if (bridge) {
-    if (isDirty && !window.confirm("保存されていない変更があります。ドロップしたファイルを開くと失われますが、よろしいですか?")) return;
     const buf = await file.arrayBuffer();
-    logToHost("log", `open-dropped-fileを送信: name=${file.name}, size=${buf.byteLength}`);
-    bridge.postMessage({ type: "open-dropped-file", name: file.name, dataBase64: arrayBufferToBase64(buf) });
+    logToHost("log", `open-dropped-fileを送信: name=${file.name}, size=${buf.byteLength}, newWindow=${!isEmptyDocument}`);
+    bridge.postMessage({
+      type: "open-dropped-file",
+      name: file.name,
+      dataBase64: arrayBufferToBase64(buf),
+      newWindow: !isEmptyDocument,
+    });
     return;
   }
-  if (isDirty && !window.confirm("保存されていない変更があります。ドロップしたファイルを開くと失われますが、よろしいですか?")) return;
+  // ブラウザ単体時は新規ウィンドウを作れないため、確認のうえこのウィンドウで開く。
+  if (!isEmptyDocument && !window.confirm("現在の内容を閉じて、ドロップしたファイルを開きますか?")) return;
   await editor.setFileMode(file.name);
   editor.setValue(await file.text());
   currentHandle = null;

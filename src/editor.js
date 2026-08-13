@@ -941,6 +941,11 @@ const livePreviewExt = () => [
 // エラー診断も搭載しない)。
 const codeModeExtras = () => [lineNumbers(), bracketMatching()];
 
+// 本文のフォントサイズ(px)。Ctrl+マウスホイールでMIN〜MAXの範囲を1pxずつ変更する。
+export const DEFAULT_FONT_SIZE = 15;
+const MIN_FONT_SIZE = 8;
+const MAX_FONT_SIZE = 40;
+
 export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionChange, onRender, onPaste, onCopy } = {}) {
   const editable = new Compartment();
   const themeComp = new Compartment();
@@ -953,12 +958,15 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
   const wrapComp = new Compartment();
   let composing = false;
   let currentMode = "markdown";
+  // 本文のフォントサイズ(Ctrl+マウスホイールで変更する。メニューバー・ステータスバーは
+  // ページ全体のズームではなくここだけを変えるため影響を受けない)。
+  let fontSize = DEFAULT_FONT_SIZE;
   const makeTheme = () => {
     const cs = getComputedStyle(document.documentElement);
     const ink = cs.getPropertyValue("--ink").trim() || "#1F2428";
     const accentSoft = cs.getPropertyValue("--accent-soft").trim() || "#E1EFED";
     return EditorView.theme({
-      "&": { fontSize: "15px", height: "100%", backgroundColor: "transparent" },
+      "&": { fontSize: fontSize + "px", height: "100%", backgroundColor: "transparent" },
       ".cm-scroller": { fontFamily: "inherit", lineHeight: "1.85" },
       ".cm-content": { padding: "0", caretColor: ink },
       ".cm-cursor, .cm-cursor-primary": { borderLeftColor: ink, borderLeftWidth: "2px" },
@@ -1108,6 +1116,16 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
     // 選択範囲をテキストで置き換える(プレーンテキスト貼り付け・スマートペースト用)
     pasteText: (text) => { view.dispatch(view.state.replaceSelection(text)); view.focus(); },
     refreshTheme: () => view.dispatch({ effects: themeComp.reconfigure(makeTheme()) }),
+    // 本文のフォントサイズ(Ctrl+マウスホイール)。範囲外の値は丸め、実際に適用した値を返す。
+    getFontSize: () => fontSize,
+    setFontSize: (size) => {
+      const clamped = Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, Math.round(size) || DEFAULT_FONT_SIZE));
+      if (clamped !== fontSize) {
+        fontSize = clamped;
+        view.dispatch({ effects: themeComp.reconfigure(makeTheme()) });
+      }
+      return fontSize;
+    },
     destroy: () => view.destroy(),
   };
 }
