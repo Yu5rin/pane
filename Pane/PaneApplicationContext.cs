@@ -78,9 +78,14 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// 実際には新規ウィンドウとして扱う)からも、起動時の複数ファイルオープンからも、ここを通る。
     /// UIスレッド上で呼び出すこと(<see cref="SingleInstanceServer"/> はSynchronizationContext経由で保証する)。
     /// </summary>
-    public void OpenWindow(string? path, AutoSaveSnapshot? recoverFrom = null)
+    public void OpenWindow(string? path, AutoSaveSnapshot? recoverFrom = null, DroppedFileContent? droppedFile = null)
     {
-        var form = new MainForm(path, recoverFrom, requestNewWindow: p => OpenWindow(p));
+        var form = new MainForm(
+            path,
+            recoverFrom,
+            requestNewWindow: p => OpenWindow(p),
+            requestNewWindowWithContent: content => OpenWindow(null, null, content),
+            droppedFile: droppedFile);
 
         int width = _settings.WindowWidth ?? DefaultWidth;
         int height = _settings.WindowHeight ?? DefaultHeight;
