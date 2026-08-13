@@ -630,6 +630,11 @@ html[data-theme="dark"] .cm-search-hit { background: rgba(61,193,181,.25); color
 .cm-table { padding: 4px 0; overflow-x: auto; }
 .cm-table table { border-collapse: collapse; font-size: .95em; }
 .cm-table th, .cm-table td { border: 1px solid var(--line); padding: 4px 10px; position: relative; min-width: 3em; }
+/* 空セルだけ極端に薄くならないようにする。セルの中身が空だと行ボックスが1つも
+   生成されず高さが padding 分だけになってしまうため、幅ゼロの文字(U+200B)を
+   常に先頭へ入れて、文字が入っているセルと同じ行ボックスを必ず作る。
+   操作ボタン(.tbl-ctls)は position:absolute なので行ボックスには寄与しない。 */
+.cm-table th::before, .cm-table td::before { content: "\200B"; }
 .cm-table th { background: var(--accent-soft); font-weight: 700; }
 html[data-theme="dark"] .cm-table th { background: rgba(61,193,181,.14); }
 .cm-table { padding: 20px 8px 8px 26px; } /* 上と左に操作ボタンの表示領域を確保 */
@@ -748,3 +753,53 @@ html[data-theme="dark"] .cm-table th { background: rgba(61,193,181,.14); }
 @media (hover: hover) {
 .fm-row .fm-remove:hover { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
 }
+
+/* ===== 内容からの編集モード自動判定(仕様書 第1章の拡張、src/main.js・src/detect-mode.js) =====
+   ステータスバー付近に浮かべる非モーダルな通知バナー。既存の.palette-overlay等とは違い
+   全画面を覆わない(入力の邪魔をしないための仕様上の要件)。接頭辞は"ad-"(auto-detect)に
+   統一し、色は既存のCSSカスタムプロパティのみを使う。 */
+.ad-banner { position: fixed; right: 14px; bottom: 34px; z-index: 55; display: flex; align-items: center; gap: 10px; max-width: min(440px, calc(100% - 28px)); background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; box-shadow: var(--shadow-pop); font-size: 12.5px; color: var(--ink); }
+.ad-banner[hidden] { display: none; }
+#ad-banner-text { flex: 1; min-width: 0; }
+.ad-banner-btn { flex: none; border: none; font: inherit; font-size: 11.5px; cursor: pointer; padding: 5px 10px; border-radius: 6px; white-space: nowrap; }
+.ad-banner-action { background: var(--accent-soft); color: var(--accent); }
+.ad-banner-close { background: transparent; color: var(--ink-mute); }
+@media (hover: hover) {
+.ad-banner-action:hover { background: var(--accent); color: var(--surface); }
+.ad-banner-close:hover { background: var(--paper); color: var(--ink); }
+}
+
+/* コードモードの言語ピッカー(#status-mode クリック)。既存のコマンドパレット/
+   クイックオープンと同じ.palette-overlay/.palette/#palette-input/#palette-listを
+   そのまま再利用するため、専用のCSSはここには不要。 */
+
+/* ===== 設定画面の拡張(10カテゴリ化、src/settings.js) =====
+   検索欄・パス選択(参照…)ボタン・関連付けの警告バナー・詳細カテゴリの操作ボタン群。
+   既存の設定画面用クラス(.settings-*)の接頭辞をそのまま使い、フォームの外観は
+   settings-select-row/settings-text-rowと揃える。 */
+.settings-search-row { flex: none; display: flex; align-items: center; gap: 8px; margin: 10px 20px 0; padding: 7px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); color: var(--ink-sub); }
+.settings-search-row svg { flex: none; }
+.settings-search-input { flex: 1; min-width: 0; border: none; background: transparent; color: var(--ink); font: inherit; font-size: 13px; outline: none; }
+.settings-search-input::placeholder { color: var(--ink-mute); }
+.settings-nav-empty { padding: 10px 10px; font-size: 12px; color: var(--ink-sub); }
+
+/* textareaも settings-text-row の input と同じ見た目に揃える */
+.settings-text-row textarea { font: inherit; font-size: 13px; font-weight: 400; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; background: var(--paper); color: var(--ink); resize: vertical; min-height: 4.5em; }
+
+/* パス選択(フォルダ・ファイル)+「参照…」ボタン */
+.settings-path-row { display: flex; flex-direction: column; gap: 4px; font-size: 13px; font-weight: 600; max-width: 480px; }
+.settings-path-input-row { display: flex; gap: 6px; }
+.settings-path-input-row input { flex: 1; min-width: 0; font: inherit; font-size: 13px; font-weight: 400; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; background: var(--paper); color: var(--ink); }
+.settings-path-browse-btn { flex: none; }
+.settings-path-browse-btn:disabled { opacity: .5; cursor: default; }
+
+/* ファイルの関連付け: Windowsの既定のアプリで奪われている拡張子の警告バナー */
+.ft-blocked-warn { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--danger); border-radius: 9px; background: var(--danger-soft); }
+.ft-blocked-warn p { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--ink); }
+
+/* 詳細カテゴリ: 値ではなくアクションのボタン群。破壊的な操作は adv-confirm を挟む */
+.adv-actions { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.adv-action-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.adv-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--danger); border-radius: 9px; background: var(--danger-soft); }
+.adv-confirm-text { font-size: 12px; color: var(--ink); flex-basis: 100%; }
+.adv-action-msg { font-size: 12px; color: var(--accent); min-height: 1.4em; }
