@@ -176,6 +176,13 @@ internal sealed class MainForm : Form
             Logger.Write("Form.FormClosed");
             _autoSaveTimer.Stop();
             _watcher?.Dispose();
+            // 自動保存のスナップショットを消す(仕様書 N-06)。
+            // 従来は「明示保存が成功したとき」だけ消していたため、未保存のまま
+            // 「保存しない」を選んで閉じた場合にスナップショットが残り、次回起動時に
+            // 異常終了とみなされて復元確認ダイアログが出てしまっていた。
+            // ここまで到達するのは正常に閉じた場合だけ(異常終了ならFormClosedは走らない)
+            // なので、残っているスナップショット=前回が異常終了、という判定が正しくなる。
+            AutoSaveService.DeleteSnapshot(WindowId);
         };
     }
 
@@ -412,6 +419,11 @@ internal sealed class MainForm : Form
                 break;
             case "open-with-dialog":
                 SettingsBridge.HandleOpenWithDialog(root, this);
+                break;
+            case "close-menu":
+                // 本文側でクリックされた。ネイティブポップアップはWebView2内のクリックを
+                // 検知できないため、JS側から閉じる指示を受けて閉じる(src/commands.js)。
+                NativeMenu.CloseCurrent();
                 break;
             case "export":
                 _ = HandleExportRequestAsync(root);
