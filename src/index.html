@@ -66,6 +66,8 @@
     <button id="status-count" type="button" title="クリックで文字数の詳細を表示">0文字</button>
     <button id="status-zoom" type="button" title="クリックで実際のサイズに戻す">100%</button>
     <span style="flex:1"></span>
+    <!-- 未保存の変更があることを文字で示す(タイトルバーの"(未保存)"と対になる表示)。 -->
+    <span id="status-dirty" hidden>未保存</span>
     <button id="btn-settings" type="button" title="設定 (Ctrl+,)">設定</button>
   </div>
   <!-- 内容からの編集モード自動判定(仕様書 第1章の拡張)の通知バナー。モーダルにはしない

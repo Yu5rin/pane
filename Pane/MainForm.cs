@@ -1027,9 +1027,12 @@ internal sealed class MainForm : Form
     private void UpdateTitle()
     {
         string name = _currentPath is null ? "無題" : Path.GetFileName(_currentPath);
-        string mark = _isDirty ? "● " : string.Empty;
+        // 未保存であることは記号(以前は"●")ではなく文字で示す。記号だと何を意味するのか
+        // 伝わらないため。ファイル名の直後に置くのは、タスクバーで幅が足りず末尾から
+        // 削られても「どのファイルか」が先に残るようにするため。
+        string dirtyMark = _isDirty ? "(未保存)" : string.Empty;
         string readOnlyMark = _isReadOnly ? "[読み取り専用] " : string.Empty;
-        Text = $"{mark}{readOnlyMark}{name} - Pane";
+        Text = $"{readOnlyMark}{name}{dirtyMark} - Pane";
     }
 
     private void PostToWeb(object message)

@@ -23,6 +23,7 @@ const statusSidebarBtn = document.getElementById("status-sidebar");
 const statusMode = document.getElementById("status-mode");
 const statusPosition = document.getElementById("status-position");
 const statusCount = document.getElementById("status-count");
+const statusDirty = document.getElementById("status-dirty");
 const statusZoom = document.getElementById("status-zoom");
 const statusEncoding = document.getElementById("status-encoding");
 const statusLineEnding = document.getElementById("status-line-ending");
@@ -153,6 +154,10 @@ function formatDateTimeStamp(d) {
 
 function setDirty(v) {
   isDirty = v;
+  // 未保存であることはタイトルバー(C#側のUpdateTitle)とステータスバーの両方で示す。
+  // タイトルバーはタスクバー上で幅が足りず削られることがあるため、常に見える
+  // ステータスバー側にも出しておく。
+  if (statusDirty) statusDirty.hidden = !v;
   bridge?.postMessage({ type: "dirty", value: v });
 }
 function setName(name) {
