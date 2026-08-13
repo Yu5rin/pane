@@ -77,30 +77,21 @@ internal sealed class MainForm : Form
             // 仮アイコンが見つからなくても起動は継続する(実行ファイル埋め込みアイコンが使われる)
         }
 
+        // ウィンドウのうちWebView2に覆われていない部分(タイトルバー等)へのD&D用。
+        // クライアント領域はWebView2が全面を覆うため、そちらへのドロップは下記のとおり
+        // WebView2(Webページ側のJavaScript)が受け取る。
         AllowDrop = true;
-        // DragEnterはドラッグがコントロール領域に入った瞬間に1回だけ発生し、その後カーソルが
-        // 領域内を動くたびにDragOverが繰り返し発生する。DragOverを登録していないと、
-        // (DragEnterで一度Copyを許可していても)以降のDragOverでは既定でNone扱いとなり、
-        // 本文エリア内では禁止マークが出続けてしまう。同じ判定でよいためOnDragEnterを両方に登録する。
         DragEnter += OnDragEnter;
         DragOver += OnDragEnter;
         DragDrop += OnDragDrop;
         DragLeave += OnDragLeave;
 
         _webView.Dock = DockStyle.Fill;
-        // WebView2はDock=Fillでクライアント領域全体を覆うため、実際のドラッグ&ドロップ通知は
-        // (Formではなく)このコントロール自身のHWNDが受け取る。WebView2.AllowDropは読み取り専用
-        // (AllowExternalDrop=false設定時にコントロール自身が自動でOLEドロップターゲット登録する)
-        // ため、こちらから明示的にAllowDrop=trueへは出来ないが、DragEnter/DragOver/DragDropイベント
-        // 自体はFormと同じハンドラをそのまま登録できる。AllowExternalDropはネイティブのWebView2
-        // コントローラー生成(EnsureCoreWebView2Async)より前に設定しないと、生成時点の既定値
-        // (true)でOLEドロップターゲット登録が確定してしまい、後から変更しても反映されない
-        // 可能性があるため、コントローラー生成前のこの時点で設定する。
-        _webView.AllowExternalDrop = false;
-        _webView.DragEnter += OnDragEnter;
-        _webView.DragOver += OnDragEnter;
-        _webView.DragDrop += OnDragDrop;
-        _webView.DragLeave += OnDragLeave;
+        // AllowExternalDropは既定のtrueのままにする(明示的に設定しない)。
+        // falseにすると「外部からのドロップを無効化」する設定となり、WebView2が
+        // ドロップを受け付けない旨をOSへ表明するため、本文エリア上では常に禁止マークが出て、
+        // Webページ側のJavaScript(main.jsのdragover/dropハンドラ)にもイベントが一切届かない。
+        // ファイルのD&DはJavaScript側で受け取り、open-dropped-fileメッセージでC#へ渡す。
         Controls.Add(_webView);
 
         // 起動直後・ウィンドウ切替後の初回キー入力がWebView2内のコンテンツへ届かない
@@ -177,7 +168,6 @@ internal sealed class MainForm : Form
         await _webView.EnsureCoreWebView2Async(env);
         Logger.Write($"WebView2初期化完了: バージョン={_webView.CoreWebView2.Environment.BrowserVersionString}");
 
-        // AllowExternalDropはコントローラー生成前(コンストラクタ)で既に設定済み。
         // ブラウザ既定のアクセラレータキー(Ctrl+U=ソース表示、Ctrl+F=検索、Ctrl+P=印刷、
         // F3=検索、F12=DevTools等)を無効化する。無効化しないとPane独自のショートカット
         // (仕様書 第2章のCtrl+U下線・Ctrl+F検索・Ctrl+Alt+P印刷等)より先にWebView2側の

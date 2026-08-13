@@ -913,29 +913,6 @@ function countSearchMatches(state) {
 // リスト系の折り返し行のハンギングインデント(1行目のテキスト開始位置に揃える)は
 // livePreviewのbuild()内(可視範囲の行走査)でcm-hangクラスとして付与している。
 
-// ---- インデントガイド(コードモード、仕様書 決定済み事項) ----
-const INDENT_GUIDE_UNIT = 2; // 半角スペース換算でのインデント1段の幅
-const indentGuides = ViewPlugin.fromClass(class {
-  constructor(view) { this.decorations = this.build(view); }
-  update(u) { if (u.docChanged || u.viewportChanged) this.decorations = this.build(u.view); }
-  build(view) {
-    const marks = [];
-    for (const { from, to } of view.visibleRanges) {
-      let pos = from;
-      while (pos <= to) {
-        const line = view.state.doc.lineAt(pos);
-        const lead = line.text.match(/^[ \t]*/)[0].replace(/\t/g, "  ");
-        const level = Math.floor(lead.length / INDENT_GUIDE_UNIT);
-        if (level > 0 && line.text.trim().length > 0) {
-          marks.push(Decoration.line({ class: "cm-indent-guide", attributes: { style: `--indent-level:${level}` } }).range(line.from));
-        }
-        if (line.to + 1 > to) break;
-        pos = line.to + 1;
-      }
-    }
-    return Decoration.set(marks, true);
-  }
-}, { decorations: v => v.decorations });
 
 // ---- 絵文字ショートコードの入力補完(仕様書 M-22) ----
 function emojiCompletionSource(context) {
@@ -959,9 +936,10 @@ const livePreviewExt = () => [
   mathBlocksField, mathBlockDecoField,
 ];
 
-// コードモード限定の拡張(仕様書 決定済み事項: 行番号・括弧の対応表示・
-// インデントガイドまで。矩形選択・コード補完・LSP連携・エラー診断は搭載しない)。
-const codeModeExtras = () => [lineNumbers(), bracketMatching(), indentGuides];
+// コードモード限定の拡張(仕様書 決定済み事項: 行番号・括弧の対応表示まで。
+// インデントガイドは視認性を損なうため搭載しない。矩形選択・コード補完・LSP連携・
+// エラー診断も搭載しない)。
+const codeModeExtras = () => [lineNumbers(), bracketMatching()];
 
 export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionChange, onRender, onPaste, onCopy } = {}) {
   const editable = new Compartment();
