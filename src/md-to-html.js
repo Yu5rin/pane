@@ -1,22 +1,48 @@
 // MarkdownをHTMLへ変換する。仕様書 E-05(HTMLとしてコピー)・X-02/X-03(HTMLエクスポート)で
 // 共用する。ライブプレビューと同じ構文木(@lezer/markdown)を辿るため、見た目の解釈は一致する。
 import { syntaxTree } from "@codemirror/language";
-import { EMOJI_SHORTCODES } from "./markdown-extras.js";
+import { EMOJI_SHORTCODES, extractHeadings } from "./markdown-extras.js";
+import { renderMathToHtml } from "./math.js";
 
 function escText(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
+function escAttr(s) {
+  return escText(s).replace(/"/g, "&quot;");
+}
+
+// インライン数式($...$)検出の正規表現。editor.js(ライブプレビュー)のカーソル行走査と
+// 同じ規則(前後に空白を含まない。$による通貨表記等との誤爆を避けるTypora同様のルール)。
+const INLINE_MATH_RE = /\$([^\s$](?:[^$\n]*[^\s$])?)\$/g;
 
 // ==mark== と脚注参照[^id]は構文木のノードを持たない(仕様書のマークダウン拡張は
 // ライブプレビュー側で正規表現処理している)ため、プレーンテキスト部分にのみ適用する。
 // opts.preserveWhitespace(仕様書 whitespaceOnExport="preserve")のときは、段落内の
 // 単独改行(ソフトブレーク)を<br>に変換して見た目上も改行を保つ。既定(false="ignore")では
 // 何もしない(HTMLの通常の空白畳み込みにより1つの空白として表示される、CommonMarkの既定挙動)。
+//
+// opts.collectMathがtrueのとき(仕様書 exportMathAs="svg")、インライン数式($...$)を検出して
+// プレースホルダ(<span class="pane-math-ph" data-i="N">)に差し替え、実際のtexはopts.mathPlaceholders
+// へ積む(レンダリングはMathJaxの非同期APIのため、この関数自体は同期のまま保つ。実際の置換は
+// renderStandaloneHtml側でsubstituteMathPlaceholders()を呼んで行う)。
 function inlineTextToHtml(s, opts) {
-  let h = escText(s);
+  let raw = s;
+  if (opts?.collectMath) {
+    raw = raw.replace(INLINE_MATH_RE, (_m, tex) => {
+      const idx = opts.mathPlaceholders.length;
+      opts.mathPlaceholders.push({ tex, display: false });
+      return ` MATH${idx} `;
+    });
+  }
+  let h = escText(raw);
   h = h.replace(/==([^=\n]+)==/g, "<mark>$1</mark>");
   h = h.replace(/\[\^([^\]]+)\]/g, (_m, id) => `<sup id="fnref-${id}"><a href="#fn-${id}">${id}</a></sup>`);
   if (opts?.preserveWhitespace) h = h.replace(/\n/g, "<br>\n");
+  // プレースホルダの復元は最後に行う(マーカーは記号を含まない単純な文字列のため、
+  // escText等の前段の変換を通しても壊れない。順序はどこでもよいが分かりやすさのためここに置く)。
+  if (opts?.collectMath) {
+    h = h.replace(/ MATH(\d+) /g, (_m, idx) => `<span class="pane-math-ph" data-i="${idx}"></span>`);
+  }
   return h;
 }
 
@@ -25,6 +51,18 @@ function linkTarget(doc, node) {
   // 未対応の参照記法はhrefなし(テキストのみ)として扱う。
   const urlNode = node.getChild("URL");
   return urlNode ? doc.sliceString(urlNode.from, urlNode.to) : "";
+}
+
+// 画像パスの解決(仕様書 2.9.2 typora-root-url相当、exportReadYamlFrontMatter経由でここへ渡る)。
+// editor.js内の同名関数と同じ規則: スキーム付き(https:, data: 等)や"//"始まりはそのまま、
+// "/"始まりのパスはrootUrlが指定されていればその基準に付け替える。それ以外は変更しない。
+function resolveImageSrc(rawSrc, rootUrl) {
+  if (!rawSrc) return rawSrc;
+  if (/^[a-zA-Z][\w+.-]*:/.test(rawSrc) || rawSrc.startsWith("//")) return rawSrc;
+  if (rawSrc.startsWith("/") && rootUrl) {
+    return rootUrl.replace(/\/+$/, "") + "/" + rawSrc.replace(/^\/+/, "");
+  }
+  return rawSrc;
 }
 
 // 範囲[from,to)内のインライン装飾を子ノードだけ辿って変換する(孫ノードは再帰呼び出しで処理)。
@@ -58,7 +96,8 @@ function inlineHtml(doc, tree, from, to, opts) {
           const textFrom = marks[0] ? marks[0].to : c.from;
           const textTo = marks[1] ? marks[1].from : textFrom;
           const altText = doc.sliceString(textFrom, textTo);
-          html += `<img src="${escText(linkTarget(doc, c))}" alt="${escText(altText)}">`;
+          const src = resolveImageSrc(linkTarget(doc, c), opts?.rootUrl);
+          html += `<img src="${escText(src)}" alt="${escText(altText)}">`;
           pos = c.to;
           break;
         }
@@ -162,6 +201,17 @@ function renderFencedCode(doc, node) {
   return `<pre><code${cls}>${escText(code)}</code></pre>`;
 }
 
+// 見出し(仕様書 exportPageBreakBetweenTopHeadings・exportIncludeOutline)共通の属性文字列。
+// opts.headingIds: Map<開始位置, スラグ> (extractHeadings()の結果から作る。renderStandaloneHtml参照)。
+// opts.pageBreakFroms: Set<開始位置> ページ区切りを入れるべき見出しの開始位置。
+function headingAttrs(node, opts) {
+  let attrs = "";
+  const slug = opts?.headingIds?.get(node.from);
+  if (slug) attrs += ` id="${escAttr(slug)}"`;
+  if (opts?.pageBreakFroms?.has(node.from)) attrs += ` style="break-before:page"`;
+  return attrs;
+}
+
 function renderBlock(doc, tree, node, opts) {
   switch (node.name) {
     case "ATXHeading1": case "ATXHeading2": case "ATXHeading3":
@@ -170,10 +220,11 @@ function renderBlock(doc, tree, node, opts) {
       const mark = node.getChild("HeaderMark");
       let from = mark ? mark.to : node.from;
       while (from < node.to && /\s/.test(doc.sliceString(from, from + 1))) from++;
-      return `<h${level}>${inlineHtml(doc, tree, from, node.to, opts)}</h${level}>`;
+      const attrs = headingAttrs(node, opts);
+      return `<h${level}${attrs}>${inlineHtml(doc, tree, from, node.to, opts)}</h${level}>`;
     }
-    case "SetextHeading1": return `<h1>${inlineHtml(doc, tree, node.from, node.to, opts)}</h1>`;
-    case "SetextHeading2": return `<h2>${inlineHtml(doc, tree, node.from, node.to, opts)}</h2>`;
+    case "SetextHeading1": return `<h1${headingAttrs(node, opts)}>${inlineHtml(doc, tree, node.from, node.to, opts)}</h1>`;
+    case "SetextHeading2": return `<h2${headingAttrs(node, opts)}>${inlineHtml(doc, tree, node.from, node.to, opts)}</h2>`;
     case "Paragraph": return `<p>${inlineHtml(doc, tree, node.from, node.to, opts)}</p>`;
     case "BulletList": return renderList(doc, tree, node, false, opts);
     case "OrderedList": return renderList(doc, tree, node, true, opts);
@@ -207,25 +258,212 @@ function renderFootnotes(doc, tree) {
   return `<hr><ol class="footnotes">${lis}</ol>`;
 }
 
+// 数式ブロック($$ ... $$、独立行の"$$"で開閉。仕様書M-23/editor.jsのfindMathBlocksと同じ規則)を
+// 文書全体から検出する。exportMathAs="svg"のときにブロック単位で丸ごとプレースホルダへ差し替えるため、
+// 構文木の解釈(段落等)より先に判定する。
+function findMathBlockRanges(doc) {
+  const blocks = [];
+  for (let n = 1; n <= doc.lines; n++) {
+    if (doc.line(n).text.trim() !== "$$") continue;
+    let endLn = null;
+    for (let m = n + 1; m <= doc.lines; m++) {
+      if (doc.line(m).text.trim() === "$$") { endLn = m; break; }
+    }
+    if (!endLn) continue;
+    const openLine = doc.line(n), closeLine = doc.line(endLn);
+    const textFrom = openLine.to + 1;
+    const textTo = Math.max(textFrom, closeLine.from - 1);
+    blocks.push({ from: openLine.from, to: closeLine.to, text: doc.sliceString(textFrom, textTo) });
+    n = endLn;
+  }
+  return blocks;
+}
+
 // 文書全体(範囲指定時はその範囲のみ)をHTMLへ変換する。
 // opts.preserveWhitespace(仕様書 whitespaceOnExport)がtrueなら、段落内の単独改行を
 // <br>として書き出す(既定のfalseは、HTMLの空白畳み込みに任せる="ignore"相当)。
+// opts.collectMath(仕様書 exportMathAs="svg")がtrueのとき、数式ブロック・インライン数式を
+// プレースホルダへ差し替え、texをopts.mathPlaceholdersへ積む(renderStandaloneHtml参照)。
 export function renderMarkdownToHtml(state, { from = 0, to = state.doc.length } = {}, opts) {
   const doc = state.doc;
   const tree = syntaxTree(state);
+  const mathBlocks = opts?.collectMath ? findMathBlockRanges(doc) : [];
   let html = "";
-  for (let node = tree.topNode.firstChild; node; node = node.nextSibling) {
-    if (node.to <= from || node.from >= to) continue;
+  let node = tree.topNode.firstChild;
+  while (node) {
+    if (node.to <= from || node.from >= to) { node = node.nextSibling; continue; }
+    const mb = mathBlocks.find((b) => node.from >= b.from && node.from < b.to);
+    if (mb) {
+      // 数式ブロックの範囲は構文木上どう解釈されていても(通常は1つのParagraphになる)まとめて
+      // 1つのプレースホルダに差し替える。範囲に重なる後続ノードは読み飛ばす。
+      const idx = opts.mathPlaceholders.length;
+      opts.mathPlaceholders.push({ tex: mb.text, display: true });
+      html += `<div class="pane-math-ph" data-i="${idx}"></div>`;
+      while (node && node.from < mb.to) node = node.nextSibling;
+      continue;
+    }
     html += renderBlock(doc, tree, node, opts);
+    node = node.nextSibling;
   }
   if (from === 0 && to === doc.length) html += renderFootnotes(doc, tree);
   return html;
 }
 
+// mathPlaceholders([{tex, display}, ...])をMathJaxで実際にレンダリングし、htmlの中の
+// プレースホルダを差し替える(仕様書 exportMathAs="svg")。レンダリングに失敗した数式は
+// 元のLaTeXソースをそのまま表示するフォールバックにする。
+export async function substituteMathPlaceholders(html, mathPlaceholders) {
+  if (!mathPlaceholders.length) return html;
+  const rendered = await Promise.all(mathPlaceholders.map(({ tex, display }) =>
+    renderMathToHtml(tex, { display, autoNumber: "off" }).catch((e) => ({ html: null, error: true, message: String(e) }))));
+  let out = html;
+  mathPlaceholders.forEach(({ tex, display }, idx) => {
+    const placeholder = display
+      ? `<div class="pane-math-ph" data-i="${idx}"></div>`
+      : `<span class="pane-math-ph" data-i="${idx}"></span>`;
+    const r = rendered[idx];
+    const replacement = r && !r.error && r.html
+      ? (display ? `<div class="pane-math-svg">${r.html}</div>` : r.html)
+      : `<span class="pane-math-error" title="数式のレンダリングに失敗しました">${escText(display ? `$$${tex}$$` : `$${tex}$`)}</span>`;
+    out = out.split(placeholder).join(replacement);
+  });
+  return out;
+}
+
+// アウトライン(仕様書 exportIncludeOutline/exportOutlineWidthPx)。見出し一覧から
+// 単純なリンク一覧を作る(サイドバーのアウトラインパネルと役割は同じだが、エクスポート結果は
+// 単体HTMLとして独立して開かれるため、こちらは専用の簡易版を持つ)。
+function renderOutlineHtml(headings, widthPx) {
+  const items = headings
+    .map((h) => `<a class="pane-outline-item pane-outline-l${h.level}" href="#${escAttr(h.slug)}">${escText(h.text)}</a>`)
+    .join("");
+  return `<nav class="pane-export-outline" style="width:${Math.max(0, widthPx | 0)}px">${items}</nav>`;
+}
+
+// アウトライン・数式プレースホルダ用の最小限のCSS。テーマCSS(EXPORT_CSS、editor.js)とは
+// 独立して常に効かせる必要があるため、こちらは<style>を分けて埋め込む。
+function structureCss(widthPx) {
+  return `.pane-export-layout{display:flex;align-items:flex-start;gap:24px}` +
+    `.pane-export-outline{flex:0 0 ${Math.max(0, widthPx | 0)}px;position:sticky;top:0;` +
+    `max-height:100vh;overflow:auto;box-sizing:border-box;padding-right:12px;font-size:.9em}` +
+    `.pane-outline-item{display:block;text-decoration:none;padding:2px 0;color:inherit}` +
+    `.pane-outline-l2{padding-left:.9em}.pane-outline-l3{padding-left:1.8em}` +
+    `.pane-outline-l4{padding-left:2.7em}.pane-outline-l5{padding-left:3.6em}.pane-outline-l6{padding-left:4.5em}` +
+    `.pane-export-content{flex:1 1 auto;min-width:0}` +
+    `.pane-math-error{color:#c00;font-family:var(--font-mono,monospace)}` +
+    `@media print{.pane-export-outline{display:none}}`;
+}
+
 // テーマCSSを埋め込んだ単一HTMLファイル(仕様書 X-02)。styledがfalseなら
-// スタイルなし版(X-03)になる。
-export function renderStandaloneHtml(state, title, css, styled, opts) {
-  const body = renderMarkdownToHtml(state, undefined, opts);
+// スタイルなし版(X-03)になる。config(すべて省略可):
+//   title, css, styled, preserveWhitespace(whitespaceOnExport)
+//   mathAs(exportMathAs: "svg"|"latex")
+//   pageBreakBetweenTopHeadings(exportPageBreakBetweenTopHeadings)
+//   includeOutline / outlineWidthPx(exportIncludeOutline / exportOutlineWidthPx)
+//   appendHead / appendBody(exportAppendHead / exportAppendBody。サニタイズしない)
+//   rootUrl(exportReadYamlFrontMatterで読んだtypora-root-url)
+// 数式のSVGレンダリング(MathJax)が非同期なため、この関数はPromiseを返す。
+export async function renderStandaloneHtml(state, config = {}) {
+  const {
+    title = "",
+    css = "",
+    styled = true,
+    preserveWhitespace = false,
+    mathAs = "latex",
+    pageBreakBetweenTopHeadings = false,
+    includeOutline = false,
+    outlineWidthPx = 260,
+    appendHead = "",
+    appendBody = "",
+    rootUrl = null,
+  } = config;
+
+  const headings = extractHeadings(state, 6);
+  const headingIds = new Map(headings.map((h) => [h.from, h.slug]));
+  const pageBreakFroms = new Set();
+  if (pageBreakBetweenTopHeadings) {
+    let sawTop = false;
+    for (const h of headings) {
+      if (h.level !== 1) continue;
+      if (sawTop) pageBreakFroms.add(h.from); // 最初の最上位見出しの前には入れない(先頭が空白ページになるのを防ぐ)
+      sawTop = true;
+    }
+  }
+
+  const mathPlaceholders = [];
+  const collectMath = mathAs === "svg";
+  let body = renderMarkdownToHtml(state, undefined, {
+    preserveWhitespace, headingIds, pageBreakFroms, rootUrl, collectMath, mathPlaceholders,
+  });
+  if (collectMath && mathPlaceholders.length) {
+    body = await substituteMathPlaceholders(body, mathPlaceholders);
+  }
+
+  const contentHtml = styled ? `<div class="pane-export">${body}</div>` : body;
+  const bodyWrapped = includeOutline
+    ? `<div class="pane-export-layout">${renderOutlineHtml(headings, outlineWidthPx)}<div class="pane-export-content">${contentHtml}</div></div>`
+    : contentHtml;
+
   const styleTag = styled && css ? `<style>${css}</style>` : "";
-  return `<!DOCTYPE html>\n<html lang="ja"><head><meta charset="UTF-8"><title>${escText(title)}</title>${styleTag}</head><body>${styled ? '<div class="pane-export">' : ""}${body}${styled ? "</div>" : ""}</body></html>\n`;
+  const structureStyleTag = includeOutline || collectMath ? `<style>${structureCss(outlineWidthPx)}</style>` : "";
+  // exportAppendHead/exportAppendBody(仕様書): ユーザーが設定画面に自分で書いたHTML文字列を
+  // そのまま追記する。信頼できる入力(本人がPane上で設定したもの)であるため意図的にサニタイズしない。
+  const headExtra = appendHead ? `\n<!-- exportAppendHead: ユーザー入力をサニタイズせずそのまま挿入 -->\n${appendHead}` : "";
+  const bodyExtra = appendBody ? `\n<!-- exportAppendBody: ユーザー入力をサニタイズせずそのまま挿入 -->\n${appendBody}` : "";
+
+  return `<!DOCTYPE html>\n<html lang="ja"><head><meta charset="UTF-8"><title>${escText(title)}</title>${styleTag}${structureStyleTag}${headExtra}\n</head><body>${bodyWrapped}${bodyExtra}</body></html>\n`;
+}
+
+// YAML Front Matter(仕様書 exportReadYamlFrontMatter)から読み取るキー。一次資料
+// (docs/設定項目一覧.md)には具体的なキー名の指定が無い(「typora-root-url、ページ設定」は例示)ため、
+// このファイルを正としてここで定める(報告にも明記する)。
+//   typora-root-url                                … "/"始まり画像パスの基準URL(仕様書2.9.2相当)
+//   title                                            … {title}プレースホルダ・<title>タグに使う文書タイトル
+//   header / footer                                  … exportHeaderText / exportFooterText の上書き
+//   page-size                                        … exportPaperSize の上書き
+//   page-width-mm / page-height-mm                   … page-size: custom のときの寸法
+//   page-orientation                                 … exportOrientation の上書き
+//   page-margin-top/bottom/left/right(いずれも末尾mm) … exportMargin*Mm の上書き
+const FRONT_MATTER_KEYS = {
+  "typora-root-url": "rootUrl",
+  title: "title",
+  header: "header",
+  footer: "footer",
+  "page-size": "pageSize",
+  "page-width-mm": "pageWidthMm",
+  "page-height-mm": "pageHeightMm",
+  "page-orientation": "pageOrientation",
+  "page-margin-top": "marginTopMm",
+  "page-margin-bottom": "marginBottomMm",
+  "page-margin-left": "marginLeftMm",
+  "page-margin-right": "marginRightMm",
+};
+const FRONT_MATTER_NUMERIC = new Set([
+  "pageWidthMm", "pageHeightMm", "marginTopMm", "marginBottomMm", "marginLeftMm", "marginRightMm",
+]);
+
+export function parseFrontMatterOverrides(fullText) {
+  if (!fullText.startsWith("---")) return {};
+  const lines = fullText.split(/\r\n|\n/);
+  if (lines[0].trim() !== "---") return {};
+  let end = -1;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].trim() === "---") { end = i; break; }
+  }
+  if (end === -1) return {};
+  const body = lines.slice(1, end).join("\n");
+  const result = {};
+  for (const [key, prop] of Object.entries(FRONT_MATTER_KEYS)) {
+    const re = new RegExp(`^[ \\t]*${key}[ \\t]*:[ \\t]*(.+?)[ \\t]*$`, "mi");
+    const m = body.match(re);
+    if (!m) continue;
+    const raw = m[1].trim().replace(/^["']|["']$/g, "");
+    if (FRONT_MATTER_NUMERIC.has(prop)) {
+      const n = parseFloat(raw);
+      if (Number.isFinite(n)) result[prop] = n;
+    } else if (raw) {
+      result[prop] = raw;
+    }
+  }
+  return result;
 }

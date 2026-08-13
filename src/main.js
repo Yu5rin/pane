@@ -11,6 +11,7 @@ import { createQuickOpen } from "./quick-open.js";
 import { createWordCountPopup } from "./word-count.js";
 import { createSettings } from "./settings.js";
 import { htmlToMarkdown } from "./html-to-markdown.js";
+import { parseFrontMatterOverrides } from "./md-to-html.js";
 import { resolveFileMode, codeLanguages } from "./languages.js";
 import { FILE_TYPES } from "./file-types.js";
 import { detectContentMode } from "./detect-mode.js";
@@ -67,6 +68,21 @@ let wordWrapOn = true;
 let defaultCopyFormat = "markdown"; // "markdown" | "html"(仕様書 第2.9.3節、設定で切替)
 let pandocAvailable = false;
 let recentFiles = [];
+// エクスポート・印刷の詳細設定(仕様書 docs/設定項目一覧.md「エクスポート・印刷」節)。
+// JS側で使う項目だけをここに保持し、C#側専用の項目(exportDefaultFolder等)もそのまま
+// 通過させてexport/printメッセージに乗せる(C#側で読む)。既定値はAppSettings.csと揃える。
+let exportSettings = {
+  exportPaperSize: "a4", exportCustomWidthMm: 210, exportCustomHeightMm: 297,
+  exportOrientation: "portrait",
+  exportMarginTopMm: 20, exportMarginBottomMm: 20, exportMarginLeftMm: 20, exportMarginRightMm: 20,
+  exportHeaderText: "", exportFooterText: "",
+  exportPageBreakBetweenTopHeadings: false,
+  exportIncludeOutline: false, exportOutlineWidthPx: 260,
+  exportAppendHead: "", exportAppendBody: "",
+  exportDefaultFolder: "sameAsFile", exportCustomFolder: "",
+  exportAfter: "none", exportShowSaveDialog: true,
+  exportMathAs: "svg", exportReadYamlFrontMatter: true,
+};
 // 直近読み込みに成功したフォルダ(仕様書 第2.8節: ファイルを開くと親フォルダが自動読み込まれる)。
 // { rootPath, rootName, entries, truncated } 。未読み込み・読み込み失敗時はnullのまま
 // (失敗時のエラー表示はサイドバー側にだけ渡し、ここでは保持しない)。
@@ -397,6 +413,43 @@ function setReadOnly(readOnly) {
 // 文書全体が出力対象になるようにする)。CodeMirrorはスクロール領域の実測サイズを基に
 // 描画範囲を決めるため、#cm-hostの高さを文書全体の高さまで広げるとCM側が自動的に
 // 全行を描画する。
+// ヘッダー・フッター文字列(exportHeaderText/exportFooterText)の置換文字列展開(仕様書)。
+// {title} {date} {time} {path} はここでその場の値に展開する。{page} {pages}(ページ番号・総数)は
+// 文書全体を印刷し終えるまで確定しないため展開せず、そのままC#側(MainForm)へ渡し、
+// CSSのcounter(page)/counter(pages)を使って1ページごとに解決させる。
+function expandHeaderFooterTemplate(template, fm) {
+  if (!template) return "";
+  const now = new Date();
+  const pad2 = (n) => String(n).padStart(2, "0");
+  const dateStr = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+  const timeStr = `${pad2(now.getHours())}:${pad2(now.getMinutes())}`;
+  const title = fm?.title ?? currentName;
+  return template
+    .split("{title}").join(title)
+    .split("{date}").join(dateStr)
+    .split("{time}").join(timeStr)
+    .split("{path}").join(currentPath ?? "");
+}
+// エクスポート/PDF印刷のページ設定一式を組み立てる(仕様書「エクスポート・印刷」節)。
+// exportReadYamlFrontMatterで読んだFront Matterの値(fm)があればexportSettingsより優先する。
+function buildExportPageOptions(fm) {
+  return {
+    paperSize: fm.pageSize ?? exportSettings.exportPaperSize,
+    orientation: fm.pageOrientation ?? exportSettings.exportOrientation,
+    customWidthMm: fm.pageWidthMm ?? exportSettings.exportCustomWidthMm,
+    customHeightMm: fm.pageHeightMm ?? exportSettings.exportCustomHeightMm,
+    marginTopMm: fm.marginTopMm ?? exportSettings.exportMarginTopMm,
+    marginBottomMm: fm.marginBottomMm ?? exportSettings.exportMarginBottomMm,
+    marginLeftMm: fm.marginLeftMm ?? exportSettings.exportMarginLeftMm,
+    marginRightMm: fm.marginRightMm ?? exportSettings.exportMarginRightMm,
+    headerTemplate: expandHeaderFooterTemplate(fm.header ?? exportSettings.exportHeaderText, fm),
+    footerTemplate: expandHeaderFooterTemplate(fm.footer ?? exportSettings.exportFooterText, fm),
+    exportDefaultFolder: exportSettings.exportDefaultFolder,
+    exportCustomFolder: exportSettings.exportCustomFolder,
+    exportAfter: exportSettings.exportAfter,
+    exportShowSaveDialog: exportSettings.exportShowSaveDialog,
+  };
+}
 function enterExportLayout() {
   document.body.classList.add("export-layout");
   const h = Math.ceil(editor.view.contentHeight) + 40;
@@ -451,6 +504,15 @@ const editor = createEditor(host, {
       if (md) {
         lastPasteLength = md.length;
         editor.pasteText(md);
+        return true;
+      }
+    }
+    if (!plain) {
+      // html/plainどちらも無く、画像ファイルが乗っている場合(スクリーンショットのコピー等)。
+      // 仕様書 docs/設定項目一覧.md「画像」節: クリップボードからの貼り付けも画像挿入の経路の1つ。
+      const imageFile = Array.from(e.clipboardData?.files ?? []).find((f) => isImageFile(f));
+      if (imageFile) {
+        insertImageFile(imageFile);
         return true;
       }
     }
@@ -533,14 +595,38 @@ const ctx = {
     },
     async exportAs(format) {
       if (!bridge) { window.alert("エクスポートはデスクトップアプリ版でのみ利用できます。"); return; }
+      // exportReadYamlFrontMatter(仕様書): trueならFront Matterのページ設定等を読んで上書きする。
+      // 読み取るキーの一覧はmd-to-html.jsのFRONT_MATTER_KEYSを参照(このファイルが正)。
+      const fm = exportSettings.exportReadYamlFrontMatter ? parseFrontMatterOverrides(editor.getValue()) : {};
       let text;
-      if (format === "html") text = editor.getStandaloneHtml(currentName, true);
-      else if (format === "html-plain") text = editor.getStandaloneHtml(currentName, false);
-      else text = editor.getValue(); // pdfは本文を使わない。docx/epubはMarkdown原文をPandocへ渡す。
+      if (format === "html" || format === "html-plain") {
+        // exportPageBreakBetweenTopHeadings/exportIncludeOutline/exportAppendHead/exportAppendBody/
+        // exportMathAsはHTMLエクスポートにのみ適用する(PDF/印刷はライブプレビューのDOMをそのまま
+        // 印刷するため、これらの構造的な変更はHTML生成側でしか意味を持たない)。
+        text = await editor.getStandaloneHtml({
+          title: fm.title ?? currentName,
+          styled: format === "html",
+          mathAs: exportSettings.exportMathAs,
+          pageBreakBetweenTopHeadings: exportSettings.exportPageBreakBetweenTopHeadings,
+          includeOutline: exportSettings.exportIncludeOutline,
+          outlineWidthPx: exportSettings.exportOutlineWidthPx,
+          appendHead: exportSettings.exportAppendHead,
+          appendBody: exportSettings.exportAppendBody,
+          rootUrl: fm.rootUrl ?? null,
+        });
+      } else {
+        text = editor.getValue(); // pdfは本文を使わない。docx/epubはMarkdown原文をPandocへ渡す。
+      }
       // PDF/印刷はbeforeprint/afterprintで自動的にレイアウトを展開・復元する(enterExportLayout参照)。
-      bridge.postMessage({ type: "export", format, text });
+      // pageOptionsは主にformat==="pdf"のときC#側(CoreWebView2PrintSettings)が使う。
+      // それ以外の形式でもexportDefaultFolder等の出力先設定は共通で使う。
+      bridge.postMessage({ type: "export", format, text, pageOptions: buildExportPageOptions(fm) });
     },
     print() {
+      // 用紙サイズ・余白・ヘッダー/フッター等の詳細設定(仕様書「エクスポート・印刷」節)は
+      // WebView2のShowPrintUI(ネイティブ印刷ダイアログ)には渡せないAPI上の制約があるため、
+      // この経路(File>印刷、Ctrl+Alt+P)には適用されない(PDFエクスポートにのみ適用される。
+      // 詳細はMainForm.HandlePrintRequestAsyncのコメントを参照)。
       if (bridge) bridge.postMessage({ type: "print" });
       else window.print();
     },
@@ -697,6 +783,16 @@ initContextMenu(host, commands, ctx, resolveContextCommandIds);
 // buildCommands()の後でctx.commandsとして公開してから生成する。
 ctx.commands = commands;
 settingsUI = createSettings(ctx);
+
+// 検証用の入口。ブリッジが無いとき(=WebView2ではなく素のブラウザで開いたとき)だけ公開する。
+// Pane本体(WebView2)では window.chrome.webview が必ず存在するため、この分岐は常に偽になり
+// 製品の動作には一切影響しない。リポジトリの検証スクリプト(.verify-*.mjs)はブラウザ上で
+// エディタ内部のAPI(エクスポートHTMLの生成など、画面操作だけでは到達できないもの)を
+// 直接呼ぶ必要があるため、その足場として置いている。
+if (!bridge) {
+  window.__paneDebugEditor = editor;
+  window.__paneDebugCtx = ctx;
+}
 
 // 右クリックメニュー: リスト行の上ではリスト種別の相互変換(仕様書 P-13)を提示する。
 // それ以外は既定のブラウザメニューに任せる(コンテキストメニューの対応範囲はPhase 5時点ではここまで)。
@@ -935,6 +1031,11 @@ async function handleHostMessage(msg) {
       defaultCopyFormat = msg.defaultCopyFormat ?? "markdown";
       pandocAvailable = !!msg.pandocAvailable;
       recentFiles = msg.recentFiles ?? [];
+      // エクスポート・印刷の詳細設定(仕様書「エクスポート・印刷」節)。届いたキーだけ上書きし、
+      // 未指定のキーは既定値(exportSettingsの初期値)を保つ。
+      for (const key of Object.keys(exportSettings)) {
+        if (msg[key] !== undefined) exportSettings[key] = msg[key];
+      }
       // テーマ(仕様書 第10.2節): 手動で切り替えた選択を永続化している。"system"ならOS設定
       // (index.htmlの起動時スクリプトが既に反映済み)のままにする。
       if (msg.theme === "light" || msg.theme === "dark") {
@@ -1112,17 +1213,37 @@ fileInput.addEventListener("change", async () => {
   fileInput.value = "";
 });
 
-// 画像挿入のブラウザ単体フォールバック(仕様書 R-07): ブリッジが無い場合は
-// 相対パス保存ができないため、data URIとして直接埋め込む(開発確認用の簡易対応)。
-imageInput.addEventListener("change", async () => {
-  const file = imageInput.files[0];
-  if (!file) return;
+// 画像挿入(仕様書 docs/設定項目一覧.md「画像」節)の共通経路。メニュー「画像を挿入」の
+// ファイルダイアログ以外(ドラッグ&ドロップ・クリップボードからの貼り付け・ブラウザ単体時の
+// <input type=file>フォールバック)はいずれもWebView2の標準DOM File APIでは実パスが
+// 分からないため、ここでバイト列化してC#側(imageInsertAction等の設定を反映する
+// ImageInsertService)へ渡す。ブリッジが無いブラウザ単体動作ではdata URIとして直接埋め込む
+// (相対パス保存ができないための開発確認用フォールバック)。
+async function insertImageFile(file) {
+  if (bridge) {
+    const buf = await file.arrayBuffer();
+    bridge.postMessage({
+      type: "insert-image",
+      dataBase64: arrayBufferToBase64(buf),
+      name: file.name || "image.png",
+    });
+    return;
+  }
   const dataUrl = await new Promise((resolve) => {
     const reader = new FileReader();
     reader.onload = () => resolve(reader.result);
     reader.readAsDataURL(file);
   });
-  editor.applyAction("image", { alt: file.name.replace(/\.[^.]+$/, ""), path: dataUrl });
+  editor.applyAction("image", { alt: (file.name || "image").replace(/\.[^.]+$/, ""), path: dataUrl });
+}
+function isImageFile(file) {
+  if (file.type && file.type.startsWith("image/")) return true;
+  return /\.(png|jpe?g|gif|svg|webp|bmp)$/i.test(file.name || "");
+}
+imageInput.addEventListener("change", async () => {
+  const file = imageInput.files[0];
+  if (!file) return;
+  await insertImageFile(file);
   imageInput.value = "";
 });
 
@@ -1155,6 +1276,12 @@ window.addEventListener("drop", async (e) => {
   e.preventDefault();
   e.stopPropagation();
   const file = e.dataTransfer.files[0];
+  // 画像ファイルのドロップは「このファイルを開く」ではなく「本文へ画像を挿入する」として扱う
+  // (仕様書 docs/設定項目一覧.md「画像」節: 画像挿入の3経路の1つ)。
+  if (isImageFile(file)) {
+    await insertImageFile(file);
+    return;
+  }
   // 本文が空(新規ファイル等、失われる内容が無い)ならこのウィンドウで開き、
   // 何か書かれていれば新しいウィンドウで開く。
   const isEmptyDocument = editor.getValue().trim() === "";

@@ -2257,9 +2257,15 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
       return renderMarkdownToHtml(view.state, range, { preserveWhitespace: toggles.whitespaceOnExport === "preserve" });
     },
     // HTMLエクスポート(仕様書 File項目「エクスポート: HTML」)。文書全体を対象にする。
-    getStandaloneHtml: (title, styled) => {
+    // configはmain.js側でエクスポート設定(exportPageBreakBetweenTopHeadings等)から組み立てて渡す。
+    // 数式のSVGレンダリング(exportMathAs="svg")が非同期なため、Promiseを返す。
+    getStandaloneHtml: (config) => {
       const toggles = view.state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
-      return renderStandaloneHtml(view.state, title, EXPORT_CSS, styled, { preserveWhitespace: toggles.whitespaceOnExport === "preserve" });
+      return renderStandaloneHtml(view.state, {
+        css: EXPORT_CSS,
+        preserveWhitespace: toggles.whitespaceOnExport === "preserve",
+        ...config,
+      });
     },
     // カーソル位置の行に記法を挿入(ツールバー用)
     applyAction: (action, payload) => applyMdAction(view, action, payload),
