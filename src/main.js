@@ -4,7 +4,7 @@
 // 使えない場合(単体のブラウザで動作確認する場合)は File System Access API /
 // File API による仮実装にフォールバックする(Phase 1からの経路をそのまま維持)。
 import { createEditor } from "./editor.js";
-import { buildCommands, initMenuBar, initCommandPalette, initContextMenu, createShortcutHandler, bindGlobalShortcuts } from "./commands.js";
+import { buildCommands, initMenuBar, initCommandPalette, initContextMenu, bindShortcuts } from "./commands.js";
 import { createSearchUI } from "./search-ui.js";
 import { htmlToMarkdown } from "./html-to-markdown.js";
 
@@ -19,6 +19,20 @@ const fileInput = document.getElementById("file-input");
 const imageInput = document.getElementById("image-input");
 
 const bridge = window.chrome?.webview ?? null;
+
+// ---- 実機での不具合調査用ログ(仕様書外・デバッグ支援) ----
+// C#側のLogger(%LOCALAPPDATA%\Pane\logs\)へJS側のログもまとめて送る。DevTools(Shift+F12)を
+// 別途開かなくても、テキストファイル1つで両側の動きを追えるようにする。
+function logToHost(level, message) {
+  console[level === "error" ? "error" : "log"](message);
+  bridge?.postMessage({ type: "log", level, message: String(message) });
+}
+window.addEventListener("error", (e) => {
+  logToHost("error", `JS未処理エラー: ${e.message} (${e.filename}:${e.lineno}:${e.colno})`);
+});
+window.addEventListener("unhandledrejection", (e) => {
+  logToHost("error", `JS未処理のPromise拒否: ${e.reason}`);
+});
 
 let currentHandle = null; // File System Access API(ブラウザ単体時のみ使用)
 let currentPath = null; // ブリッジ経由で開いた際のフルパス(最近使ったファイル・画像挿入・reopenClosedに使う)
@@ -93,16 +107,11 @@ function exitExportLayout() {
 window.addEventListener("beforeprint", enterExportLayout);
 window.addEventListener("afterprint", exitExportLayout);
 
-// ショートカットはcommands.js側(createShortcutHandler)が担うが、そのコマンド一覧の
-// 構築にはeditorの生成が必要な循環があるため、実体は後で差し替える前提の間接参照にする。
-let shortcutHandler = () => false;
-
 const editor = createEditor(host, {
   onChange() {
     setDirty(true);
     updateCount();
   },
-  onKeydown: (e) => shortcutHandler(e),
   // スマートペースト(仕様書 第2.9.3節): クリップボードにHTMLがあればMarkdownへ変換して挿入する。
   // プレーンテキストのみの場合は既定の貼り付け(CM6の処理)に任せる。
   onPaste: (e) => {
@@ -190,9 +199,11 @@ const ctx = {
     },
     openSettings() { bridge?.postMessage({ type: "open-settings" }); },
     async closeWindow() {
+      // 未保存の変更がある場合の保存確認はC#側(FormClosing)が一元的に行う
+      // (ネイティブのXボタン・Alt+F4で閉じた場合と挙動を揃えるため)。
+      if (bridge) { bridge.postMessage({ type: "close" }); return; }
       if (isDirty && !window.confirm("保存されていない変更があります。閉じてもよろしいですか?")) return;
-      if (bridge) bridge.postMessage({ type: "close" });
-      else window.close();
+      window.close();
     },
     async copyAsMarkdown() {
       try { await navigator.clipboard.writeText(editor.getMarkdownForClipboard()); } catch { /* クリップボード権限が無い環境ではベストエフォート */ }
@@ -244,8 +255,7 @@ const ctx = {
 };
 
 const commands = buildCommands(ctx);
-shortcutHandler = createShortcutHandler(commands, ctx);
-bindGlobalShortcuts(commands, ctx);
+bindShortcuts(commands, ctx);
 initMenuBar(menubarEl, commands, ctx);
 const commandPalette = initCommandPalette(document.body, commands, ctx);
 initContextMenu(host, commands, ctx, resolveContextCommandIds);
@@ -275,7 +285,10 @@ statusWrapBtn.addEventListener("click", () => ctx.actions.toggleWordWrap());
 
 // ---- WebView2ブリッジ(Phase 2) ----
 if (bridge) {
-  bridge.addEventListener("message", (e) => handleHostMessage(e.data));
+  bridge.addEventListener("message", (e) => {
+    if (e.data?.type !== "text-response") logToHost("log", `C#からのメッセージ受信: type=${e.data?.type}`);
+    handleHostMessage(e.data);
+  });
   bridge.postMessage({ type: "ready" });
 }
 
@@ -331,6 +344,11 @@ async function handleHostMessage(msg) {
     case "request-text":
       // 自動保存(仕様書 N-06): C#側は本文を持たないため、要求されたら都度返す。
       bridge?.postMessage({ type: "text-response", text: editor.getValue() });
+      break;
+    case "request-save":
+      // 未保存の変更を残したまま閉じる/新規作成する/別ファイルを開く前の保存確認
+      // (C#側ConfirmDiscardDirtyAsync)から届く。通常のCtrl+Sと同じ保存フローを使う。
+      saveFile(false);
       break;
     case "apply-settings":
       // マークダウン記法拡張のON/OFF(仕様書 第2.10節 C-01)・最近使ったファイル(F-09)・
