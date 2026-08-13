@@ -202,6 +202,76 @@ export function initMenuBar(container, commands, ctx) {
   container.setAttribute("role", "menubar");
   let openMenu = null;
 
+  // ---- ネイティブポップアップ経路(ブリッジがある場合) ----
+  // ウィンドウを小さくすると項目数の多いメニュー(例: 表示メニュー20項目)が画面外へ
+  // はみ出す問題への対応(ユーザー要望)。ブリッジがあるときだけ、HTMLドロップダウンの
+  // 代わりにWinFormsのネイティブなポップアップ(Pane/NativeMenu.cs、ToolStripDropDownMenu)を
+  // 使う。見出しがクリックされた時点の状態を評価してJSONにしC#へ送り、選ばれた項目の実行は
+  // 既存のcommand.run()経路をそのまま使う(コマンドの実装はC#側に持たせない)。
+  // 開いている間に別の見出しへマウスを移動する「メニュー間の移動」には対応しない
+  // (ネイティブのポップアップが表示されている間、マウスはOS側のポップアップに捕捉され
+  // HTML側の見出しボタンのmouseenterはそもそも発火しない。仕様上ここまでで良いとされている)。
+  const useNative = !!ctx.bridge;
+  // id→実行関数の対応表。開くたびに作り直す(「最近使ったファイル」等の動的なsubmenuは
+  // 開くたびに内容が変わり得るため)。submenu項目は元々idを持たないため、ここで
+  // `${親のid}/${index}` という一意なidをその場で振り、選択時にこの対応表経由で
+  // 元の実行関数へ辿れるようにする。
+  let nativeRunRegistry = new Map();
+  let nativeOpenBtn = null;
+
+  function buildNativeItem(item) {
+    const grayed = item.grayed?.(ctx) ?? false;
+    const enabled = !grayed && (item.enabled ? item.enabled(ctx) : true);
+    const node = {
+      id: item.id ?? null,
+      label: item.label,
+      shortcut: item.shortcut ?? "",
+      enabled,
+      checked: !!item.checked?.(ctx),
+      separatorAfter: !!item.separatorAfter,
+      note: item.note ?? "",
+    };
+    if (item.id) nativeRunRegistry.set(item.id, item.run);
+    if (item.submenu) {
+      node.submenu = item.submenu(ctx).map((entry, i) => {
+        const subId = `${item.id}/${i}`;
+        if (!entry.disabled) nativeRunRegistry.set(subId, entry.run);
+        return { id: subId, label: entry.label, shortcut: "", enabled: !entry.disabled, checked: false, separatorAfter: false, note: "" };
+      });
+    }
+    return node;
+  }
+
+  function openNativeMenu(menuName, btn) {
+    // 前のメニューがmenu-closed/menu-commandを受け取らないまま次が開かれた場合に備え、
+    // 念のため先にハイライトを解除しておく(通常はC#側が前のポップアップを閉じてから
+    // 新しいポップアップを開くため起きないはずだが、取りこぼし防止)。
+    clearNativeHighlight();
+    nativeRunRegistry = new Map();
+    const items = commands.filter((c) => c.menu === menuName && !c.contextOnly).map(buildNativeItem);
+    nativeOpenBtn = btn;
+    btn.classList.add("open");
+    // WebView2内のCSSピクセル座標で送る。C#側(Pane/MainForm.HandleOpenMenuRequest)で
+    // DeviceDpiとWebView2の画面上の位置(_webView.PointToScreen)を使って画面座標へ変換する。
+    const rect = btn.getBoundingClientRect();
+    ctx.bridge.postMessage({ type: "open-menu", menu: menuName, x: rect.left, y: rect.bottom, items });
+  }
+
+  function clearNativeHighlight() {
+    nativeOpenBtn?.classList.remove("open");
+    nativeOpenBtn = null;
+  }
+
+  // C#(Pane/NativeMenu.cs)からの応答。main.jsのhandleHostMessageから呼ばれる。
+  // menu-command(項目が選ばれた)・menu-closed(選ばずに閉じられた)のどちらか一方が必ず届く。
+  function handleMenuCommand(id) {
+    clearNativeHighlight();
+    nativeRunRegistry.get(id)?.();
+  }
+  function handleMenuClosed() {
+    clearNativeHighlight();
+  }
+
   function closeAll() {
     container.querySelectorAll(".menu-dropdown").forEach((el) => el.remove());
     container.querySelectorAll(".menu-top.open").forEach((el) => el.classList.remove("open"));
@@ -285,25 +355,29 @@ export function initMenuBar(container, commands, ctx) {
     btn.type = "button";
     btn.className = "menu-top";
     btn.textContent = MENU_LABELS[menuName] ?? menuName;
-    btn.addEventListener("click", () => {
-      if (openMenu === menuName) { closeAll(); return; }
-      closeAll();
-      openMenu = menuName;
-      btn.classList.add("open");
-      renderDropdown(menuName, btn);
-      document.addEventListener("mousedown", onOutsideClick, true);
-      document.addEventListener("keydown", onMenuKeydown, true);
-    });
-    btn.addEventListener("mouseenter", () => {
-      if (openMenu && openMenu !== menuName) {
+    if (useNative) {
+      btn.addEventListener("click", () => openNativeMenu(menuName, btn));
+    } else {
+      btn.addEventListener("click", () => {
+        if (openMenu === menuName) { closeAll(); return; }
         closeAll();
         openMenu = menuName;
         btn.classList.add("open");
         renderDropdown(menuName, btn);
         document.addEventListener("mousedown", onOutsideClick, true);
         document.addEventListener("keydown", onMenuKeydown, true);
-      }
-    });
+      });
+      btn.addEventListener("mouseenter", () => {
+        if (openMenu && openMenu !== menuName) {
+          closeAll();
+          openMenu = menuName;
+          btn.classList.add("open");
+          renderDropdown(menuName, btn);
+          document.addEventListener("mousedown", onOutsideClick, true);
+          document.addEventListener("keydown", onMenuKeydown, true);
+        }
+      });
+    }
     container.insertBefore(btn, anchor);
   }
 
@@ -322,7 +396,7 @@ export function initMenuBar(container, commands, ctx) {
     }
   });
 
-  return { closeAll };
+  return { closeAll, handleMenuCommand, handleMenuClosed };
 }
 
 // ---- コマンドパレット(Ctrl+Shift+P、仕様書 第10.1節) ----

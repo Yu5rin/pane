@@ -57,6 +57,12 @@ internal static class WindowChrome
     /// <summary>ダークテーマの既定タイトルバー文字色(src/style.css --ink 実値・ダーク側)。</summary>
     public const string DefaultDarkForeground = "#E4E7E5";
 
+    /// <summary>ライトテーマのウィンドウ枠色(src/style.css --line 実値)。背景よりわずかに濃くして輪郭を出す。</summary>
+    public const string DefaultLightBorder = "#DCE2E0";
+
+    /// <summary>ダークテーマのウィンドウ枠色(src/style.css --line 実値・ダーク側)。背景より明るくして輪郭を出す。</summary>
+    public const string DefaultDarkBorder = "#2C343A";
+
     /// <summary>
     /// タイトルバーの配色を適用する。isDarkに応じてDWMWA_USE_IMMERSIVE_DARK_MODEを設定したうえで、
     /// 背景・文字・枠の色を設定する。backgroundHex/foregroundHexが指定されていればそれを使い
@@ -82,8 +88,9 @@ internal static class WindowChrome
 
         SetCaptionColor(handle, bg);
         SetTextColor(handle, fg);
-        // 枠色は背景色に揃え、キャプションとクライアント領域の境目を目立たせない。
-        SetBorderColor(handle, bg);
+        // 枠は背景と別の色にして細い輪郭を出す。背景と同色にしていたときは、特にダークテーマで
+        // ウィンドウを重ねるとどこまでが手前のウィンドウか分からなくなっていた。
+        SetBorderColor(handle, isDark ? DefaultDarkBorder : DefaultLightBorder);
     }
 
     /// <summary>DWMWA_USE_IMMERSIVE_DARK_MODEを設定する。値20(Windows 10 1903以降・Windows 11)で
