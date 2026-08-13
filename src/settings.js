@@ -385,8 +385,10 @@ export function createSettings(ctx) {
   // selectedExtensionsだけ作り直す。開閉状態(expanded*)はタブを行き来しても保持したいので
   // draftとは別に、このモジュールが生きている間ずっと保持する。
   let selectedExtensions = new Set();
-  const expandedCategories = new Set(CATEGORY_ORDER); // 既定: カテゴリは展開
-  const expandedLanguages = new Set(); // 既定: 言語行は折りたたみ
+  // 既定はすべて折りたたみ。7分類×96言語×229拡張子を最初から広げると縦に非常に長くなり、
+  // ウィンドウが小さいと目的の分類まで辿り着けなくなるため。
+  const expandedCategories = new Set();
+  const expandedLanguages = new Set();
   let extInputs = new Map();
   let langInputs = new Map();
   let catInputs = new Map();
