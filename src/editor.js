@@ -189,7 +189,62 @@ function openOrJumpLink(view, href, modifierKey) {
   }
   let url = href;
   if (!/^[a-zA-Z][\w+.-]*:/.test(url)) url = "https://" + url;
-  window.open(url, "_blank", "noopener");
+  confirmOpenExternal(url, () => window.open(url, "_blank", "noopener"));
+}
+
+// 外部サイトを開く前の確認(Graftと同じ考え方)。誤クリックで意図しないサイトが
+// 既定のブラウザで開くのを防ぐ。window.confirm はWebView2側の設定でブロックされる
+// ことがあるため使わず、自前のダイアログを出す。文書内リンク(#見出し)は確認しない。
+let externalLinkDialog = null;
+function confirmOpenExternal(url, onConfirm) {
+  externalLinkDialog?.remove();
+
+  const overlay = document.createElement("div");
+  overlay.className = "extlink-overlay";
+  const box = document.createElement("div");
+  box.className = "extlink-box";
+
+  const title = document.createElement("div");
+  title.className = "extlink-title";
+  title.textContent = "外部サイトを開きますか?";
+
+  // URLは必ずtextContentで入れる(HTMLとして解釈させない)。長いURLは折り返して全文見せる。
+  const urlEl = document.createElement("div");
+  urlEl.className = "extlink-url";
+  urlEl.textContent = url;
+
+  const actions = document.createElement("div");
+  actions.className = "extlink-actions";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "extlink-btn";
+  cancel.textContent = "キャンセル";
+  const open = document.createElement("button");
+  open.type = "button";
+  open.className = "extlink-btn extlink-btn-primary";
+  open.textContent = "開く";
+
+  function close() {
+    document.removeEventListener("keydown", onKey, true);
+    overlay.remove();
+    externalLinkDialog = null;
+  }
+  function onKey(e) {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); }
+    else if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); close(); onConfirm(); }
+  }
+
+  cancel.addEventListener("click", close);
+  open.addEventListener("click", () => { close(); onConfirm(); });
+  overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
+  document.addEventListener("keydown", onKey, true);
+
+  actions.append(cancel, open);
+  box.append(title, urlEl, actions);
+  overlay.append(box);
+  document.body.appendChild(overlay);
+  externalLinkDialog = overlay;
+  open.focus(); // 既定は「開く」。Enterでそのまま開ける
 }
 
 class BulletWidget extends WidgetType {

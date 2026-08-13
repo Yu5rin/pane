@@ -810,3 +810,18 @@ html[data-theme="dark"] .cm-table th { background: rgba(61,193,181,.14); }
 .adv-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--danger); border-radius: 9px; background: var(--danger-soft); }
 .adv-confirm-text { font-size: 12px; color: var(--ink); flex-basis: 100%; }
 .adv-action-msg { font-size: 12px; color: var(--accent); min-height: 1.4em; }
+
+/* ===== 外部サイトを開く前の確認ダイアログ(src/editor.js の confirmOpenExternal) =====
+   誤クリックで既定のブラウザが勝手に開くのを防ぐ。見た目は既存のパレット/設定画面と
+   揃える(--surface背景・--line枠・--shadow-pop)。色は既存のCSS変数のみを使う。 */
+.extlink-overlay { position: fixed; inset: 0; z-index: 90; background: rgba(10,14,16,.4); display: flex; justify-content: center; align-items: center; padding: min(24px, 3vh) 16px; }
+.extlink-box { width: min(460px, 100%); max-height: 100%; overflow-y: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow-pop); padding: 18px 20px 14px; }
+.extlink-title { font-size: 13.5px; font-weight: 700; color: var(--ink); margin-bottom: 10px; }
+.extlink-url { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-sub); background: var(--code-bg); border: 1px solid var(--rule); border-radius: 6px; padding: 8px 10px; word-break: break-all; margin-bottom: 14px; }
+.extlink-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.extlink-btn { border: 1px solid var(--line); background: var(--surface); color: var(--ink); font: inherit; font-size: 12px; padding: 6px 14px; border-radius: 6px; cursor: pointer; }
+.extlink-btn-primary { background: var(--accent); border-color: var(--accent); color: var(--surface); font-weight: 700; }
+@media (hover: hover) {
+.extlink-btn:hover { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+.extlink-btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--surface); }
+}
