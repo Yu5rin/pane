@@ -116,6 +116,10 @@ export function buildCommands(ctx) {
 
 // ---- メニューバー(仕様書 第10.1節・第10.4節) ----
 // 既定は表示。Altキーで表示・非表示をトグルする(表示中はショートカット一覧としても機能する)。
+// 内部の分類キー(コマンド定義の menu プロパティ、File/Edit/Paragraph/Format/View)は
+// 既存コード全体の判定に使われているため英語のまま維持し、表示ラベルだけ日本語化する
+// (多言語対応は将来別途行う予定のため、ここでは決め打ちの日本語のみとする)。
+const MENU_LABELS = { File: "ファイル", Edit: "編集", Paragraph: "段落", Format: "書式", View: "表示" };
 export function initMenuBar(container, commands, ctx) {
   const menus = ["File", "Edit", "Paragraph", "Format", "View"];
   // コンテナ末尾には右端寄せ用のスペーサーとテーマ切替ボタンが静的HTML側で既に置かれているため、
@@ -207,7 +211,7 @@ export function initMenuBar(container, commands, ctx) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "menu-top";
-    btn.textContent = menuName;
+    btn.textContent = MENU_LABELS[menuName] ?? menuName;
     btn.addEventListener("click", () => {
       if (openMenu === menuName) { closeAll(); return; }
       closeAll();
@@ -271,7 +275,8 @@ export function initCommandPalette(root, commands, ctx) {
       filtered.forEach((cmd, i) => {
         const li = document.createElement("li");
         li.className = i === sel ? "sel" : "";
-        li.innerHTML = `<span>${cmd.menu ? cmd.menu + ": " : ""}${cmd.label}</span>` + (cmd.shortcut ? `<span class="palette-shortcut">${cmd.shortcut}</span>` : "");
+        const menuLabel = cmd.menu ? (MENU_LABELS[cmd.menu] ?? cmd.menu) : "";
+        li.innerHTML = `<span>${menuLabel ? menuLabel + ": " : ""}${cmd.label}</span>` + (cmd.shortcut ? `<span class="palette-shortcut">${cmd.shortcut}</span>` : "");
         li.addEventListener("mousedown", (e) => { e.preventDefault(); close(); cmd.run(); });
         list.appendChild(li);
       });

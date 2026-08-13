@@ -240,7 +240,8 @@ internal sealed class MainForm : Form
                 _autoSaveTimer.Start();
                 break;
             case "open":
-                _ = HandleOpenRequestAsync();
+                // 新規作成・開くは現在のウィンドウを置き換えず、常に新しいウィンドウで開く。
+                HandleOpenRequest();
                 break;
             case "open-path":
                 if (root.TryGetProperty("path", out JsonElement openPathProp))
@@ -267,7 +268,8 @@ internal sealed class MainForm : Form
                 ShowSettingsDialog();
                 break;
             case "new":
-                _ = HandleNewRequestAsync();
+                // 現在のウィンドウの内容には触れず、新しいウィンドウで空の文書を開く。
+                _requestNewWindow?.Invoke(null);
                 break;
             case "new-window":
                 _requestNewWindow?.Invoke(null);
@@ -305,24 +307,16 @@ internal sealed class MainForm : Form
         }
     }
 
-    private async Task HandleNewRequestAsync()
-    {
-        if (!await ConfirmDiscardDirtyAsync()) return;
-        OpenNewDocument();
-    }
-
-    private async Task HandleOpenRequestAsync()
-    {
-        if (!await ConfirmDiscardDirtyAsync()) return;
-        HandleOpenRequest();
-    }
-
     private async Task HandleOpenPathRequestAsync(string path)
     {
         if (!await ConfirmDiscardDirtyAsync()) return;
         OpenFile(path);
     }
 
+    /// <summary>
+    /// File &gt; 開く。選ばれたファイルは現在のウィンドウを置き換えず、新しいウィンドウで開く
+    /// (仕様書外・ユーザー要望: 新規作成・開くは常に別ウィンドウ)。
+    /// </summary>
     private void HandleOpenRequest()
     {
         using var dialog = new OpenFileDialog
@@ -331,7 +325,7 @@ internal sealed class MainForm : Form
         };
         if (dialog.ShowDialog(this) == DialogResult.OK)
         {
-            OpenFile(dialog.FileName);
+            _requestNewWindow?.Invoke(dialog.FileName);
         }
     }
 
