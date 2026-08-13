@@ -350,6 +350,9 @@ internal sealed class MainForm : Form
             case "open-devtools":
                 _webView.CoreWebView2.OpenDevToolsWindow();
                 break;
+            case "open-default-apps-settings":
+                OpenDefaultAppsSettings();
+                break;
             case "export":
                 _ = HandleExportRequestAsync(root);
                 break;
@@ -1183,6 +1186,7 @@ internal sealed class MainForm : Form
             autoPairing = settings.AutoPairing,
             showWordCount = settings.ShowWordCount,
             editorFontFamily = settings.EditorFontFamily,
+            editorMonospaceFontFamily = settings.EditorMonospaceFontFamily,
             customCssPath = settings.CustomCssPath,
             customCss = ReadCustomCss(settings.CustomCssPath),
             lightTheme = settings.LightTheme,
@@ -1194,6 +1198,8 @@ internal sealed class MainForm : Form
             // 拡張子ごとの既定モード上書き・ファイル単位の手動モード記憶(仕様書 第1章)。
             fileModeOverrides = settings.FileModeOverrides,
             perFileModes = settings.PerFileModes,
+            // 編集モードの自動判定設定。"off"|"suggest"|"standard"|"aggressive"。
+            autoDetectMode = settings.AutoDetectMode,
         });
     }
 
@@ -1264,6 +1270,7 @@ internal sealed class MainForm : Form
             darkTheme = settings.DarkTheme,
             customCssPath = settings.CustomCssPath,
             editorFontFamily = settings.EditorFontFamily,
+            editorMonospaceFontFamily = settings.EditorMonospaceFontFamily,
             showWordCount = settings.ShowWordCount,
             keyBindings = settings.KeyBindings,
             defaultEncoding = settings.DefaultEncoding,
@@ -1271,6 +1278,13 @@ internal sealed class MainForm : Form
             pandocAvailable = DetectPandocAvailable(),
             // 拡張子ごとの既定モード上書き(仕様書 第1章)。設定画面での編集対象。
             fileModeOverrides = settings.FileModeOverrides,
+            // 編集モードの自動判定設定。"off"|"suggest"|"standard"|"aggressive"。
+            autoDetectMode = settings.AutoDetectMode,
+            // インストール済みフォント一覧(設定画面のフォント選択ドロップダウン用)。
+            // 数百件になりうるため、設定画面を開いたとき(get-settings)にのみ送る
+            // (全ウィンドウへ毎回配信するapply-settingsには含めない)。
+            installedFonts = FontService.AllFamilies,
+            monospaceFonts = FontService.MonospaceFamilies,
         });
     }
 
@@ -1301,6 +1315,9 @@ internal sealed class MainForm : Form
         if (TryGetBool(s, "inlineMathEnabled", out bool inlineMathEnabled)) settings.InlineMathEnabled = inlineMathEnabled;
         if (TryGetBool(s, "mathAutoNumberEnabled", out bool mathAutoNumberEnabled)) settings.MathAutoNumberEnabled = mathAutoNumberEnabled;
         if (TryGetString(s, "defaultCopyFormat", out string defaultCopyFormat)) settings.DefaultCopyFormat = defaultCopyFormat;
+        // AppSettings.AutoDetectMode のsetterが不正値を"standard"へ正規化するため、ここでは
+        // 受け取った文字列をそのまま代入すればよい。
+        if (TryGetString(s, "autoDetectMode", out string autoDetectMode)) settings.AutoDetectMode = autoDetectMode;
         if (TryGetString(s, "theme", out string theme) && theme is "light" or "dark" or "system") settings.Theme = theme;
         if (TryGetInt(s, "editorFontSize", out int editorFontSize) && editorFontSize is >= 8 and <= 40) settings.EditorFontSize = editorFontSize;
         if (TryGetBool(s, "strictMode", out bool strictMode)) settings.StrictMode = strictMode;
@@ -1315,6 +1332,10 @@ internal sealed class MainForm : Form
         if (s.TryGetProperty("editorFontFamily", out JsonElement fontFamilyProp))
         {
             settings.EditorFontFamily = fontFamilyProp.ValueKind == JsonValueKind.String ? fontFamilyProp.GetString() : null;
+        }
+        if (s.TryGetProperty("editorMonospaceFontFamily", out JsonElement monoFontFamilyProp))
+        {
+            settings.EditorMonospaceFontFamily = monoFontFamilyProp.ValueKind == JsonValueKind.String ? monoFontFamilyProp.GetString() : null;
         }
         if (TryGetBool(s, "showWordCount", out bool showWordCount)) settings.ShowWordCount = showWordCount;
         if (s.TryGetProperty("keyBindings", out JsonElement keyBindingsProp) && keyBindingsProp.ValueKind == JsonValueKind.Object)
@@ -1357,6 +1378,12 @@ internal sealed class MainForm : Form
         // 例外はここで握りつぶさずログへ残し、JS側へも結果を通知する(呼び出し元がエラー表示できるように)。
         string? errorMessage = null;
 
+        // Windowsの「既定のアプリ」(UserChoice)で他アプリが選ばれている拡張子。レジストリ登録自体が
+        // 成功しても、エクスプローラーのアイコンとダブルクリック時の起動先はそちらが優先される。
+        // UserChoiceはハッシュ保護されておりアプリ側から書き換えるべきではないため、
+        // 設定画面で手動設定を案内できるようJS側へ返す。
+        IReadOnlyList<string> blockedExtensions = Array.Empty<string>();
+
         if (desiredExtensions is not null)
         {
             try
@@ -1364,6 +1391,7 @@ internal sealed class MainForm : Form
                 FileAssociationService.Apply(desiredExtensions, previousExtensions);
                 settings.AssociatedExtensions = desiredExtensions;
                 settings.FileAssociationEnabled = desiredExtensions.Count > 0;
+                blockedExtensions = FileAssociationService.FindExtensionsBlockedByUserChoice(desiredExtensions);
             }
             catch (Exception ex)
             {
@@ -1388,11 +1416,35 @@ internal sealed class MainForm : Form
         }
 
         SettingsService.Save(settings);
-        PostToWeb(new { type = "save-settings-result", ok = errorMessage is null, error = errorMessage });
+        PostToWeb(new
+        {
+            type = "save-settings-result",
+            ok = errorMessage is null,
+            error = errorMessage,
+            blockedExtensions,
+        });
 
         // 設定はアプリ全体で共有されるため、自分のウィンドウだけでなく他のウィンドウにも反映する。
         if (_requestBroadcastSettings is not null) _requestBroadcastSettings(this);
         else PostCapabilities();
+    }
+
+    /// <summary>
+    /// Windowsの「既定のアプリ」設定画面を開く(仕様書 C-13の補助)。
+    /// UserChoiceで他アプリが既定になっている拡張子は、アプリ側からは変更できず
+    /// ユーザーがここで手動選択するしかないため、設定画面から誘導できるようにする。
+    /// </summary>
+    private static void OpenDefaultAppsSettings()
+    {
+        try
+        {
+            using var proc = Process.Start(new ProcessStartInfo("ms-settings:defaultapps") { UseShellExecute = true });
+            Logger.Write("Windowsの「既定のアプリ」設定画面を開いた");
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException("「既定のアプリ」設定画面を開けなかった", ex);
+        }
     }
 
     /// <summary>PerFileModes(ファイル単位の手動モード記憶)の最大件数。超過分は古いものから捨てる。</summary>

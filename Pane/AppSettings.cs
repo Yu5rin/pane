@@ -143,4 +143,21 @@ internal sealed class AppSettings
     /// 最大100件、超過分は古いものから捨てる(MainForm側で挿入順を保って管理する)。
     /// </summary>
     public Dictionary<string, string> PerFileModes { get; set; } = new();
+
+    private string _autoDetectMode = "standard";
+
+    /// <summary>
+    /// 編集モードの自動判定設定。"off" | "suggest" | "standard" | "aggressive" の4値。
+    /// これ以外の値(設定ファイルの破損・旧バージョンとの非互換等)は"standard"として扱う。
+    /// setterで正規化するため、JSONからの読み込み時(System.Text.Jsonはpublicなsetterを
+    /// 経由してデシリアライズする)・save-settings受信時のいずれで代入されても正規化される。
+    /// </summary>
+    public string AutoDetectMode
+    {
+        get => _autoDetectMode;
+        set => _autoDetectMode = value is "off" or "suggest" or "standard" or "aggressive" ? value : "standard";
+    }
+
+    /// <summary>等幅/コード用フォント(本文フォントとは別枠)。既定null(未指定)。</summary>
+    public string? EditorMonospaceFontFamily { get; set; }
 }
