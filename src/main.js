@@ -926,6 +926,14 @@ async function handleHostMessage(msg) {
       host.style.fontFamily = ""; // 旧実装のインラインスタイルが残っていたら外す
       applyFontSetting(rootStyle, "--editor-font-body", msg.editorFontFamily, "本文フォント");
       applyFontSetting(rootStyle, "--editor-font-mono", msg.editorMonospaceFontFamily, "等幅フォント");
+      // 本文の最大幅(0=テーマ既定)と行の高さ(仕様書 C-08)。style.css側が
+      // --editor-max-width / --editor-line-height を参照する。
+      const maxWidth = Number(msg.editorMaxWidthPx);
+      if (Number.isFinite(maxWidth) && maxWidth > 0) rootStyle.setProperty("--editor-max-width", `${maxWidth}px`);
+      else rootStyle.removeProperty("--editor-max-width");
+      const lineHeight = Number(msg.editorLineHeight);
+      if (Number.isFinite(lineHeight) && lineHeight > 0) rootStyle.setProperty("--editor-line-height", String(lineHeight));
+      else rootStyle.removeProperty("--editor-line-height");
       // カスタムCSS(仕様書 第2.10節 C-07)。C#側がファイル内容を読み込んで文字列として送ってくる
       // (file://は仮想ホスト配下から読めないため)。<head>内の専用<style>要素のtextContentへ
       // 反映する(innerHTMLは使わない)。要素が無ければここで生成する。
