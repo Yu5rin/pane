@@ -1,10 +1,16 @@
 // 設定画面(仕様書 第2.10節 C-01〜C-14)。
 // 製品相当のサイドバー形式(左: カテゴリ一覧、右: 設定項目)のモーダルオーバーレイを
-// HTML側だけで組み立てる。C#側のブリッジは実装済みで、使うメッセージは以下の4つだけ:
+// HTML側だけで組み立てる。C#側のブリッジは実装済みで、使うメッセージは以下の4つ:
 //   送信 { type: "get-settings" }                         → 受信 { type: "settings", ...全項目... }
-//   送信 { type: "save-settings", settings: {...全項目...} } → 受信 { type: "save-settings-result", ok, error }
+//   送信 { type: "save-settings", settings: {...全項目...} } → 受信 { type: "save-settings-result", ok, error, blockedExtensions? }
 // 上記2つの受信メッセージはmain.js側のhandleHostMessageから
 // handleSettingsLoaded(msg) / handleSaveResult(msg) として本モジュールへ渡してもらう想定。
+// これに加えて「参照…」ボタン用の { type: "browse-path-result", field, path } は、main.js側の
+// ルーティングを待たずに済むよう、本モジュール自身がctx.bridgeへ直接addEventListenerして拾う
+// (WebView2のaddEventListenerは複数リスナーを許すため、main.js側の唯一のリスナーと共存できる)。
+//
+// 設定キー・型・既定値・カテゴリ分けは docs/設定項目一覧.md を正とする。本ファイルの
+// FIELD_DEFS はその表をそのままJSの形にしたもので、キー名を変えたり値を増やしたりしない。
 //
 // createSettings(ctx) の戻り値: { open(category), close(), isOpen(), handleSettingsLoaded, handleSaveResult }
 // ctxに期待するもの:
@@ -20,55 +26,218 @@ import { DEFAULT_FONT_SIZE } from "./editor.js";
 const ICON_ATTRS = 'viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"';
 const ICON_CLOSE = `<svg ${ICON_ATTRS}><path d="M6 6l12 12M18 6 6 18"/></svg>`;
 const ICON_GENERAL = `<svg ${ICON_ATTRS}><circle cx="12" cy="12" r="3"/><path d="M19.4 13a7.5 7.5 0 0 0 0-2l1.9-1.4-2-3.4-2.2.6a7.6 7.6 0 0 0-1.7-1L14.9 3.5h-4l-.5 2.3a7.6 7.6 0 0 0-1.7 1l-2.2-.6-2 3.4L6.4 11a7.5 7.5 0 0 0 0 2l-1.9 1.4 2 3.4 2.2-.6a7.6 7.6 0 0 0 1.7 1l.5 2.3h4l.5-2.3a7.6 7.6 0 0 0 1.7-1l2.2.6 2-3.4z"/></svg>`;
+const ICON_FILE = `<svg ${ICON_ATTRS}><path d="M6 3h9l4 4v14H6z"/><path d="M15 3v4h4"/><path d="M9 21v-6h6v6"/></svg>`;
 const ICON_EDIT = `<svg ${ICON_ATTRS}><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>`;
 const ICON_MARKDOWN = `<svg ${ICON_ATTRS}><path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/></svg>`;
+const ICON_IMAGE = `<svg ${ICON_ATTRS}><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M21 16.5 15.5 11 6 20"/></svg>`;
+const ICON_EXPORT = `<svg ${ICON_ATTRS}><path d="M6 9V4h9l3 3v2"/><rect x="3.5" y="9" width="17" height="7.5" rx="1"/><path d="M7.5 20.5h9v-4h-9z"/></svg>`;
 const ICON_APPEARANCE = `<svg ${ICON_ATTRS}><path d="M12 3a9 9 0 1 0 0 18c1.4 0 2-1 2-2s-.4-1.5-.9-2-.2-2 1-2H16a4 4 0 0 0 4-4c0-4.4-3.6-8-8-8Z"/><circle cx="7.5" cy="10.5" r="1"/><circle cx="10.5" cy="7" r="1"/><circle cx="15" cy="8" r="1"/><circle cx="16.5" cy="12" r="1"/></svg>`;
 const ICON_FILETYPES = `<svg ${ICON_ATTRS}><path d="M9 15l6-6"/><path d="M10 6l.7-.7a4 4 0 1 1 5.7 5.7l-.7.7"/><path d="M14 18l-.7.7a4 4 0 1 1-5.7-5.7l.7-.7"/></svg>`;
 const ICON_KEYBOARD = `<svg ${ICON_ATTRS}><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.01M9.5 10h.01M13 10h.01M16.5 10h.01M6 14h12"/></svg>`;
+const ICON_ADVANCED = `<svg ${ICON_ATTRS}><path d="M4 6h9M17 6h3M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="15" cy="6" r="2"/><circle cx="8" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>`;
 const ICON_CHEVRON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>';
+const ICON_SEARCH = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>';
 
 // 編集モードの自動判定(仕様: C#側AppSettings.AutoDetectModeと同じ4値、既定はstandard)。
 const AUTO_DETECT_MODES = ["off", "suggest", "standard", "aggressive"];
 
+// ---- 左サイドバーのカテゴリ(仕様書の指定どおり10カテゴリ、この並び順) ----
 const NAV_ITEMS = [
   { id: "general", label: "一般", icon: ICON_GENERAL },
+  { id: "file", label: "ファイル", icon: ICON_FILE },
   { id: "edit", label: "編集", icon: ICON_EDIT },
-  { id: "markdown", label: "マークダウン", icon: ICON_MARKDOWN },
+  { id: "markdown", label: "Markdown", icon: ICON_MARKDOWN },
+  { id: "image", label: "画像", icon: ICON_IMAGE },
+  { id: "export", label: "エクスポート・印刷", icon: ICON_EXPORT },
   { id: "appearance", label: "外観", icon: ICON_APPEARANCE },
   { id: "fileTypes", label: "ファイルの関連付け", icon: ICON_FILETYPES },
-  { id: "keybindings", label: "キーボード", icon: ICON_KEYBOARD },
+  { id: "keyboard", label: "キーボード", icon: ICON_KEYBOARD },
+  { id: "advanced", label: "詳細", icon: ICON_ADVANCED },
 ];
 
-// ブリッジが無い(ブラウザ単体)場合や、get-settingsの応答が届く前に使う初期値。
-// C#側AppSettingsの既定値(Pane/SettingsService.cs)とおおむね揃えている。
+// ---- 検索欄用の索引(カテゴリID → そのカテゴリ内に出てくる語)。厳密な自動生成はせず、
+// 各カテゴリの見出し・項目ラベルを手で列挙する(項目を増やしたときはここにも追記すること)。----
+const SEARCH_INDEX = {
+  general: ["起動時の動作", "前回開いていたファイルを復元", "何も開かない", "指定したフォルダを開く", "起動フォルダ", "最後のウィンドウを閉じたら終了", "常駐", "起動を速く", "ステータスバー", "アウトライン", "折りたたみ", "最近使ったファイル", "ホイールで拡大縮小", "表示形式", "ウィンドウ形式", "タブ形式"],
+  file: ["自動保存", "保存の間隔", "未保存の下書き", "復元", "ファイル切替", "文字コード", "エンコード", "改行コード", "既定の拡張子"],
+  edit: ["インデント幅", "コードブロック", "折り返し", "Shift", "Tab", "自動ペアリング", "括弧", "引用符", "絵文字", "自動補完", "生表示", "コピー形式", "行コピー", "タイプライター", "スペルチェック", "自動修正", "読了時間", "読了速度", "自動判定", "拡張子ごとの編集モード"],
+  markdown: ["インライン数式", "数式", "上付き", "下付き", "ハイライト", "作図", "ダイアグラム", "自動リンク", "Callouts", "厳格モード", "見出しの記法", "箇条書き", "リスト記号", "番号付きリスト", "行番号", "自動採番", "アウトラインの階層", "コード言語", "空白", "改行", "スマート引用符", "スマートダッシュ", "句読点"],
+  image: ["画像の挿入", "画像フォルダ", "ローカル画像", "オンライン画像", "相対パス", "URLエスケープ"],
+  export: ["用紙サイズ", "余白", "マージン", "ヘッダー", "フッター", "ページ区切り", "アウトライン", "書き出し先フォルダ", "書き出し後", "保存ダイアログ", "数式の書き出し", "YAML", "フロントマター", "印刷"],
+  appearance: ["テーマ", "ライトテーマ", "ダークテーマ", "本文フォント", "等幅フォント", "フォント", "文字サイズ", "行の高さ", "行間", "最大幅", "文字数カウント", "カスタムCSS"],
+  fileTypes: ["拡張子", "関連付け", "エクスプローラー", "新規作成メニュー", "既定のアプリ"],
+  keyboard: ["キーバインド", "ショートカット", "キー割り当て"],
+  advanced: ["デバッグ", "隠しファイル", "除外パターン", "設定ファイルの場所", "既定に戻す", "リセット", "履歴を消去", "編集モードの記憶", "既定のアプリ設定"],
+};
+
+// ---- 設定項目のスキーマ(docs/設定項目一覧.mdをそのままJSにしたもの) ----
+// kind: "bool" | "number" | "enum" | "string" | "nullableString"
+// number は min/max(資料に範囲が明記されている項目のみ)、values(離散値、セレクトで扱う)、
+// step(既定1)を持てる。nullableString は空文字を保存時にnullへ変換する(string?型の項目)。
+const FIELD_DEFS = {
+  // ---- 一般 ----
+  startupBehavior: { kind: "enum", values: ["blank", "restoreSession", "customFolder"], def: "blank" },
+  startupFolderPath: { kind: "nullableString", def: "" },
+  quitOnLastWindowClosed: { kind: "bool", def: true },
+  preloadOnStartup: { kind: "bool", def: false },
+  showStatusBar: { kind: "bool", def: true },
+  showOutlineByDefault: { kind: "bool", def: false },
+  collapsibleOutline: { kind: "bool", def: true },
+  recordRecentFiles: { kind: "bool", def: true },
+  zoomWithCtrlWheel: { kind: "bool", def: true },
+  displayMode: { kind: "enum", values: ["window", "tab"], def: "window" },
+
+  // ---- ファイル(保存と復元) ----
+  autoSaveEnabled: { kind: "bool", def: true },
+  autoSaveIntervalSeconds: { kind: "number", def: 30, min: 5, max: 600 },
+  recoverUnsavedDrafts: { kind: "bool", def: true },
+  saveWithoutAskingOnSwitch: { kind: "bool", def: false },
+  defaultEncoding: { kind: "enum", values: ["utf8", "utf8bom", "shiftjis", "utf16le"], def: "utf8" },
+  defaultLineEnding: { kind: "enum", values: ["crlf", "lf"], def: "crlf" },
+  defaultFileExtension: { kind: "string", def: "md" },
+
+  // ---- 編集 ----
+  indentSizeOnSave: { kind: "number", def: 4, values: [2, 4, 8] },
+  codeIndentSize: { kind: "number", def: 4, values: [2, 4, 8] },
+  codeAutoWrap: { kind: "bool", def: true },
+  shiftTabAutoIndent: { kind: "bool", def: false },
+  autoPairing: { kind: "bool", def: true },
+  autoPairMarkdown: { kind: "bool", def: true },
+  emojiAutocomplete: { kind: "enum", values: ["off", "esc", "auto"], def: "auto" },
+  liveRenderingShowSourceOnFocus: { kind: "bool", def: true },
+  defaultCopyFormat: { kind: "enum", values: ["markdown", "html"], def: "markdown" },
+  copyWholeLineWhenNoSelection: { kind: "bool", def: true },
+  typewriterKeepCaretCentered: { kind: "bool", def: true },
+  spellCheckEnabled: { kind: "bool", def: false },
+  spellCheckAutoCorrect: { kind: "bool", def: false },
+  readingSpeedWpm: { kind: "number", def: 0, min: 0, max: 2000 },
+  autoDetectMode: { kind: "enum", values: AUTO_DETECT_MODES, def: "standard" },
+
+  // ---- Markdown: 記法サポート ----
+  inlineMathEnabled: { kind: "bool", def: false },
+  codeBlockMathEnabled: { kind: "bool", def: false },
+  superSubscriptEnabled: { kind: "bool", def: true },
+  highlightEnabled: { kind: "bool", def: true },
+  diagramsEnabled: { kind: "bool", def: true },
+  autoLinksEnabled: { kind: "bool", def: true },
+  calloutsEnabled: { kind: "bool", def: true },
+  // ---- Markdown: 記法の書き方 ----
+  strictMode: { kind: "bool", def: false },
+  headingStyle: { kind: "enum", values: ["atx", "setext"], def: "atx" },
+  unorderedListMarker: { kind: "enum", values: ["-", "*", "+"], def: "-" },
+  orderedListMarker: { kind: "enum", values: [".", ")"], def: "." },
+  codeBlockLineNumbers: { kind: "bool", def: true },
+  mathAutoNumber: { kind: "enum", values: ["off", "ams", "all"], def: "off" },
+  chapterLevelInOutline: { kind: "number", def: 6, min: 1, max: 6 },
+  defaultCodeLanguage: { kind: "string", def: "" },
+  defaultCodeLanguageApplyWhen: { kind: "enum", values: ["markdown", "menubar", "both"], def: "menubar" },
+  // ---- Markdown: 空白と改行 ----
+  whitespaceWhenWriting: { kind: "enum", values: ["preserve", "ignore"], def: "preserve" },
+  whitespaceOnExport: { kind: "enum", values: ["preserve", "ignore"], def: "ignore" },
+  // ---- Markdown: スマート置換 ----
+  smartQuotes: { kind: "enum", values: ["off", "input", "render"], def: "off" },
+  smartDashes: { kind: "enum", values: ["off", "endash", "emdash"], def: "off" },
+  recognizeUnicodePunctuation: { kind: "bool", def: false },
+
+  // ---- 画像 ----
+  imageInsertAction: { kind: "enum", values: ["none", "currentFolder", "assets", "filenameAssets", "custom"], def: "none" },
+  imageCustomFolder: { kind: "string", def: "" },
+  imageApplyToLocal: { kind: "bool", def: true },
+  imageApplyToOnline: { kind: "bool", def: false },
+  imagePreferRelativePath: { kind: "bool", def: true },
+  imageAddDotSlash: { kind: "bool", def: false },
+  imageAutoEscapeUrl: { kind: "bool", def: true },
+
+  // ---- エクスポート・印刷 ----
+  exportPaperSize: { kind: "enum", values: ["a4", "a3", "b5", "letter", "legal", "tabloid", "custom"], def: "a4" },
+  exportCustomWidthMm: { kind: "number", def: 210, min: 10, max: 2000 },
+  exportCustomHeightMm: { kind: "number", def: 297, min: 10, max: 2000 },
+  exportOrientation: { kind: "enum", values: ["portrait", "landscape"], def: "portrait" },
+  exportMarginTopMm: { kind: "number", def: 20, min: 0, max: 300 },
+  exportMarginBottomMm: { kind: "number", def: 20, min: 0, max: 300 },
+  exportMarginLeftMm: { kind: "number", def: 20, min: 0, max: 300 },
+  exportMarginRightMm: { kind: "number", def: 20, min: 0, max: 300 },
+  exportHeaderText: { kind: "string", def: "" },
+  exportFooterText: { kind: "string", def: "" },
+  exportPageBreakBetweenTopHeadings: { kind: "bool", def: false },
+  exportIncludeOutline: { kind: "bool", def: false },
+  exportOutlineWidthPx: { kind: "number", def: 260, min: 100, max: 800 },
+  exportAppendHead: { kind: "string", def: "" },
+  exportAppendBody: { kind: "string", def: "" },
+  exportDefaultFolder: { kind: "enum", values: ["sameAsFile", "custom"], def: "sameAsFile" },
+  exportCustomFolder: { kind: "string", def: "" },
+  exportAfter: { kind: "enum", values: ["none", "openFile", "openFolder"], def: "none" },
+  exportShowSaveDialog: { kind: "bool", def: true },
+  exportMathAs: { kind: "enum", values: ["svg", "latex"], def: "svg" },
+  exportReadYamlFrontMatter: { kind: "bool", def: true },
+
+  // ---- 外観 ----
+  theme: { kind: "enum", values: ["light", "dark", "system"], def: "system" },
+  lightTheme: { kind: "enum", values: ["default", "sepia", "github", "solarized-light"], def: "default" },
+  darkTheme: { kind: "enum", values: ["default", "nord", "dracula", "solarized-dark"], def: "default" },
+  useSeparateThemeInDarkMode: { kind: "bool", def: true },
+  customCssPath: { kind: "nullableString", def: "" },
+  editorFontFamily: { kind: "nullableString", def: "" },
+  editorMonospaceFontFamily: { kind: "nullableString", def: "" },
+  editorFontSize: { kind: "number", def: DEFAULT_FONT_SIZE, min: 8, max: 72 },
+  editorLineHeight: { kind: "number", def: 1.85, min: 1.0, max: 3.0, step: 0.05 },
+  editorMaxWidthPx: { kind: "number", def: 0, min: 0, max: 5000 },
+  showWordCount: { kind: "bool", def: true },
+
+  // ---- ファイルの関連付け ----
+  explorerNewMenuEnabled: { kind: "bool", def: false },
+
+  // ---- 詳細 ----
+  enableDebug: { kind: "bool", def: false },
+  showHiddenFilesInTree: { kind: "bool", def: false },
+};
+
+function coerceIncoming(def, raw) {
+  switch (def.kind) {
+    case "bool": return typeof raw === "boolean" ? raw : def.def;
+    case "number": return Number.isFinite(raw) ? raw : def.def;
+    case "enum": return def.values.includes(raw) ? raw : def.def;
+    case "string": return typeof raw === "string" ? raw : def.def;
+    case "nullableString": return typeof raw === "string" ? raw : def.def; // nullはdef("")へ
+    default: return def.def;
+  }
+}
+
+function coerceOutgoing(def, val) {
+  switch (def.kind) {
+    case "bool": return !!val;
+    case "number": {
+      let n = Number(val);
+      if (!Number.isFinite(n)) n = def.def;
+      if (Array.isArray(def.values)) {
+        // 離散値(2|4|8など): 一致しなければ最も近い値へ丸める
+        if (!def.values.includes(n)) n = def.values.reduce((a, b) => (Math.abs(b - n) < Math.abs(a - n) ? b : a), def.values[0]);
+      } else {
+        if (Number.isFinite(def.min)) n = Math.max(def.min, n);
+        if (Number.isFinite(def.max)) n = Math.min(def.max, n);
+      }
+      return n;
+    }
+    case "enum": return def.values.includes(val) ? val : def.def;
+    case "string": return typeof val === "string" ? val : def.def;
+    case "nullableString": return val ? val : null;
+    default: return val;
+  }
+}
+
+// scalar項目(FIELD_DEFS)+ 複合項目(オブジェクト・配列)の両方を含む既定値。
+// ブリッジが無い(ブラウザ単体)場合や、get-settingsの応答が届く前に使う。
 const DEFAULTS = {
-  displayMode: "window",
-  startupBehavior: "restoreSession",
-  associatedExtensions: [],
-  preloadOnStartup: false,
-  calloutsEnabled: true,
-  superSubscriptEnabled: true,
-  highlightEnabled: true,
-  inlineMathEnabled: true,
-  mathAutoNumberEnabled: false,
-  defaultCopyFormat: "markdown",
-  theme: "system",
-  lightTheme: "default",
-  darkTheme: "default",
-  editorFontSize: DEFAULT_FONT_SIZE,
-  strictMode: false,
-  codeBlockLineNumbers: true,
-  autoPairing: true,
-  customCssPath: "",
-  editorFontFamily: "",
-  editorMonospaceFontFamily: "",
-  autoDetectMode: "standard",
-  showWordCount: true,
+  ...Object.fromEntries(Object.entries(FIELD_DEFS).map(([k, d]) => [k, d.def])),
   keyBindings: {},
-  defaultEncoding: "utf8",
-  defaultLineEnding: "crlf",
-  pandocAvailable: false,
+  associatedExtensions: [],
   fileModeOverrides: {},
+  fileTreePatterns: [],
+  perFileModes: {},
+  installedFonts: [],
+  monospaceFonts: [],
+  pandocAvailable: false,
+  settingsFilePath: "",
 };
 
 function clone(value) {
@@ -99,16 +268,118 @@ function comboFromEvent(e) {
   return parts.join("+");
 }
 
+// ---- 汎用のHTML断片組み立てヘルパー ----
+// wireCommonFields(data-field方式)にそのまま乗るマークアップを返すだけの関数群。
+// 「新しいクラスは本当に必要なときだけ」の方針に従い、既存の
+// settings-checkbox-row/settings-select-row/settings-text-row/settings-field-descを使い回す。
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function fieldCheckbox(key, title, desc) {
+  return `<label class="settings-checkbox-row"><input type="checkbox" data-field="${key}"><span class="settings-checkbox-title">${title}${desc ? `<span class="settings-field-desc">${desc}</span>` : ""}</span></label>`;
+}
+function fieldSelect(key, label, options, desc) {
+  const opts = options.map(([v, t]) => `<option value="${escapeHtml(v)}">${escapeHtml(t)}</option>`).join("");
+  return `<label class="settings-select-row">${label}
+      <select data-field="${key}">${opts}</select>
+      ${desc ? `<span class="settings-field-desc">${desc}</span>` : ""}
+    </label>`;
+}
+// indentSizeOnSave/codeIndentSizeのような離散数値(2|4|8)をセレクトで扱う。
+// data-numericを付け、wireCommonFields側でNumber変換させる。
+function fieldNumericSelect(key, label, desc) {
+  const def = FIELD_DEFS[key];
+  const opts = def.values.map((v) => `<option value="${v}">${v}</option>`).join("");
+  return `<label class="settings-select-row">${label}
+      <select data-field="${key}" data-numeric>${opts}</select>
+      ${desc ? `<span class="settings-field-desc">${desc}</span>` : ""}
+    </label>`;
+}
+function fieldNumber(key, label, desc) {
+  const def = FIELD_DEFS[key] ?? {};
+  const attrs = [];
+  if (Number.isFinite(def.min)) attrs.push(`min="${def.min}"`);
+  if (Number.isFinite(def.max)) attrs.push(`max="${def.max}"`);
+  attrs.push(`step="${def.step ?? 1}"`);
+  return `<label class="settings-text-row">${label}
+      <input type="number" data-field="${key}" ${attrs.join(" ")}>
+      ${desc ? `<span class="settings-field-desc">${desc}</span>` : ""}
+    </label>`;
+}
+function fieldText(key, label, placeholder, desc) {
+  return `<label class="settings-text-row">${label}
+      <input type="text" data-field="${key}" placeholder="${escapeHtml(placeholder || "")}">
+      ${desc ? `<span class="settings-field-desc">${desc}</span>` : ""}
+    </label>`;
+}
+function fieldTextarea(key, label, desc, opts) {
+  const lines = opts && opts.lines;
+  const rows = (opts && opts.rows) || 3;
+  return `<label class="settings-text-row">${label}
+      <textarea data-field="${key}"${lines ? " data-lines" : ""} rows="${rows}"></textarea>
+      ${desc ? `<span class="settings-field-desc">${desc}</span>` : ""}
+    </label>`;
+}
+// フォルダ・ファイルパスを選ぶ項目(startupFolderPath/imageCustomFolder/exportCustomFolder/
+// customCssPath)。テキスト入力+「参照…」ボタン。ボタンはbridgeへbrowse-pathを送るだけで、
+// 返信(browse-path-result)が来なくても崩れない(ブリッジが無ければボタン自体を無効化する)。
+function fieldPath(ctx, key, kind, label, placeholder, desc) {
+  const disabledAttr = ctx.bridge ? "" : " disabled";
+  return `<label class="settings-path-row">${label}
+      <span class="settings-path-input-row">
+        <input type="text" data-field="${key}" placeholder="${escapeHtml(placeholder || "")}">
+        <button type="button" class="btn tiny settings-path-browse-btn" data-browse-field="${key}" data-browse-kind="${kind}"${disabledAttr}>参照…</button>
+      </span>
+      ${desc ? `<span class="settings-field-desc">${desc}</span>` : ""}
+    </label>`;
+}
+
+const REPLACEMENT_TOKENS_DESC = "使える置換文字列: <code>{title}</code> <code>{page}</code> <code>{pages}</code> <code>{date}</code> <code>{time}</code> <code>{path}</code>";
+
 export function createSettings(ctx) {
   let overlay = null;
   let navEl = null;
   let contentEl = null;
   let msgEl = null;
   let saveBtn = null;
+  let searchInput = null;
 
   let draft = null; // 編集中の値。get-settingsの応答(またはDEFAULTS)から作る作業コピー
   let dirty = false; // 未保存の変更があるか(閉じる際の確認に使う)
   let activeCategory = "general";
+  let searchQuery = ""; // 上部の検索欄の入力値(カテゴリ絞り込み用)
+
+  // ---- 起動後の先読みキャッシュ(パフォーマンス対策 a) ----
+  // 起動直後の空き時間にget-settingsを送っておき、応答(生のmsg)をここへ保持する。
+  // open()時にこれがあれば、C#側の往復を待たずに即座に描画できる。
+  // 実測(計測1: get-settings送信〜settings応答受信)では、この往復がopen()の遅さの
+  // 支配的要因だった(DOM構築自体は最も重い「ファイルの関連付け」カテゴリでも10ms未満)。
+  let settingsCache = null;
+  let prefetchPending = false;
+
+  // 空き時間に処理を回すためのヘルパー。requestIdleCallback非対応環境(古いWebView2ランタイム等)
+  // ではsetTimeoutにフォールバックする。いずれにせよ起動直後の同期処理(main.js側の初期化)を
+  // 邪魔しないよう、呼び出し元は常にこれ経由でスケジュールする。
+  function idleSchedule(fn) {
+    if (typeof requestIdleCallback === "function") requestIdleCallback(fn, { timeout: 2000 });
+    else setTimeout(fn, 300);
+  }
+
+  // 空き時間にget-settingsを先送りしてキャッシュを温めておく。open()中(既にモーダルが
+  // 開いている間)はopen()自身が最新を取りに行くため、ここでは何もしない。
+  function schedulePrefetch() {
+    if (!ctx.bridge || prefetchPending) return;
+    prefetchPending = true;
+    idleSchedule(() => {
+      prefetchPending = false;
+      if (overlay) return;
+      ctx.bridge.postMessage({ type: "get-settings" });
+    });
+  }
+
+  // 「ファイルの関連付け」カテゴリで表示する警告(save-settings-resultのblockedExtensions)。
+  // 保存操作をまたいでも(モーダルを閉じるまで)表示し続けるため、draftとは別に保持する。
+  let blockedExtensions = [];
 
   // ファイルの関連付けタブの状態。draftが差し替わるたび(handleSettingsLoaded/open)に
   // selectedExtensionsだけ作り直す。開閉状態(expanded*)はタブを行き来しても保持したいので
@@ -131,6 +402,30 @@ export function createSettings(ctx) {
   let capturingCommandId = null;
   let activeCaptureCleanup = null; // タブ切替・保存・閉じる際に捕捉を強制終了させるための解除関数
   let captureRejectMessage = null; // 割り当て不可なキーを押した際、捕捉を続けたまま表示する案内文
+
+  // 「参照…」ボタンの返信(browse-path-result)を、main.js側のルーティングに頼らず自前で拾う。
+  // WebView2のaddEventListenerは複数リスナーの登録を許すため、main.js側の唯一のリスナーとは
+  // 独立に動作できる(C#側が未実装で返信が来なくても、ここには何も届かないだけで壊れない)。
+  if (ctx.bridge) {
+    ctx.bridge.addEventListener("message", (e) => {
+      const msg = e && e.data;
+      if (!msg) return;
+      if (msg.type === "browse-path-result") { handleBrowsePathResult(msg); return; }
+      // apply-settings(仕様書 第2.10節): 他ウィンドウでの変更や保存直後の再配布で届く。
+      // main.js側は自分の初期化用にこれを処理するだけで本モジュールへは回してくれないため、
+      // browse-path-resultと同じ仕組みで直接拾う。先読みキャッシュはもう古いかもしれないので
+      // 無効化し、次の空き時間に取り直す(モーダルが開いていればopen()が既に最新を追っている)。
+      if (msg.type === "apply-settings") {
+        settingsCache = null;
+        schedulePrefetch();
+      }
+    });
+  }
+
+  // 起動後の空き時間に先読みを1回仕掛けておく(open()が呼ばれる前に済ませておきたいため、
+  // モジュール初期化時に無条件でスケジュールする)。
+  schedulePrefetch();
+  window.__paneSettingsDebug = { getCache: () => settingsCache, getPrefetchPending: () => prefetchPending };
 
   function isOpen() {
     return !!overlay;
@@ -161,6 +456,10 @@ export function createSettings(ctx) {
           <div class="settings-modal-title">設定</div>
           <button type="button" class="settings-modal-close" aria-label="閉じる">${ICON_CLOSE}</button>
         </div>
+        <div class="settings-search-row">
+          ${ICON_SEARCH}
+          <input type="search" class="settings-search-input" placeholder="設定を検索…" aria-label="設定を検索">
+        </div>
         <div class="settings-modal-body">
           <nav class="settings-nav"></nav>
           <div class="settings-content"></div>
@@ -178,9 +477,11 @@ export function createSettings(ctx) {
     contentEl = overlay.querySelector(".settings-content");
     msgEl = overlay.querySelector(".settings-modal-msg");
     saveBtn = overlay.querySelector('[data-act="save"]');
+    searchInput = overlay.querySelector(".settings-search-input");
     overlay.querySelector(".settings-modal-close").addEventListener("click", requestClose);
     overlay.querySelector('[data-act="cancel"]').addEventListener("click", requestClose);
     saveBtn.addEventListener("click", save);
+    searchInput.addEventListener("input", onSearchInput);
     // 背景(オーバーレイ自身)をクリックした場合も閉じる(仕様書内の他オーバーレイと同様の慣習)。
     overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) requestClose(); });
     document.addEventListener("keydown", onDocumentKeydown, true);
@@ -191,9 +492,11 @@ export function createSettings(ctx) {
     document.removeEventListener("keydown", onDocumentKeydown, true);
     overlay?.remove();
     overlay = null;
-    navEl = contentEl = msgEl = saveBtn = null;
+    navEl = contentEl = msgEl = saveBtn = searchInput = null;
     draft = null;
     dirty = false;
+    searchQuery = "";
+    blockedExtensions = [];
   }
 
   // Escapeで閉じる(仕様書)。キーバインド捕捉中はそちらを優先させ(行側のリスナーが処理する)、
@@ -220,9 +523,18 @@ export function createSettings(ctx) {
     buildShell();
     renderNav(); // カテゴリ一覧自体はdraft(get-settingsの応答)を待たずに出せる
     if (ctx.bridge) {
-      draft = null;
-      contentEl.innerHTML = '<div class="settings-loading">読み込んでいます…</div>';
+      // 開いたときは常に最新を取りに行く(先読みキャッシュが古い可能性・他ウィンドウでの
+      // 変更に備えるため)。ただし応答を待たずに済むよう、キャッシュがあれば先にそれで
+      // 描画してしまい、応答が届いたらhandleSettingsLoadedが(触られていなければ)差分を
+      // 反映する。
       ctx.bridge.postMessage({ type: "get-settings" });
+      console.log("DEBUG open() settingsCache?", !!settingsCache);
+      if (settingsCache) {
+        applyLoadedSettings(settingsCache);
+      } else {
+        draft = null;
+        contentEl.innerHTML = '<div class="settings-loading">読み込んでいます…</div>';
+      }
     } else {
       draft = clone(DEFAULTS);
       selectedExtensions = new Set(draft.associatedExtensions);
@@ -231,47 +543,46 @@ export function createSettings(ctx) {
     }
   }
 
-  // main.jsのhandleHostMessageから"settings"受信時に呼ばれる。
-  function handleSettingsLoaded(msg) {
-    if (!overlay || draft) return; // 開いていない/既に読み込み済みなら無視(二重適用を避ける)
-    draft = {
-      displayMode: msg.displayMode ?? DEFAULTS.displayMode,
-      startupBehavior: msg.startupBehavior ?? DEFAULTS.startupBehavior,
-      preloadOnStartup: !!msg.preloadOnStartup,
-      calloutsEnabled: msg.calloutsEnabled ?? DEFAULTS.calloutsEnabled,
-      superSubscriptEnabled: msg.superSubscriptEnabled ?? DEFAULTS.superSubscriptEnabled,
-      highlightEnabled: msg.highlightEnabled ?? DEFAULTS.highlightEnabled,
-      inlineMathEnabled: msg.inlineMathEnabled ?? DEFAULTS.inlineMathEnabled,
-      mathAutoNumberEnabled: msg.mathAutoNumberEnabled ?? DEFAULTS.mathAutoNumberEnabled,
-      defaultCopyFormat: msg.defaultCopyFormat ?? DEFAULTS.defaultCopyFormat,
-      theme: msg.theme ?? DEFAULTS.theme,
-      lightTheme: msg.lightTheme ?? DEFAULTS.lightTheme,
-      darkTheme: msg.darkTheme ?? DEFAULTS.darkTheme,
-      editorFontSize: Number.isFinite(msg.editorFontSize) ? msg.editorFontSize : DEFAULTS.editorFontSize,
-      strictMode: !!msg.strictMode,
-      codeBlockLineNumbers: msg.codeBlockLineNumbers ?? DEFAULTS.codeBlockLineNumbers,
-      autoPairing: msg.autoPairing ?? DEFAULTS.autoPairing,
-      customCssPath: msg.customCssPath ?? "",
-      editorFontFamily: msg.editorFontFamily ?? "",
-      editorMonospaceFontFamily: msg.editorMonospaceFontFamily ?? "",
-      autoDetectMode: AUTO_DETECT_MODES.includes(msg.autoDetectMode) ? msg.autoDetectMode : DEFAULTS.autoDetectMode,
-      showWordCount: msg.showWordCount ?? DEFAULTS.showWordCount,
-      keyBindings: msg.keyBindings ? { ...msg.keyBindings } : {},
-      defaultEncoding: msg.defaultEncoding ?? DEFAULTS.defaultEncoding,
-      defaultLineEnding: msg.defaultLineEnding ?? DEFAULTS.defaultLineEnding,
-      associatedExtensions: Array.isArray(msg.associatedExtensions) ? msg.associatedExtensions.slice() : [],
-      pandocAvailable: !!msg.pandocAvailable,
-      fileModeOverrides: msg.fileModeOverrides && typeof msg.fileModeOverrides === "object" ? { ...msg.fileModeOverrides } : {},
-      // 保存対象ではない(表示にのみ使う)。C#側から届かない/空の場合はフォント選択欄が
-      // テキスト入力にフォールバックする(renderFontField参照)。
-      installedFonts: Array.isArray(msg.installedFonts) ? msg.installedFonts.slice() : [],
-      monospaceFonts: Array.isArray(msg.monospaceFonts) ? msg.monospaceFonts.slice() : [],
-    };
+  // get-settings応答(またはキャッシュされた同形式のmsg)からdraftを組み立て、
+  // 開いている画面へ反映する。open()の即時描画(キャッシュから)とhandleSettingsLoaded
+  // (応答受信時)の両方から呼ばれる共通処理。
+  function applyLoadedSettings(msg) {
+    draft = {};
+    for (const [key, def] of Object.entries(FIELD_DEFS)) {
+      draft[key] = coerceIncoming(def, msg[key]);
+    }
+    // 複合項目(オブジェクト・配列)はFIELD_DEFSの外で個別に扱う。
+    draft.keyBindings = msg.keyBindings ? { ...msg.keyBindings } : {};
+    draft.associatedExtensions = Array.isArray(msg.associatedExtensions) ? msg.associatedExtensions.slice() : [];
+    draft.fileModeOverrides = msg.fileModeOverrides && typeof msg.fileModeOverrides === "object" ? { ...msg.fileModeOverrides } : {};
+    draft.fileTreePatterns = Array.isArray(msg.fileTreePatterns) ? msg.fileTreePatterns.slice() : [];
+    // perFileModes: 資料の指示どおりUIには出さない。読み込んだ値をそのまま保存時に送り返すだけ。
+    draft.perFileModes = msg.perFileModes && typeof msg.perFileModes === "object" ? { ...msg.perFileModes } : {};
+    // 保存対象ではない(表示にのみ使う)。
+    draft.installedFonts = Array.isArray(msg.installedFonts) ? msg.installedFonts.slice() : [];
+    draft.monospaceFonts = Array.isArray(msg.monospaceFonts) ? msg.monospaceFonts.slice() : [];
+    draft.pandocAvailable = !!msg.pandocAvailable;
+    draft.settingsFilePath = typeof msg.settingsFilePath === "string" ? msg.settingsFilePath : "";
+
     selectedExtensions = new Set(draft.associatedExtensions);
     fmRows = buildFmRows(draft.fileModeOverrides);
+    blockedExtensions = [];
     dirty = false;
     renderNav();
     renderContent();
+  }
+
+  // main.jsのhandleHostMessageから"settings"受信時に呼ばれる。開いているかどうかに関わらず
+  // 毎回呼ばれる(起動直後の先読みの応答もここに届く)。
+  function handleSettingsLoaded(msg) {
+    settingsCache = clone(msg); // 次にopen()されたときすぐ描画できるよう常に保持しておく
+    if (!overlay) return; // 開いていなければキャッシュを更新するだけ
+    if (!draft) { applyLoadedSettings(msg); return; } // 読み込み中(ローディング表示)だった
+    // ここに来るのは、open()時にキャッシュから即描画した後、開いたときに送り直した
+    // get-settingsの応答が届いた場合。ユーザーが既に何か触っていたら上書きしない
+    // (安全側に倒す。「まだ何も触っていない場合のみ反映する」)。
+    if (dirty) return;
+    applyLoadedSettings(msg);
   }
 
   // fileModeOverrides({拡張子: モード})→ 編集用の行配列に変換する。
@@ -280,34 +591,16 @@ export function createSettings(ctx) {
   }
 
   function buildSavePayload() {
-    return {
-      displayMode: draft.displayMode,
-      startupBehavior: draft.startupBehavior,
-      preloadOnStartup: draft.preloadOnStartup,
-      calloutsEnabled: draft.calloutsEnabled,
-      superSubscriptEnabled: draft.superSubscriptEnabled,
-      highlightEnabled: draft.highlightEnabled,
-      inlineMathEnabled: draft.inlineMathEnabled,
-      mathAutoNumberEnabled: draft.mathAutoNumberEnabled,
-      defaultCopyFormat: draft.defaultCopyFormat,
-      theme: draft.theme,
-      lightTheme: draft.lightTheme,
-      darkTheme: draft.darkTheme,
-      editorFontSize: draft.editorFontSize,
-      strictMode: draft.strictMode,
-      codeBlockLineNumbers: draft.codeBlockLineNumbers,
-      autoPairing: draft.autoPairing,
-      customCssPath: draft.customCssPath ? draft.customCssPath : null,
-      editorFontFamily: draft.editorFontFamily ? draft.editorFontFamily : null,
-      editorMonospaceFontFamily: draft.editorMonospaceFontFamily ? draft.editorMonospaceFontFamily : null,
-      autoDetectMode: draft.autoDetectMode,
-      showWordCount: draft.showWordCount,
-      keyBindings: draft.keyBindings,
-      defaultEncoding: draft.defaultEncoding,
-      defaultLineEnding: draft.defaultLineEnding,
-      associatedExtensions: Array.from(selectedExtensions),
-      fileModeOverrides: buildFileModeOverrides(),
-    };
+    const payload = {};
+    for (const [key, def] of Object.entries(FIELD_DEFS)) {
+      payload[key] = coerceOutgoing(def, draft[key]);
+    }
+    payload.keyBindings = draft.keyBindings;
+    payload.associatedExtensions = Array.from(selectedExtensions);
+    payload.fileModeOverrides = buildFileModeOverrides();
+    payload.fileTreePatterns = (draft.fileTreePatterns ?? []).slice();
+    payload.perFileModes = draft.perFileModes ?? {};
+    return payload;
   }
 
   // fmRows(入力途中の状態を含む行配列)→ 保存用の{拡張子: モード}に正規化する。
@@ -343,19 +636,63 @@ export function createSettings(ctx) {
   function handleSaveResult(msg) {
     if (!overlay) return;
     if (saveBtn) saveBtn.disabled = false;
-    if (msg.ok) {
-      dirty = false;
-      destroy();
-    } else {
+    if (!msg.ok) {
       setMessage(msg.error || "設定を保存できませんでした。", true);
+      return;
     }
+    dirty = false;
+    if (Array.isArray(msg.blockedExtensions) && msg.blockedExtensions.length) {
+      // 一部の拡張子はWindows側の「既定のアプリ」で他アプリが選ばれているため反映されなかった。
+      // 「ファイルの関連付け」カテゴリに警告を出したいので、モーダルは閉じずに残す。
+      blockedExtensions = msg.blockedExtensions.slice();
+      setMessage("設定を保存しました。一部の拡張子の関連付けは変更されていません。", false);
+      renderContent();
+      return;
+    }
+    blockedExtensions = [];
+    destroy();
+  }
+
+  // 「参照…」ボタンの応答。draftの該当キーへ入れ、そのフィールドが今表示中なら入力欄にも反映する。
+  function handleBrowsePathResult(msg) {
+    if (!draft) return;
+    const field = msg.field;
+    if (typeof field !== "string" || !(field in draft || field in FIELD_DEFS)) return;
+    draft[field] = msg.path ?? "";
+    markDirty();
+    const input = contentEl?.querySelector(`input[type="text"][data-field="${field}"]`);
+    if (input) input.value = draft[field] ?? "";
+  }
+
+  // ---- 検索欄(上部、全カテゴリ横断) ----
+  function onSearchInput() {
+    searchQuery = searchInput.value.trim();
+    renderNav();
+    const visible = visibleCategoryIds();
+    if (visible.length && !visible.includes(activeCategory)) {
+      activeCategory = visible[0];
+      renderContent();
+    }
+  }
+  function visibleCategoryIds() {
+    if (!searchQuery) return NAV_ITEMS.map((i) => i.id);
+    const q = searchQuery.toLowerCase();
+    return NAV_ITEMS.filter((item) => {
+      if (item.label.toLowerCase().includes(q)) return true;
+      const idx = SEARCH_INDEX[item.id] || [];
+      return idx.some((s) => s.toLowerCase().includes(q));
+    }).map((i) => i.id);
   }
 
   // ---- ナビゲーション(左のカテゴリ一覧) ----
   function renderNav() {
-    navEl.innerHTML = NAV_ITEMS.map((item) =>
-      `<button type="button" class="settings-nav-item${item.id === activeCategory ? " active" : ""}" data-cat="${item.id}">${item.icon}<span>${item.label}</span></button>`
-    ).join("");
+    const visible = new Set(visibleCategoryIds());
+    const items = NAV_ITEMS.filter((item) => visible.has(item.id));
+    navEl.innerHTML = items.length
+      ? items.map((item) =>
+          `<button type="button" class="settings-nav-item${item.id === activeCategory ? " active" : ""}" data-cat="${item.id}">${item.icon}<span>${item.label}</span></button>`
+        ).join("")
+      : '<div class="settings-nav-empty">一致する項目がありません</div>';
     for (const btn of navEl.querySelectorAll("[data-cat]")) {
       btn.addEventListener("click", () => {
         if (btn.dataset.cat === activeCategory) return;
@@ -368,9 +705,9 @@ export function createSettings(ctx) {
 
   // ---- 右側(設定項目)の共通ヘルパー ----
   // ラジオ(name属性でグループ化。nameがそのままdraftのキー)・チェックボックス・セレクト・
-  // テキスト/数値入力のうち、data-field(またはラジオはname)属性が付いた要素をまとめて
-  // draftへ双方向で結びつける。「一般」「編集」「マークダウン」「外観」の4カテゴリはこれだけで
-  // 済むため、カテゴリごとの個別配線コードを持たずに済ませる。
+  // テキスト/数値/複数行入力のうち、data-field(またはラジオはname)属性が付いた要素をまとめて
+  // draftへ双方向で結びつける。ほとんどのカテゴリはこれだけで済むため、カテゴリごとの
+  // 個別配線コードを持たずに済ませる。
   function wireCommonFields(container) {
     const radioNames = new Set(Array.from(container.querySelectorAll('input[type="radio"][name]')).map((r) => r.name));
     for (const name of radioNames) {
@@ -386,28 +723,62 @@ export function createSettings(ctx) {
     }
     for (const sel of container.querySelectorAll("select[data-field]")) {
       const key = sel.dataset.field;
-      sel.value = draft[key];
-      sel.addEventListener("change", () => { draft[key] = sel.value; markDirty(); });
+      const numeric = sel.hasAttribute("data-numeric");
+      sel.value = numeric ? String(draft[key]) : (draft[key] ?? "");
+      sel.addEventListener("change", () => {
+        draft[key] = numeric ? Number(sel.value) : sel.value;
+        markDirty();
+      });
     }
     for (const inp of container.querySelectorAll('input[type="text"][data-field]')) {
       const key = inp.dataset.field;
       inp.value = draft[key] ?? "";
       inp.addEventListener("input", () => { draft[key] = inp.value; markDirty(); });
     }
-    // 数値入力(文字サイズ)は打鍵のたびではなく確定時(change=blur/Enter)にだけ範囲を丸める
+    // 数値入力は打鍵のたびではなく確定時(change=blur/Enter)にだけ範囲を丸める
     // (入力途中の値をその都度clampすると桁を打っている最中に値が飛んで打ちにくくなるため)。
+    // step指定(小数、例: 行の高さ)がある場合は整数丸めではなくstep単位で丸める。
     for (const inp of container.querySelectorAll('input[type="number"][data-field]')) {
       const key = inp.dataset.field;
       inp.value = draft[key] ?? "";
       inp.addEventListener("change", () => {
-        let n = Math.round(Number(inp.value));
+        let n = Number(inp.value);
         if (!Number.isFinite(n)) n = DEFAULTS[key];
+        const step = Number(inp.step);
+        if (Number.isFinite(step) && step > 0 && step !== 1) {
+          n = Math.round(n / step) * step;
+          const decimals = (String(step).split(".")[1] || "").length;
+          n = Number(n.toFixed(decimals));
+        } else {
+          n = Math.round(n);
+        }
         const min = Number(inp.min), max = Number(inp.max);
         if (Number.isFinite(min)) n = Math.max(min, n);
         if (Number.isFinite(max)) n = Math.min(max, n);
         inp.value = n;
         draft[key] = n;
         markDirty();
+      });
+    }
+    // 複数行入力: data-linesが無ければ生文字列(exportAppendHead等)、あれば改行区切りの
+    // 配列(fileTreePatterns)として扱う。
+    for (const ta of container.querySelectorAll("textarea[data-field]")) {
+      const key = ta.dataset.field;
+      const lines = ta.hasAttribute("data-lines");
+      ta.value = lines ? (Array.isArray(draft[key]) ? draft[key].join("\n") : "") : (draft[key] ?? "");
+      ta.addEventListener("input", () => {
+        draft[key] = lines ? ta.value.split("\n").map((s) => s.trim()).filter(Boolean) : ta.value;
+        markDirty();
+      });
+    }
+  }
+
+  // 「参照…」ボタン。押すとbrowse-pathを送るだけ(結果はhandleBrowsePathResultで受ける)。
+  function wireBrowseButtons(container) {
+    for (const btn of container.querySelectorAll("[data-browse-field]")) {
+      btn.addEventListener("click", () => {
+        if (!ctx.bridge) return;
+        ctx.bridge.postMessage({ type: "browse-path", field: btn.dataset.browseField, kind: btn.dataset.browseKind });
       });
     }
   }
@@ -419,6 +790,8 @@ export function createSettings(ctx) {
         <div class="settings-group-title">起動時の動作</div>
         <label class="settings-radio"><input type="radio" name="startupBehavior" value="restoreSession"><span>前回開いていたファイルを復元する</span></label>
         <label class="settings-radio"><input type="radio" name="startupBehavior" value="blank"><span>何も開かない</span></label>
+        <label class="settings-radio"><input type="radio" name="startupBehavior" value="customFolder"><span>指定したフォルダを開く</span></label>
+        ${fieldPath(ctx, "startupFolderPath", "folder", "起動時に開くフォルダ", "(未設定)")}
       </div>
       <div class="settings-group">
         <div class="settings-group-title">表示形式</div>
@@ -426,7 +799,32 @@ export function createSettings(ctx) {
         <label class="settings-radio settings-radio-disabled"><input type="radio" name="displayMode" value="tab" disabled><span>タブ形式<span class="settings-badge">準備中</span></span></label>
       </div>
       <div class="settings-group">
-        <label class="settings-checkbox-row"><input type="checkbox" data-field="preloadOnStartup"><span class="settings-checkbox-title">PCの起動時に常駐して起動を速くする</span></label>
+        ${fieldCheckbox("quitOnLastWindowClosed", "最後のウィンドウを閉じたら終了する")}
+        ${fieldCheckbox("preloadOnStartup", "PCの起動時に常駐して起動を速くする")}
+        ${fieldCheckbox("showStatusBar", "ステータスバーを表示する")}
+        ${fieldCheckbox("showOutlineByDefault", "アウトラインを既定で表示する")}
+        ${fieldCheckbox("collapsibleOutline", "アウトラインの見出しを折りたためるようにする")}
+        ${fieldCheckbox("recordRecentFiles", "最近使ったファイルを記録する")}
+        ${fieldCheckbox("zoomWithCtrlWheel", "Ctrl+マウスホイールで文字サイズを拡大縮小する")}
+      </div>`;
+    wireCommonFields(el);
+    wireBrowseButtons(el);
+  }
+
+  function renderFile(el) {
+    el.innerHTML = `
+      <div class="settings-group">
+        <div class="settings-group-title">自動保存</div>
+        ${fieldCheckbox("autoSaveEnabled", "自動保存を有効にする")}
+        ${fieldNumber("autoSaveIntervalSeconds", "自動保存の間隔(秒)")}
+        ${fieldCheckbox("recoverUnsavedDrafts", "未保存の下書きを次回起動時に復元する")}
+        ${fieldCheckbox("saveWithoutAskingOnSwitch", "サイドバーからファイルを切り替えるとき、確認せずに保存する")}
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title">保存形式の既定値</div>
+        ${fieldSelect("defaultEncoding", "既定の文字コード", [["utf8", "UTF-8"], ["utf8bom", "UTF-8 (BOM付き)"], ["shiftjis", "Shift_JIS"], ["utf16le", "UTF-16 LE"]])}
+        ${fieldSelect("defaultLineEnding", "既定の改行コード", [["crlf", "CRLF"], ["lf", "LF"]])}
+        ${fieldText("defaultFileExtension", "既定の拡張子", "md", "ドットは付けずに入力します(例: md)")}
       </div>`;
     wireCommonFields(el);
   }
@@ -434,26 +832,21 @@ export function createSettings(ctx) {
   function renderEdit(el) {
     el.innerHTML = `
       <div class="settings-group">
-        <label class="settings-checkbox-row"><input type="checkbox" data-field="autoPairing"><span class="settings-checkbox-title">自動ペアリング<span class="settings-field-desc">括弧・引用符を入力すると自動的に閉じます</span></span></label>
-        <label class="settings-checkbox-row"><input type="checkbox" data-field="strictMode"><span class="settings-checkbox-title">厳格モード<span class="settings-field-desc">見出しやリスト記号の記法を厳密に解釈します</span></span></label>
+        ${fieldNumericSelect("indentSizeOnSave", "引用・リストのインデント幅")}
+        ${fieldNumericSelect("codeIndentSize", "コードブロックのインデント幅")}
+        ${fieldCheckbox("codeAutoWrap", "コードブロックの長い行を折り返す")}
+        ${fieldCheckbox("shiftTabAutoIndent", "Shift+Tabでインデントを解除する")}
       </div>
       <div class="settings-group">
-        <label class="settings-select-row">既定の文字コード
-          <select data-field="defaultEncoding">
-            <option value="utf8">UTF-8</option>
-            <option value="utf8bom">UTF-8 (BOM付き)</option>
-            <option value="utf16le">UTF-16 LE</option>
-            <option value="utf16be">UTF-16 BE</option>
-            <option value="shiftjis">Shift_JIS</option>
-          </select>
-        </label>
-        <label class="settings-select-row">既定の改行コード
-          <select data-field="defaultLineEnding">
-            <option value="crlf">CRLF</option>
-            <option value="lf">LF</option>
-            <option value="cr">CR</option>
-          </select>
-        </label>
+        <label class="settings-checkbox-row"><input type="checkbox" data-field="autoPairing"><span class="settings-checkbox-title">自動ペアリング<span class="settings-field-desc">括弧・引用符を入力すると自動的に閉じます</span></span></label>
+        ${fieldCheckbox("autoPairMarkdown", "Markdown記法の自動ペアリング", "例: <code>**</code> <code>_</code> などを自動的に閉じます")}
+        <label class="settings-checkbox-row"><input type="checkbox" data-field="strictMode"><span class="settings-checkbox-title">厳格モード<span class="settings-field-desc">見出しやリスト記号の記法を厳密に解釈します</span></span></label>
+        ${fieldCheckbox("liveRenderingShowSourceOnFocus", "カーソル行の記法を生表示する")}
+        ${fieldCheckbox("copyWholeLineWhenNoSelection", "選択が無いときはCtrl+C/Xで行全体をコピーする")}
+        ${fieldCheckbox("typewriterKeepCaretCentered", "タイプライターモード(カーソル行を画面中央に保つ)")}
+      </div>
+      <div class="settings-group">
+        ${fieldSelect("emojiAutocomplete", "絵文字の自動補完", [["off", "オフ"], ["esc", "Escで確定"], ["auto", "自動確定"]])}
         <label class="settings-select-row">コピー形式
           <select data-field="defaultCopyFormat">
             <option value="markdown">マークダウン</option>
@@ -461,6 +854,11 @@ export function createSettings(ctx) {
           </select>
           <span class="settings-field-desc">他アプリへ貼り付けるときに書式を保つか</span>
         </label>
+        ${fieldNumber("readingSpeedWpm", "読了速度(分あたりの文字数)", "0を指定すると自動計算します")}
+      </div>
+      <div class="settings-group">
+        ${fieldCheckbox("spellCheckEnabled", "スペルチェックを有効にする")}
+        ${fieldCheckbox("spellCheckAutoCorrect", "スペルチェックの自動修正を有効にする")}
       </div>
       <div class="settings-group">
         <div class="settings-group-title">編集モードの自動判定</div>
@@ -473,7 +871,7 @@ export function createSettings(ctx) {
       <div class="settings-group">
         <div class="settings-group-title">拡張子ごとの編集モード</div>
         <p class="settings-intro">通常は拡張子から自動で判断します。ここに登録した拡張子だけ、指定したモードで開きます。</p>
-        <div class="fm-list"></div>
+        <div class="fm-list" data-field="fileModeOverrides"></div>
         <button type="button" class="btn tiny fm-add">+ 追加</button>
       </div>`;
     wireCommonFields(el);
@@ -549,14 +947,96 @@ export function createSettings(ctx) {
   function renderMarkdownCategory(el) {
     el.innerHTML = `
       <div class="settings-group">
+        <div class="settings-group-title">記法サポート</div>
         <label class="settings-checkbox-row"><input type="checkbox" data-field="calloutsEnabled"><span class="settings-checkbox-title">Callouts<span class="settings-field-desc">例: <code>&gt; [!NOTE]</code></span></span></label>
         <label class="settings-checkbox-row"><input type="checkbox" data-field="superSubscriptEnabled"><span class="settings-checkbox-title">上付き・下付き<span class="settings-field-desc">例: <code>x^2^</code>、<code>H~2~O</code></span></span></label>
         <label class="settings-checkbox-row"><input type="checkbox" data-field="highlightEnabled"><span class="settings-checkbox-title">ハイライト<span class="settings-field-desc">例: <code>==ハイライト==</code></span></span></label>
         <label class="settings-checkbox-row"><input type="checkbox" data-field="inlineMathEnabled"><span class="settings-checkbox-title">インライン数式<span class="settings-field-desc">例: <code>$E=mc^2$</code></span></span></label>
-        <label class="settings-checkbox-row"><input type="checkbox" data-field="mathAutoNumberEnabled"><span class="settings-checkbox-title">数式の自動採番<span class="settings-field-desc">数式ブロック(<code>$$...$$</code>)に通し番号を振ります</span></span></label>
+        ${fieldCheckbox("codeBlockMathEnabled", "コードブロック内の数式記法")}
+        ${fieldCheckbox("diagramsEnabled", "作図(Mermaidなどのダイアグラム)")}
+        ${fieldCheckbox("autoLinksEnabled", "URLの自動リンク化")}
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title">記法の書き方</div>
+        <label class="settings-checkbox-row"><input type="checkbox" data-field="strictMode"><span class="settings-checkbox-title">厳格モード(再掲)<span class="settings-field-desc">「編集」カテゴリと同じ項目です</span></span></label>
+        ${fieldSelect("headingStyle", "見出しの記法", [["atx", "ATX形式(# 見出し)"], ["setext", "Setext形式(下線)"]])}
+        ${fieldSelect("unorderedListMarker", "箇条書きの記号", [["-", "-"], ["*", "*"], ["+", "+"]])}
+        ${fieldSelect("orderedListMarker", "番号付きリストの記号", [[".", "1."], [")", "1)"]])}
         <label class="settings-checkbox-row"><input type="checkbox" data-field="codeBlockLineNumbers"><span class="settings-checkbox-title">コードブロックの行番号<span class="settings-field-desc">フェンス付きコードブロックの左に行番号を表示します</span></span></label>
+        ${fieldSelect("mathAutoNumber", "数式の自動採番", [["off", "しない"], ["ams", "amsmath形式のみ"], ["all", "すべて"]])}
+        ${fieldNumber("chapterLevelInOutline", "アウトラインに含める見出しの階層")}
+        ${fieldText("defaultCodeLanguage", "既定のコード言語", "(なし)", "コードブロックを挿入するときの既定の言語ID")}
+        ${fieldSelect("defaultCodeLanguageApplyWhen", "既定のコード言語を適用する場面", [["markdown", "```のみ入力したとき"], ["menubar", "メニューバーから挿入したとき"], ["both", "どちらも"]])}
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title">空白と改行</div>
+        ${fieldSelect("whitespaceWhenWriting", "編集中の空白の扱い", [["preserve", "そのまま保持"], ["ignore", "余分な空白を無視"]])}
+        ${fieldSelect("whitespaceOnExport", "書き出し時の空白の扱い", [["preserve", "そのまま保持"], ["ignore", "余分な空白を無視"]])}
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title">スマート置換</div>
+        ${fieldSelect("smartQuotes", "スマート引用符", [["off", "オフ"], ["input", "入力時に変換"], ["render", "表示時のみ変換"]])}
+        ${fieldSelect("smartDashes", "スマートダッシュ", [["off", "オフ"], ["endash", "-- を – に変換"], ["emdash", "-- を — に変換"]])}
+        ${fieldCheckbox("recognizeUnicodePunctuation", "全角句読点をMarkdown記法として認識する")}
       </div>`;
     wireCommonFields(el);
+  }
+
+  function renderImage(el) {
+    el.innerHTML = `
+      <div class="settings-group">
+        ${fieldSelect("imageInsertAction", "画像を挿入したときの動作", [["none", "何もしない"], ["currentFolder", "現在のフォルダにコピー"], ["assets", "assetsフォルダにコピー"], ["filenameAssets", "ファイル名.assetsフォルダにコピー"], ["custom", "指定したフォルダにコピー"]])}
+        ${fieldPath(ctx, "imageCustomFolder", "folder", "画像のコピー先フォルダ", "./assets", "<code>./</code> <code>../</code> で始まる相対パスか絶対パス。<code>${filename}</code>は現在のファイル名(拡張子なし)に展開します")}
+        ${fieldCheckbox("imageApplyToLocal", "ローカルの画像に適用する")}
+        ${fieldCheckbox("imageApplyToOnline", "オンライン(URL)の画像にも適用する")}
+        ${fieldCheckbox("imagePreferRelativePath", "できるだけ相対パスで記述する")}
+        ${fieldCheckbox("imageAddDotSlash", "相対パスの先頭に ./ を付ける")}
+        ${fieldCheckbox("imageAutoEscapeUrl", "画像URLの空白などを自動的にエスケープする")}
+      </div>`;
+    wireCommonFields(el);
+    wireBrowseButtons(el);
+  }
+
+  function renderExport(el) {
+    el.innerHTML = `
+      <div class="settings-group">
+        <div class="settings-group-title">用紙</div>
+        ${fieldSelect("exportPaperSize", "用紙サイズ", [["a4", "A4"], ["a3", "A3"], ["b5", "B5"], ["letter", "Letter"], ["legal", "Legal"], ["tabloid", "Tabloid"], ["custom", "カスタム"]])}
+        ${fieldNumber("exportCustomWidthMm", "カスタム用紙の幅(mm)")}
+        ${fieldNumber("exportCustomHeightMm", "カスタム用紙の高さ(mm)")}
+        ${fieldSelect("exportOrientation", "向き", [["portrait", "縦"], ["landscape", "横"]])}
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title">余白(mm)</div>
+        ${fieldNumber("exportMarginTopMm", "上")}
+        ${fieldNumber("exportMarginBottomMm", "下")}
+        ${fieldNumber("exportMarginLeftMm", "左")}
+        ${fieldNumber("exportMarginRightMm", "右")}
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title">ヘッダー・フッター</div>
+        ${fieldText("exportHeaderText", "ヘッダー", "", REPLACEMENT_TOKENS_DESC)}
+        ${fieldText("exportFooterText", "フッター", "", REPLACEMENT_TOKENS_DESC)}
+        ${fieldCheckbox("exportPageBreakBetweenTopHeadings", "最上位見出しの前でページを区切る")}
+        ${fieldCheckbox("exportIncludeOutline", "アウトラインを含める")}
+        ${fieldNumber("exportOutlineWidthPx", "アウトラインの幅(px)")}
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title">出力への追加(上級者向け)</div>
+        ${fieldTextarea("exportAppendHead", "&lt;head&gt;内に追加するHTML", "書き出したHTMLの&lt;head&gt;末尾にそのまま挿入します")}
+        ${fieldTextarea("exportAppendBody", "&lt;body&gt;内に追加するHTML", "書き出したHTMLの&lt;body&gt;末尾にそのまま挿入します")}
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title">書き出し先・後処理</div>
+        ${fieldSelect("exportDefaultFolder", "書き出し先フォルダ", [["sameAsFile", "ファイルと同じフォルダ"], ["custom", "指定したフォルダ"]])}
+        ${fieldPath(ctx, "exportCustomFolder", "folder", "書き出し先の指定フォルダ", "(未設定)")}
+        ${fieldSelect("exportAfter", "書き出し後の動作", [["none", "何もしない"], ["openFile", "ファイルを開く"], ["openFolder", "フォルダを開く"]])}
+        ${fieldCheckbox("exportShowSaveDialog", "書き出し時に保存ダイアログを表示する")}
+        ${fieldSelect("exportMathAs", "数式の書き出し形式", [["svg", "SVG画像"], ["latex", "LaTeXソース"]])}
+        ${fieldCheckbox("exportReadYamlFrontMatter", "YAMLフロントマターを読み取る")}
+      </div>`;
+    wireCommonFields(el);
+    wireBrowseButtons(el);
   }
 
   // ---- フォント選択欄(本文/等幅)----
@@ -564,9 +1044,6 @@ export function createSettings(ctx) {
   // 従来どおりのテキスト入力にフォールバックする。どちらの場合もdata-field/data-font-preview
   // 属性を付けておき、wireCommonFields(既存の汎用配線)とwireFontPreviews(プレビュー反映)の
   // 両方から同じ要素を扱えるようにする。
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-  }
   function fontOptionHtml(name, selected) {
     const label = escapeHtml(name);
     // CSS文字列(font-family: '...')としてのエスケープ→HTML属性としてのエスケープの順で行う
@@ -622,13 +1099,10 @@ export function createSettings(ctx) {
         <div class="settings-field-desc">プレビュー: <span data-font-preview-target="editorFontFamily" style="font-size: 15px;">あア亜 Aa Bb Cc 0123</span></div>
         ${renderFontField("editorMonospaceFontFamily", draft.monospaceFonts, "等幅フォント", "(既定のフォントを使用)")}
         <div class="settings-field-desc">プレビュー: <span data-font-preview-target="editorMonospaceFontFamily" style="font-size: 15px;">あア亜 Aa Bb Cc 0123</span></div>
-        <label class="settings-text-row">文字サイズ
-          <input type="number" data-field="editorFontSize" min="8" max="40" step="1">
-        </label>
-        <label class="settings-text-row">カスタムCSS
-          <input type="text" data-field="customCssPath" placeholder="(未設定)">
-          <span class="settings-field-desc">指定したCSSファイルを本文に追加で適用します</span>
-        </label>
+        ${fieldNumber("editorFontSize", "文字サイズ")}
+        ${fieldNumber("editorLineHeight", "行の高さ")}
+        ${fieldNumber("editorMaxWidthPx", "本文の最大幅(px)", "0を指定するとテーマの既定値を使います")}
+        ${fieldPath(ctx, "customCssPath", "file", "カスタムCSS", "(未設定)", "指定したCSSファイルを本文に追加で適用します")}
       </div>
       <div class="settings-group">
         <label class="settings-select-row">ライトテーマ
@@ -639,6 +1113,7 @@ export function createSettings(ctx) {
             <option value="solarized-light">Solarized Light</option>
           </select>
         </label>
+        ${fieldCheckbox("useSeparateThemeInDarkMode", "ダークモードでは別のテーマを使う")}
         <label class="settings-select-row">ダークテーマ
           <select data-field="darkTheme">
             <option value="default">標準</option>
@@ -653,6 +1128,7 @@ export function createSettings(ctx) {
       </div>`;
     wireCommonFields(el);
     wireFontPreviews(el);
+    wireBrowseButtons(el);
   }
 
   // ---- ファイルの関連付け(3階層チェックボックス、仕様書 C-13) ----
@@ -690,7 +1166,14 @@ export function createSettings(ctx) {
         </div>`;
     }).join("");
 
+    const blockedBanner = blockedExtensions.length ? `
+      <div class="ft-blocked-warn">
+        <p>次の拡張子はWindowsの「既定のアプリ」で他のアプリが選ばれているため、Paneのアイコン・ダブルクリック時の起動先は変わりません: ${blockedExtensions.map((e) => "." + e).join(" ")}</p>
+        <button type="button" class="btn tiny" data-action="open-default-apps-settings">Windowsの設定を開く</button>
+      </div>` : "";
+
     el.innerHTML = `
+      ${blockedBanner}
       <p class="settings-intro">チェックした拡張子のファイルを、エクスプローラーからダブルクリックしたときにPaneで開くようにします。</p>
       <div class="ft-quickrow">
         <button type="button" class="btn tiny" data-quick="markdown">マークダウンのみ</button>
@@ -698,7 +1181,15 @@ export function createSettings(ctx) {
         <button type="button" class="btn tiny" data-quick="none">すべて解除</button>
         <span class="ft-count"></span>
       </div>
-      <div class="ft-tree">${catBlocks}</div>`;
+      <div class="ft-tree" data-field="associatedExtensions">${catBlocks}</div>
+      <div class="settings-group">
+        ${fieldCheckbox("explorerNewMenuEnabled", "エクスプローラーの右クリック→「新規作成」にMarkdownファイルを追加する")}
+      </div>`;
+
+    wireCommonFields(el);
+
+    const openApps = el.querySelector('[data-action="open-default-apps-settings"]');
+    if (openApps) openApps.addEventListener("click", () => ctx.bridge?.postMessage({ type: "open-default-apps-settings" }));
 
     extInputs = new Map(Array.from(el.querySelectorAll("input[data-ext]")).map((inp) => [inp.dataset.ext, inp]));
     langInputs = new Map(Array.from(el.querySelectorAll("input[data-lang]")).map((inp) => [inp.dataset.lang, inp]));
@@ -794,7 +1285,7 @@ export function createSettings(ctx) {
     const commands = (ctx.commands ?? []).filter((c) => typeof c.run === "function");
     el.innerHTML = `
       <p class="settings-intro">行をクリックしたあと、割り当てたいキーを押してください。Escapeで取り消し、Deleteで既定に戻せます。</p>
-      <div class="kb-table"></div>`;
+      <div class="kb-table" data-field="keyBindings"></div>`;
     renderKeybindingRows(el.querySelector(".kb-table"), commands);
   }
 
@@ -878,16 +1369,95 @@ export function createSettings(ctx) {
     document.addEventListener("keydown", onKeydown, true);
   }
 
+  // ---- 詳細: 値ではなくアクションのボタン ----
+  // 破壊的な操作(設定のリセット・履歴の消去)は、押してすぐには送らず、画面内に収まる
+  // 自前の確認表示(adv-confirm)を挟む。window.confirmは使わない(WebView2でブロックされうるため)。
+  const NON_DESTRUCTIVE_ACTIONS = [
+    { action: "open-settings-file", label: "設定ファイルの場所を開く" },
+    { action: "open-default-apps-settings", label: "Windowsの「既定のアプリ」設定を開く" },
+  ];
+  const DESTRUCTIVE_ACTIONS = [
+    { action: "reset-settings", label: "設定をすべて既定に戻す", confirm: "本当にすべての設定を既定値に戻しますか?この操作は取り消せません。", confirmLabel: "既定に戻す" },
+    { action: "clear-recent-files", label: "最近使ったファイルの履歴を消去", confirm: "最近使ったファイルの履歴をすべて消去しますか?この操作は取り消せません。", confirmLabel: "消去する" },
+    { action: "clear-per-file-modes", label: "ファイル単位の編集モード記憶を消去", confirm: "ファイルごとに記憶した編集モードをすべて消去しますか?この操作は取り消せません。", confirmLabel: "消去する" },
+  ];
+
+  function renderAdvanced(el) {
+    el.innerHTML = `
+      <div class="settings-group">
+        ${fieldCheckbox("enableDebug", "デバッグモード", "開発者向けの詳細ログを有効にします")}
+        ${fieldCheckbox("showHiddenFilesInTree", "隠しファイルをファイルツリーに表示する")}
+      </div>
+      <div class="settings-group">
+        ${fieldTextarea("fileTreePatterns", "ファイルツリーの除外パターン", "1行に1パターン(glob)。<code>!</code>で始めると除外の否定になります。", { lines: true, rows: 4 })}
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title">操作</div>
+        <div class="adv-actions">
+          ${NON_DESTRUCTIVE_ACTIONS.map((a) => `
+            <div class="adv-action-row">
+              <button type="button" class="btn tiny" data-action="${a.action}">${a.label}</button>
+            </div>`).join("")}
+          ${DESTRUCTIVE_ACTIONS.map((a) => `
+            <div class="adv-action-row" data-confirm-row="${a.action}">
+              <button type="button" class="btn tiny danger" data-danger-action="${a.action}">${a.label}</button>
+              <div class="adv-confirm" hidden>
+                <span class="adv-confirm-text">${a.confirm}</span>
+                <button type="button" class="btn tiny danger" data-confirm-yes="${a.action}">${a.confirmLabel}</button>
+                <button type="button" class="btn tiny" data-confirm-no="${a.action}">キャンセル</button>
+              </div>
+            </div>`).join("")}
+        </div>
+        <div class="adv-action-msg" aria-live="polite"></div>
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title">設定ファイル</div>
+        <div class="settings-field-desc">${draft.settingsFilePath ? escapeHtml(draft.settingsFilePath) : "(不明)"}</div>
+      </div>`;
+    wireCommonFields(el);
+    wireAdvancedActions(el);
+  }
+
+  function wireAdvancedActions(el) {
+    const msgEl2 = el.querySelector(".adv-action-msg");
+    const showMsg = (text) => {
+      if (!msgEl2) return;
+      msgEl2.textContent = text;
+      setTimeout(() => { if (msgEl2.isConnected) msgEl2.textContent = ""; }, 2500);
+    };
+    for (const btn of el.querySelectorAll('.adv-action-row > [data-action]')) {
+      btn.addEventListener("click", () => {
+        ctx.bridge?.postMessage({ type: btn.dataset.action });
+        showMsg("実行しました");
+      });
+    }
+    for (const row of el.querySelectorAll("[data-confirm-row]")) {
+      const action = row.dataset.confirmRow;
+      const confirmEl = row.querySelector(".adv-confirm");
+      row.querySelector(`[data-danger-action="${action}"]`).addEventListener("click", () => { confirmEl.hidden = false; });
+      row.querySelector(`[data-confirm-no="${action}"]`).addEventListener("click", () => { confirmEl.hidden = true; });
+      row.querySelector(`[data-confirm-yes="${action}"]`).addEventListener("click", () => {
+        confirmEl.hidden = true;
+        ctx.bridge?.postMessage({ type: action });
+        showMsg("実行しました");
+      });
+    }
+  }
+
   // ---- カテゴリ切替のディスパッチ ----
   function renderContent() {
     if (!contentEl || !draft) return;
     cancelActiveCapture(); // タブを離れる際はキーバインド捕捉待ちを残さない
     switch (activeCategory) {
+      case "file": renderFile(contentEl); break;
       case "edit": renderEdit(contentEl); break;
       case "markdown": renderMarkdownCategory(contentEl); break;
+      case "image": renderImage(contentEl); break;
+      case "export": renderExport(contentEl); break;
       case "appearance": renderAppearance(contentEl); break;
       case "fileTypes": renderFileTypes(contentEl); break;
-      case "keybindings": renderKeybindings(contentEl); break;
+      case "keyboard": renderKeybindings(contentEl); break;
+      case "advanced": renderAdvanced(contentEl); break;
       default: renderGeneral(contentEl); break;
     }
   }

@@ -48,8 +48,19 @@ export function countParagraphs(text) {
 // その中間かつ切りのよい500文字/分を基準に計算する。空白・改行は読む対象ではないため、
 // 空白を除いた文字数を使う。1分未満は「1分未満」と表示する(0分と表示すると誤解を招くため)。
 const READING_CHARS_PER_MINUTE = 500;
-export function estimateReadingTime(charsWithoutSpace) {
-  const minutes = charsWithoutSpace / READING_CHARS_PER_MINUTE;
+
+// 設定 readingSpeedWpm(既定0=自動、設定項目一覧.md「編集」節)。0なら上のREADING_CHARS_PER_MINUTE
+// による自動計算のまま、1以上ならその値(語/分)で計算する。editor.js側のgetDetailedStats()は
+// computeTextStats(text)を引数無しの書式で呼ぶため(editor.jsは編集対象外)、呼び出し側の
+// シグネチャを変えずに反映できるよう、main.jsのapply-settingsからここへ直接設定する
+// モジュール内状態として持つ。
+let configuredWpm = 0;
+export function setReadingSpeedWpm(wpm) {
+  configuredWpm = Number.isFinite(wpm) && wpm >= 1 ? Math.floor(wpm) : 0;
+}
+
+export function estimateReadingTime(charsWithoutSpace, words) {
+  const minutes = configuredWpm > 0 ? words / configuredWpm : charsWithoutSpace / READING_CHARS_PER_MINUTE;
   if (minutes < 1) return "1分未満";
   return `約${Math.ceil(minutes)}分`;
 }
@@ -59,12 +70,13 @@ export function estimateReadingTime(charsWithoutSpace) {
 // ポップアップを開いた瞬間にだけ呼ぶ」という性能方針を徹底すること。
 export function computeTextStats(text) {
   const charsWithoutSpace = text.replace(/\s/g, "").length;
+  const words = countWords(text);
   return {
     charsWithSpace: text.length,
     charsWithoutSpace,
-    words: countWords(text),
+    words,
     lines: text.split("\n").length,
     paragraphs: countParagraphs(text),
-    readingTime: estimateReadingTime(charsWithoutSpace),
+    readingTime: estimateReadingTime(charsWithoutSpace, words),
   };
 }

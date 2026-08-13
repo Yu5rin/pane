@@ -65,7 +65,9 @@ export function buildCommands(ctx) {
     { id: "edit.findNext", menu: "Edit", label: "次を検索", shortcut: "F3", run: () => editor().findNext() },
     { id: "edit.findPrev", menu: "Edit", label: "前を検索", shortcut: "Shift+F3", run: () => editor().findPrevious() },
     { id: "edit.replace", menu: "Edit", label: "置換", shortcut: `${MOD}+H`, run: app((c) => c.actions.openReplace()) },
-    { id: "edit.globalSearch", menu: "Edit", label: "フォルダ内を検索", shortcut: `${MOD}+Shift+F`, run: app((c) => c.actions.openGlobalSearch()) },
+    { id: "edit.globalSearch", menu: "Edit", label: "フォルダ内を検索", shortcut: `${MOD}+Shift+F`, run: app((c) => c.actions.openGlobalSearch()), separatorAfter: true },
+    // 日時の挿入(仕様書 第3章 N-14): Windowsのメモ帳と同じくF5キー、書式は YYYY/MM/DD HH:mm。
+    { id: "edit.insertDateTime", menu: "Edit", label: "日時の挿入", shortcut: "F5", run: app((c) => c.actions.insertDateTime()) },
 
     // ---- Paragraph(第2.3節) ----
     { id: "para.h1", menu: "Paragraph", label: "見出し1", shortcut: `${MOD}+1`, run: () => editor().applyAction("h1") },

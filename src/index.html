@@ -58,7 +58,7 @@
     <button id="status-sidebar" type="button" title="サイドバーの表示切替 (Ctrl+Shift+L)" aria-label="サイドバーの表示切替">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>
     </button>
-    <span id="status-mode">Markdown</span>
+    <button id="status-mode" type="button" title="クリックでコードモードの言語を選択">Markdown</button>
     <span id="status-position">行 1, 列 1</span>
     <span id="status-encoding"></span>
     <span id="status-line-ending"></span>
@@ -67,6 +67,14 @@
     <button id="status-zoom" type="button" title="クリックで実際のサイズに戻す">100%</button>
     <span style="flex:1"></span>
     <button id="btn-settings" type="button" title="設定 (Ctrl+,)">設定</button>
+  </div>
+  <!-- 内容からの編集モード自動判定(仕様書 第1章の拡張)の通知バナー。モーダルにはしない
+       (常時ステータスバー付近に浮かぶだけで、入力の邪魔をしない)。main.jsが表示/文言/
+       ボタンを制御する。 -->
+  <div id="ad-banner" class="ad-banner" hidden>
+    <span id="ad-banner-text"></span>
+    <button id="ad-banner-action" type="button" class="ad-banner-btn ad-banner-action" hidden></button>
+    <button id="ad-banner-close" type="button" class="ad-banner-btn ad-banner-close" title="閉じる" aria-label="閉じる">閉じる</button>
   </div>
   <input id="file-input" type="file" accept=".md,.markdown,.mdown,.txt" hidden>
   <input id="image-input" type="file" accept="image/*" hidden>

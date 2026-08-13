@@ -18,6 +18,10 @@ internal static class SettingsService
 
     private static string SettingsPath => Path.Combine(SettingsDirectory, "settings.json");
 
+    /// <summary>設定ファイルの実際のフルパス。設定画面の「設定ファイルを開く」ボタンや、
+    /// settingsスナップショット(settingsFilePath)から参照する。</summary>
+    public static string SettingsFilePath => SettingsPath;
+
     public static AppSettings Load()
     {
         try

@@ -14,6 +14,17 @@ function headingLevel(nodeName) {
   return Number(nodeName.slice(-1));
 }
 
+// アウトラインパネル(仕様書 chapterLevelInOutline)に出す見出しの最大レベル。
+// サイドバー(src/sidebar.js、編集不可)はextractHeadings(state)を引数無しで直接呼ぶため、
+// ここでの既定値をmain.js側からsetOutlineMaxLevel()で更新することでアウトライン表示だけを
+// 絞り込む。[toc]記法・見出しへのジャンプ(editor.js)はこの既定値の影響を受けないよう、
+// 呼び出し側でmaxLevelを明示的に6(全レベル)指定して呼ぶこと。
+let outlineMaxLevel = 6;
+export function setOutlineMaxLevel(n) {
+  const v = Math.floor(n);
+  outlineMaxLevel = Number.isFinite(v) ? Math.max(1, Math.min(6, v)) : 6;
+}
+
 // GitHub風の見出しスラグ生成。日本語等の非ASCII文字はそのまま残し、
 // 空白をハイフンに、記号は除去する。
 function slugify(text) {
@@ -26,13 +37,14 @@ function slugify(text) {
 
 // 見出し一覧を構文木から抽出する(全行の正規表現走査ではなく、見出しノードのみを辿る)。
 // 目次ウィジェット・内部リンクのジャンプ先解決の両方から使う共通ロジック。
-export function extractHeadings(state) {
+export function extractHeadings(state, maxLevel = outlineMaxLevel) {
   const headings = [];
   const slugCount = new Map();
   syntaxTree(state).iterate({
     enter: (node) => {
       if (!HEADING_NODE_NAMES.has(node.name)) return;
       const level = headingLevel(node.name);
+      if (level > maxLevel) return false; // chapterLevelInOutlineより深い見出しはアウトラインに出さない
       let text;
       if (node.name.startsWith("Setext")) {
         // SetextHeadingは下線行(HeaderMark)を含むため、上のテキスト行のみを見出し文字列とする
@@ -56,9 +68,10 @@ export function extractHeadings(state) {
 }
 
 // [text](#heading) 形式の内部リンクのジャンプ先を、見出しスラグから解決する。
+// アウトライン表示の絞り込み(chapterLevelInOutline)とは無関係に、全レベルの見出しを対象にする。
 export function findHeadingBySlug(state, slug) {
   const target = slug.toLowerCase();
-  return extractHeadings(state).find((h) => h.slug === target);
+  return extractHeadings(state, 6).find((h) => h.slug === target);
 }
 
 // よく使われる範囲の絵文字ショートコード(仕様書 M-22)。

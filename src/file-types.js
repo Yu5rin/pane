@@ -26,6 +26,44 @@
 // "@codemirror/language" を静的importしている点だけは、読み込み元(Node/バンドラ)
 // 双方でこのパッケージ自体は解決できる必要がある(package.json の dependencies に
 // 既に含まれており、CJS/ESM 両方のエントリを持つため問題にならない)。
+//
+// 拡張子の「ドットファイル」対応について(2026-08 拡張子網羅の見直しで確認):
+//
+// ".gitignore" のように先頭の "." しか持たないファイル名は、
+// Pane/FolderService.cs の HasOpenableExtension()(C#の Path.GetExtension を使用)、
+// および src/languages.js の resolveFileMode() が使う
+// CodeMirrorの LanguageDescription.matchFilename()(内部で /\.([^.]+)$/ を使用)の
+// どちらでも「最後の(=唯一の)"." より後ろ」が "gitignore" として抽出される。
+// そのため extensions 配列に拡張子を持たない語(例: "gitignore")を1つ足すだけで、
+// ドットファイルの判定にそのまま使い回せる。本ファイルはこの性質を利用して
+// .gitignore / .npmrc 等のドットファイルにも対応している(詳細は各エントリのコメント参照)。
+//
+// 一方、"Dockerfile" や "Makefile" のように "." を一切含まないファイル名は、
+// この2箇所で扱いが異なる:
+//   - resolveFileMode() の Markdown 判定だけは String.split(".").pop() で素朴に
+//     文字列を割っているため、"." が無ければファイル名全体("dockerfile"等)が
+//     ラベルとして得られる。
+//   - しかし resolveFileMode() の「コードモードか」の判定は
+//     LanguageDescription.matchFilename() に委ねられており、これは
+//     `/\.([^.]+)$/`(＝ "." を必ず要求する正規表現)でしか拡張子を取り出さない。
+//     "." を含まないファイル名ではこの正規表現が一切マッチしないため、
+//     extensions配列に "dockerfile" 等を登録していても、コードモードとしては
+//     絶対に検出されない(常にプレーンテキスト扱いになる)。
+//   - さらに Pane/FolderService.cs 側は
+//       `if (ext.Length <= 1) return false; // 拡張子なしのファイルは対象外`
+//     という明示的なガードを持っており、"." を含まないファイル名はそもそも
+//     フォルダツリーの一覧に出てこない。
+// これら2箇所(src/languages.js が依存する @codemirror/language 本体の実装、および
+// Pane/FolderService.cs)はいずれも本タスクでの編集が禁止されているため、
+// "Dockerfile" "Makefile" "Gemfile" "Rakefile" "Procfile" のような
+// 拡張子を持たないファイル名そのものについては、拡張子ベースの現在の仕組みでは
+// コードモード化・フォルダツリー表示のどちらも実現できない(=対応できない)。
+// 直接開けば例外なくプレーンテキストとして開けるので壊れはしないが、それ以上の
+// 恩恵は無い。それでも本ファイルでは "dockerfile" "makefile" 等の語を
+// extensions に残してある。これは「app.dockerfile」「build.makefile」のように
+// “実際に "." を伴うファイル名の末尾” として使われる実務上の命名慣習
+// (例: VSCode Docker拡張機能が認識する "*.dockerfile" 等)には引き続き有効に
+// 効くためであり、詳細は各エントリのコメントを参照。
 import { StreamLanguage } from "@codemirror/language";
 
 // カテゴリID→日本語表示名。設定画面の3階層チェックボックスの最上位に使う。
@@ -54,8 +92,43 @@ export const FILE_TYPES = [
     id: "plaintext",
     label: "プレーンテキスト",
     category: "text",
-    extensions: ["txt", "text", "log"],
+    // nfo: 昔ながらのリリースノート等で使われるプレーンテキスト(装飾なしでよい)。
+    extensions: ["txt", "text", "log", "nfo"],
     load: null, // ハイライト無し。プレーンテキストとして開く。
+  },
+  {
+    id: "rst",
+    label: "reStructuredText",
+    category: "text",
+    // "rest" という別名の拡張子も存在するが、その他分類のHTTPリクエストファイル
+    // (.http/.rest。REST Clientプラグイン等の慣習)と衝突するため、本ファイルでは
+        // ".rest" は HTTPリクエスト側に割り当てる(下記 http エントリのコメント参照)。
+    // ここでは曖昧さの無い "rst" のみを登録する。
+    extensions: ["rst"],
+    load: null, // @codemirror/lang-* にもlegacy-modesにも対応モードが無いため。
+  },
+  {
+    id: "asciidoc",
+    label: "AsciiDoc",
+    category: "text",
+    extensions: ["adoc", "asciidoc"],
+    load: null, // 対応モード無し。
+  },
+  {
+    id: "orgmode",
+    label: "Org-mode",
+    category: "text",
+    extensions: ["org"],
+    load: null, // 対応モード無し。
+  },
+  {
+    id: "bibtex",
+    label: "BibTeX",
+    category: "text",
+    extensions: ["bib"],
+    // legacy-modes の stex はLaTeX地の文用であり、@entrytype{...} 形式のBibTeXを
+    // 誤ったハイライトで表示するくらいなら、プレーンテキストのままにする。
+    load: null,
   },
 
   // ── プログラミング言語 ────────────────────────────────────
@@ -77,7 +150,8 @@ export const FILE_TYPES = [
     id: "python",
     label: "Python",
     category: "programming",
-    extensions: ["py", "pyw", "pyi"],
+    // pyx: Cython。Pythonのシンタックスに近く専用モードも無いため流用する。
+    extensions: ["py", "pyw", "pyi", "pyx"],
     load: () => import("@codemirror/lang-python").then((m) => m.python()),
   },
   {
@@ -99,7 +173,8 @@ export const FILE_TYPES = [
     id: "cpp",
     label: "C++",
     category: "programming",
-    extensions: ["cpp", "cc", "cxx", "hpp", "hh", "hxx"],
+    // ino: Arduinoスケッチファイル。C++に近い文法で専用モードが無いため流用する。
+    extensions: ["cpp", "cc", "cxx", "hpp", "hh", "hxx", "ino"],
     load: () => import("@codemirror/lang-cpp").then((m) => m.cpp()),
   },
   {
@@ -113,6 +188,15 @@ export const FILE_TYPES = [
     id: "objectivec",
     label: "Objective-C",
     category: "programming",
+    // 拡張子が言語をまたぐ例(仕様書指定): ".m" は Objective-C と MATLAB の両方で
+    // 使われる。本プロジェクトでは以下の理由からObjective-Cに固定する。
+    //   - legacy-modes に Objective-C 用のモード(clike.objectiveC)が実在し、
+    //     既に採用済みで動作実績がある。
+    //   - MATLAB専用のCodeMirrorモードは @codemirror/lang-* にも legacy-modes にも
+    //     存在しない(近縁の octave モードはあるがMATLABそのものではなく、
+    //     構文の差異で誤ハイライトの懸念がある)。
+    //   - 存在しないモードを無理に割り当てるより、実在するObjective-C側に倒す方が
+    //     安全(壊れたハイライトより「対応言語ではない」方がまし)。
     extensions: ["m", "mm"],
     load: () => import("@codemirror/legacy-modes/mode/clike").then((m) => StreamLanguage.define(m.objectiveC)),
   },
@@ -134,7 +218,11 @@ export const FILE_TYPES = [
     id: "ruby",
     label: "Ruby",
     category: "programming",
-    extensions: ["rb", "rake", "gemspec"],
+    // gemfile / rakefile: "Gemfile" "Rakefile" はRubyのコード(DSL)そのものだが、
+    // "." を含まないファイル名なのでコードモードの自動判定には効かない
+    // (本ファイル冒頭のコメント参照)。「foo.gemfile」のような "." を伴う
+    // 命名や設定画面の一覧に出す目的で、それでも登録しておく。
+    extensions: ["rb", "rake", "gemspec", "gemfile", "rakefile"],
     load: () => import("@codemirror/legacy-modes/mode/ruby").then((m) => StreamLanguage.define(m.ruby)),
   },
   {
@@ -148,6 +236,11 @@ export const FILE_TYPES = [
     id: "perl",
     label: "Perl",
     category: "programming",
+    // 拡張子が言語をまたぐ例(仕様書指定): ".pl" は Perl と Prolog の両方で
+    // 使われる。以下の理由からPerlに固定する。
+    //   - legacy-modes に Perl 用のモードが実在し、既に採用済みで動作実績がある。
+    //   - Prolog用のCodeMirrorモードは @codemirror/lang-* にも legacy-modes にも
+    //     存在せず、そもそも代替の当てが無い。
     extensions: ["pl", "pm", "t"],
     load: () => import("@codemirror/legacy-modes/mode/perl").then((m) => StreamLanguage.define(m.perl)),
   },
@@ -169,7 +262,8 @@ export const FILE_TYPES = [
     id: "scala",
     label: "Scala",
     category: "programming",
-    extensions: ["scala", "sc"],
+    // sbt: Scalaで書かれたsbtのビルド定義ファイル。文法はScala本体と同じ。
+    extensions: ["scala", "sc", "sbt"],
     load: () => import("@codemirror/legacy-modes/mode/clike").then((m) => StreamLanguage.define(m.scala)),
   },
   {
@@ -288,6 +382,12 @@ export const FILE_TYPES = [
     id: "verilog",
     label: "Verilog",
     category: "programming",
+    // 拡張子が言語をまたぐ例(仕様書指定): ".v" は Verilog と V言語(vlang.io)の
+    // 両方で使われる。以下の理由からVerilogに固定する。
+    //   - legacy-modes に Verilog 用のモードが実在し、既に採用済みで動作実績がある。
+    //   - V言語用のCodeMirrorモードは @codemirror/lang-* にも legacy-modes にも
+    //     存在せず、そもそも代替の当てが無い。
+    //   - ハードウェア記述言語としてのVerilogの方が実務での遭遇頻度が高い。
     extensions: ["v", "sv", "svh"],
     load: () => import("@codemirror/legacy-modes/mode/verilog").then((m) => StreamLanguage.define(m.verilog)),
   },
@@ -344,6 +444,41 @@ export const FILE_TYPES = [
     extensions: ["fs", "fsi", "fsx"],
     load: () => import("@codemirror/legacy-modes/mode/mllike").then((m) => StreamLanguage.define(m.fSharp)),
   },
+  {
+    id: "starlark",
+    label: "Starlark (Bazel)",
+    category: "programming",
+    // "BUILD.bazel" のようなファイル名の末尾(最後の "." 以降)を拾うと "bazel" になる。
+    extensions: ["bzl", "bazel"],
+    // Starlarkの専用モードは無いが、Pythonのサブセットに近い構文のため
+    // @codemirror/lang-python を流用する(既に依存関係に含まれている)。
+    load: () => import("@codemirror/lang-python").then((m) => m.python()),
+  },
+  {
+    id: "vue",
+    label: "Vue",
+    category: "programming",
+    // Vueの単一ファイルコンポーネント(<template>/<script>/<style>)専用モードは無い。
+    // 外枠はHTMLに近いため @codemirror/lang-html を流用する。
+    extensions: ["vue"],
+    load: () => import("@codemirror/lang-html").then((m) => m.html()),
+  },
+  {
+    id: "svelte",
+    label: "Svelte",
+    category: "programming",
+    // Vueと同様、専用モードが無いためHTMLベースの近似で代用する。
+    extensions: ["svelte"],
+    load: () => import("@codemirror/lang-html").then((m) => m.html()),
+  },
+  {
+    id: "astro",
+    label: "Astro",
+    category: "programming",
+    // フロントマター(---)+HTMLテンプレートという構成のため、HTMLベースの近似で代用する。
+    extensions: ["astro"],
+    load: () => import("@codemirror/lang-html").then((m) => m.html()),
+  },
 
   // ── スクリプト・シェル ────────────────────────────────────
   {
@@ -373,7 +508,11 @@ export const FILE_TYPES = [
     id: "makefile",
     label: "Makefile",
     category: "script",
-    extensions: ["mk", "make"],
+    // makefile: "Makefile" というファイル名(拡張子なし)自体はコードモードの
+    // 自動判定には効かない(本ファイル冒頭のコメント参照)が、設定画面での一覧性と
+    // "foo.makefile" のような "." を伴う命名のために登録しておく。
+    // mak も同じくMakefileの別拡張子として使われる。
+    extensions: ["mk", "make", "makefile", "mak"],
     // legacy-modes に Makefile 専用モードが無いため、仕様書の指示どおりシェルの
     // ストリームモードで代用する(タブ区切りのコマンド部分だけでも色が付けば十分)。
     load: () => import("@codemirror/legacy-modes/mode/shell").then((m) => StreamLanguage.define(m.shell)),
@@ -382,8 +521,33 @@ export const FILE_TYPES = [
     id: "dockerfile",
     label: "Dockerfile",
     category: "script",
+    // "dockerfile": 拡張子なしの "Dockerfile" というファイル名自体はコードモードの
+    // 自動判定には効かない(本ファイル冒頭のコメント参照)が、"web.dockerfile" の
+    // ような "." を伴う命名(VSCodeのDocker拡張機能等が認識する慣習)には効くため、
+    // 元から登録されていたこのエントリをそのまま維持する。
     extensions: ["dockerfile"],
     load: () => import("@codemirror/legacy-modes/mode/dockerfile").then((m) => StreamLanguage.define(m.dockerFile)),
+  },
+  {
+    id: "cmake",
+    label: "CMake",
+    category: "script",
+    extensions: ["cmake"],
+    load: () => import("@codemirror/legacy-modes/mode/cmake").then((m) => StreamLanguage.define(m.cmake)),
+  },
+  {
+    id: "ninja",
+    label: "Ninjaビルドファイル",
+    category: "script",
+    extensions: ["ninja"],
+    load: null, // 対応モード無し。
+  },
+  {
+    id: "awk",
+    label: "AWK",
+    category: "script",
+    extensions: ["awk"],
+    load: null, // 対応モード無し。
   },
 
   // ── マークアップ・スタイルシート ──────────────────────────
@@ -450,13 +614,83 @@ export const FILE_TYPES = [
     extensions: ["textile"],
     load: () => import("@codemirror/legacy-modes/mode/textile").then((m) => StreamLanguage.define(m.textile)),
   },
+  {
+    id: "xaml",
+    label: "XAML",
+    category: "markup",
+    // axaml: Avalonia UI が使うXAML方言。WPF/UWPのXAMLと同じくXMLベース。
+    extensions: ["xaml", "axaml"],
+    load: () => import("@codemirror/lang-xml").then((m) => m.xml()),
+  },
+  {
+    id: "razor",
+    label: "Razor (cshtml/vbhtml)",
+    category: "markup",
+    // ASP.NET CoreのRazor構文(@で始まるC#/VB埋め込み)専用モードは無いが、
+    // 地の文はHTMLなのでHTMLモードで近似する。
+    extensions: ["cshtml", "vbhtml", "razor"],
+    load: () => import("@codemirror/lang-html").then((m) => m.html()),
+  },
+  {
+    id: "aspnet",
+    label: "ASP.NET Web Forms",
+    category: "markup",
+    // aspx/ascx/ashx/asmx: 従来のASP.NET Web Forms。<% %>等のサーバータグを含む
+    // HTMLベースのマークアップなので、Razorと同様HTMLモードで近似する。
+    extensions: ["aspx", "ascx", "ashx", "asmx"],
+    load: () => import("@codemirror/lang-html").then((m) => m.html()),
+  },
+  {
+    id: "ejs",
+    label: "EJSテンプレート",
+    category: "markup",
+    extensions: ["ejs"],
+    load: () => import("@codemirror/lang-html").then((m) => m.html()),
+  },
+  {
+    id: "erb",
+    label: "ERBテンプレート",
+    category: "markup",
+    extensions: ["erb"],
+    load: () => import("@codemirror/lang-html").then((m) => m.html()),
+  },
+  {
+    id: "handlebars",
+    label: "Handlebars/Mustache",
+    category: "markup",
+    extensions: ["hbs", "handlebars", "mustache"],
+    load: () => import("@codemirror/lang-html").then((m) => m.html()),
+  },
+  {
+    id: "jinja",
+    label: "Jinja2/Twig/Liquid",
+    category: "markup",
+    // Jinja2・Twig・Liquidはいずれも {{ }} / {% %} 系のテンプレート構文を持つ、
+    // 互いに近縁なテンプレート言語。専用モードがLiquid/Twigには無いため、
+    // legacy-modesのJinja2モードで代用する(構文が近く実用上問題が少ない)。
+    extensions: ["jinja", "jinja2", "j2", "twig", "liquid"],
+    load: () => import("@codemirror/legacy-modes/mode/jinja2").then((m) => StreamLanguage.define(m.jinja2)),
+  },
 
   // ── データ・設定ファイル ──────────────────────────────────
   {
     id: "json",
     label: "JSON",
     category: "data",
-    extensions: ["json", "jsonc", "json5"],
+    // 以下はいずれも中身がJSON(またはJSONの派生)であるため、
+    // 拡張子・慣習は異なってもまとめてJSONハイライトを適用する:
+    //   json/jsonc/json5 … JSON本体とそのコメント・末尾カンマ許容方言
+    //   ndjson/jsonl      … 改行区切りJSON(1行1オブジェクト)
+    //   avsc              … Avroスキーマ(中身はJSON)
+    //   geojson           … GeoJSON(中身はJSON)
+    //   webmanifest       … Web App Manifest(中身はJSON)
+    //   babelrc/eslintrc/prettierrc … 拡張子なしの設定ファイル。歴史的にJSON形式が
+    //     主流のため既定でJSONとして扱う(YAML/JS版は ".eslintrc.yml" 等
+    //     別拡張子を持つため、そちらは各言語のエントリで別途解決される)。
+    extensions: [
+      "json", "jsonc", "json5", "ndjson", "jsonl", "avsc", "geojson", "webmanifest",
+      "babelrc", "eslintrc", "prettierrc",
+    ],
     load: () => import("@codemirror/lang-json").then((m) => m.json()),
   },
   {
@@ -477,7 +711,12 @@ export const FILE_TYPES = [
     id: "ini",
     label: "INI/設定ファイル",
     category: "data",
-    extensions: ["ini", "cfg", "conf", "properties", "editorconfig"],
+    // env: .env(dotenv)は KEY=VALUE 形式でproperties/ini方言に近い。
+    // reg: Windowsレジストリファイル(REGEDIT4等)。[キー]見出し+値の形がINIに近似。
+    // npmrc: .npmrc も KEY=VALUE 形式(拡張子なしファイル名の仕組みは本ファイル冒頭参照)。
+    // service/desktop: systemdユニットファイル・Linuxデスクトップエントリは
+    //   どちらも [Section] 見出し+KEY=VALUE のINI方言そのもの。
+    extensions: ["ini", "cfg", "conf", "properties", "editorconfig", "env", "reg", "npmrc", "service", "desktop"],
     load: () => import("@codemirror/legacy-modes/mode/properties").then((m) => StreamLanguage.define(m.properties)),
   },
   {
@@ -486,6 +725,20 @@ export const FILE_TYPES = [
     category: "data",
     extensions: ["sql"],
     load: () => import("@codemirror/lang-sql").then((m) => m.sql()),
+  },
+  {
+    id: "pgsql",
+    label: "PostgreSQL",
+    category: "data",
+    extensions: ["pgsql"],
+    load: () => import("@codemirror/lang-sql").then((m) => m.sql({ dialect: m.PostgreSQL })),
+  },
+  {
+    id: "plsql",
+    label: "PL/SQL (Oracle)",
+    category: "data",
+    extensions: ["plsql", "pls", "pkb", "pks"],
+    load: () => import("@codemirror/lang-sql").then((m) => m.sql({ dialect: m.PLSQL })),
   },
   {
     id: "csv",
@@ -501,8 +754,37 @@ export const FILE_TYPES = [
     extensions: ["proto"],
     load: () => import("@codemirror/legacy-modes/mode/protobuf").then((m) => StreamLanguage.define(m.protobuf)),
   },
-  // GraphQL は @codemirror/legacy-modes に対応モードが無いため今回は収録しない
-  // (仕様書の指示どおり)。
+  {
+    id: "graphql",
+    label: "GraphQL",
+    category: "data",
+    // @codemirror/legacy-modes に対応モードが無いため、拡張子としては受け付けつつも
+    // プレーンテキスト扱いにする(全く未収録にするより、設定画面で選べる方が親切)。
+    extensions: ["graphql", "gql"],
+    load: null,
+  },
+  {
+    id: "msbuild",
+    label: "MSBuildプロジェクト",
+    category: "data",
+    // .NETのプロジェクトファイル・共通プロパティファイル群。中身はすべてXML。
+    extensions: ["csproj", "vbproj", "fsproj", "props", "targets", "nuspec"],
+    load: () => import("@codemirror/lang-xml").then((m) => m.xml()),
+  },
+  {
+    id: "dotnetconfig",
+    label: ".NET設定ファイル",
+    category: "data",
+    // config: App.config/Web.config はいずれもXML形式(汎用の設定ファイルという
+    //   意味の "config" 拡張子も世の中には存在するが、本プロジェクトの.NET開発文脈
+    //   ではXML形式の.NET設定ファイルである頻度が圧倒的に高いためこちらに倒す)。
+    // manifest: アプリケーションマニフェスト(app.manifest)もXML。
+    // settings: Visual StudioのSettings.settingsファイルもXML。
+    // ruleset: RoslynアナライザールールセットファイルもXML。
+    // resx: .NETのリソースファイルもXML。
+    extensions: ["config", "manifest", "settings", "ruleset", "resx"],
+    load: () => import("@codemirror/lang-xml").then((m) => m.xml()),
+  },
 
   // ── その他 ────────────────────────────────────────────────
   {
@@ -525,6 +807,74 @@ export const FILE_TYPES = [
     category: "other",
     extensions: ["feature"],
     load: () => import("@codemirror/legacy-modes/mode/gherkin").then((m) => StreamLanguage.define(m.gherkin)),
+  },
+  {
+    id: "solution",
+    label: "Visual Studio ソリューション",
+    category: "other",
+    // .slnはXMLでもなく独自の(BOM付き)テキスト形式のため、対応モードを持たせず
+    // プレーンテキストとして開く。
+    extensions: ["sln"],
+    load: null,
+  },
+  {
+    id: "http",
+    label: "HTTPリクエスト",
+    category: "other",
+    // http/rest: IDE組み込みまたはREST Client系拡張機能で使われるリクエスト定義形式。
+    // ".rest" は reStructuredText の別名拡張子としても使われて衝突しうるが、
+    // 本プロジェクトではHTTPリクエスト側に割り当てる(上記 rst エントリのコメント参照)。
+    extensions: ["http", "rest"],
+    load: () => import("@codemirror/legacy-modes/mode/http").then((m) => StreamLanguage.define(m.http)),
+  },
+  {
+    id: "rpmspec",
+    label: "RPM Spec",
+    category: "other",
+    extensions: ["spec"],
+    load: () => import("@codemirror/legacy-modes/mode/rpm").then((m) => StreamLanguage.define(m.rpmSpec)),
+  },
+  {
+    id: "lockfile",
+    label: "ロック・モジュールファイル",
+    category: "other",
+    // lock: yarn.lock/Cargo.lock/Gemfile.lock等、ツールごとに書式が異なる
+    //   ロックファイルの総称。中身の書式がまちまちなためプレーンテキストとする。
+    // sum: go.sum(モジュールのハッシュ一覧)。
+    // mod: go.mod(モジュール定義)。専用モードは無いためプレーンテキスト。
+    extensions: ["lock", "sum", "mod"],
+    load: null,
+  },
+  {
+    id: "procfile",
+    label: "Procfile",
+    category: "other",
+    // Procfile: Heroku等で使われる "プロセス種別: 起動コマンド" 形式。専用モードは無い
+    // (load: null)ためコードモード自動判定への影響はそもそも無いが、設定画面での
+    // 一覧性のために拡張子として登録している(本ファイル冒頭のコメントも参照)。
+    extensions: ["procfile"],
+    load: null,
+  },
+  {
+    id: "ignorefiles",
+    label: "無視ファイル(.gitignore等)",
+    category: "other",
+    // いずれも拡張子を持たないドットファイルで、gitignore用のパターン構文を使う。
+    // 専用モードは無いためプレーンテキストとして開く。
+    extensions: ["gitignore", "gitattributes", "dockerignore"],
+    load: null,
+  },
+  {
+    id: "binarylike",
+    label: "その他(バイナリ系)",
+    category: "other",
+    // db/cache: SQLiteデータベースやビルドキャッシュ等、実体はバイナリのことが多い
+    // 拡張子。テキストエディタで開くと文字化けする可能性が高いため、
+    // ハイライトは持たせずプレーンテキストとして開く(装飾なし)。
+    // 既定でチェックが入る設定はどこにも無い(associatedExtensionsの初期値は空配列)
+    // ため、ここに載せても既定で関連付けされることはない。
+    extensions: ["db", "cache"],
+    load: null,
   },
 ];
 
