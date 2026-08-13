@@ -491,7 +491,9 @@ html[data-theme="dark"] mark { background: #8A7A2E; }
 #cm-host { flex: 1; min-height: 0; display: flex; overflow: hidden; }
 #cm-host .cm-editor { flex: 1; width: 100%; height: 100%; }
 #cm-host .cm-scroller { padding: 8px 0; overflow-y: auto; }
-#cm-host .cm-content { padding: 0 !important; }
+/* 縦の余白はCodeMirrorの既定を打ち消す(スクロール側で調整する)。横は下方の
+   「本文の余白・最大幅・行の高さ」の指定で入れるため、ここでは0にしない。 */
+#cm-host .cm-content { padding-top: 0 !important; padding-bottom: 0 !important; }
 #cm-host .cm-line { padding: 0 !important; margin: 0; text-indent: 0; }
 .editor.readonly .cm-cursor, .editor.readonly .cm-cursor-primary { display: none !important; }
 .editor.readonly .cm-content { caret-color: transparent !important; }
@@ -879,3 +881,20 @@ html[data-theme="dark"] .cm-table th { background: rgba(61,193,181,.14); }
   width: 100%;
   box-sizing: border-box;
 }
+
+/* ===== 本文の余白・最大幅・行の高さ(仕様書 C-08) =====
+   本文が左端にぴったり付いて読みにくかったため、左右に余白を入れる。
+   --editor-max-width(設定 editorMaxWidthPx)を指定すると本文の幅を制限して中央寄せする。
+   --editor-line-height(設定 editorLineHeight)は行の高さ。いずれも未設定なら既定のまま。
+   CodeMirrorのテーマは .cm-scroller に line-height を当てるため、そちらも上書きする。 */
+#cm-host .cm-content {
+  padding-left: 32px !important;
+  padding-right: 32px !important;
+  box-sizing: border-box;
+  max-width: var(--editor-max-width, none);
+  margin-left: auto;
+  margin-right: auto;
+}
+#cm-host .cm-scroller { line-height: var(--editor-line-height, 1.85); }
+/* コードモードは行番号の余白があるので、本文ほど左を空けない。 */
+#cm-host.mode-code .cm-content { padding-left: 12px !important; padding-right: 12px !important; max-width: none; }
