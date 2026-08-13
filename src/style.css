@@ -262,11 +262,10 @@ body.export-layout .cm-scroller { overflow: visible !important; }
 .search-toggle:has(input:checked) { background: var(--accent-soft); color: var(--accent); }
 #search-panel[hidden] { display: none; }
 
-/* ===== コードモード: 行番号・括弧対応・インデントガイド(仕様書 決定済み事項) ===== */
+/* ===== コードモード: 行番号・括弧対応(仕様書 決定済み事項) ===== */
 .cm-host .cm-gutters { background: var(--paper); border-right: 1px solid var(--rule); color: var(--ink-sub); }
 .cm-host .cm-lineNumbers .cm-gutterElement { padding: 0 8px 0 4px; font-family: var(--font-mono); font-size: 12px; }
 .cm-host .cm-matchingBracket { background: var(--accent-soft); color: var(--accent); border-radius: 3px; }
-.cm-line.cm-indent-guide { background-image: repeating-linear-gradient(to right, transparent 0, transparent calc(var(--indent-level, 1) * 2ch - 1px), var(--rule) calc(var(--indent-level, 1) * 2ch - 1px), var(--rule) calc(var(--indent-level, 1) * 2ch)); }
 .cm-host.mode-code .cm-content, .cm-host.mode-code .cm-gutters { font-family: var(--font-mono); }
 
 /* モバイル: キーボード上部ツールバー */
