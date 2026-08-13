@@ -122,9 +122,12 @@ internal sealed class SettingsWindow : Form
         await _webView.EnsureCoreWebView2Async(env);
 
         // ブラウザ既定のアクセラレータキー・ページズームの無効化はMainFormと同じ設定に揃える。
-        // AreDefaultContextMenusEnabledはMainForm同様に触らない(既定のtrueのまま)。
         _webView.CoreWebView2.Settings.AreBrowserAcceleratorKeysEnabled = false;
         _webView.CoreWebView2.Settings.IsZoomControlEnabled = false;
+        // ブラウザ既定の右クリックメニューを一切表示しない(docs/コンテキストメニュー仕様.md
+        // 大原則1)。このウィンドウでは入力欄用の最小メニュー(第5節)だけを"open-context-menu"
+        // 経由で表示する(MainFormと同じ受け口。下のOnWebMessageReceived参照)。
+        _webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
         _webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
 
         string distPath = MainForm.ResolveDistPath();
@@ -188,12 +191,68 @@ internal sealed class SettingsWindow : Form
                 // 本体ウィンドウ・アプリ全体には影響しない。
                 Close();
                 break;
+            case "open-context-menu":
+                // 入力欄の右クリックメニュー(docs/コンテキストメニュー仕様.md 第5節)。
+                // MainForm.HandleOpenContextMenuRequestと全く同じ座標変換・表示ロジック
+                // (このウィンドウはCodeMirror本体を持たないため、出るのは常に入力欄用の
+                // 最小メニューのみ)。
+                HandleOpenContextMenuRequest(root);
+                break;
             case "log":
                 string level = root.TryGetProperty("level", out JsonElement levelProp) ? levelProp.GetString() ?? "log" : "log";
                 string logMessage = root.TryGetProperty("message", out JsonElement msgProp) ? msgProp.GetString() ?? "" : "";
                 Logger.Write($"[設定ウィンドウ JS:{level}] {logMessage}");
                 break;
         }
+    }
+
+    /// <summary>{ type: "open-context-menu", x, y, items } を受け取り、ToolStripDropDownMenuを
+    /// クリック位置に表示する。座標変換・NativeMenuの使い方はMainForm.HandleOpenContextMenuRequestと
+    /// 全く同じ(座標変換ロジックも同じにする、という仕様書の指示どおり)。</summary>
+    private void HandleOpenContextMenuRequest(JsonElement root)
+    {
+        double cssX = root.TryGetProperty("x", out JsonElement xProp) && xProp.ValueKind == JsonValueKind.Number ? xProp.GetDouble() : 0;
+        double cssY = root.TryGetProperty("y", out JsonElement yProp) && yProp.ValueKind == JsonValueKind.Number ? yProp.GetDouble() : 0;
+        List<NativeMenu.MenuItemData> items = root.TryGetProperty("items", out JsonElement itemsProp) && itemsProp.ValueKind == JsonValueKind.Array
+            ? ParseMenuItems(itemsProp)
+            : new List<NativeMenu.MenuItemData>();
+
+        double dpiScale = DeviceDpi / 96.0;
+        var clientPoint = new Point((int)Math.Round(cssX * dpiScale), (int)Math.Round(cssY * dpiScale));
+        Point screenPoint = _webView.PointToScreen(clientPoint);
+        Logger.Write($"[設定ウィンドウ] open-context-menu: 項目数={items.Count}, cssPoint=({cssX},{cssY}), screenPoint=({screenPoint.X},{screenPoint.Y})");
+
+        AppSettings settings = SettingsService.Load();
+        bool isDark = MainForm.ResolveIsDarkTheme(settings.Theme);
+        NativeMenu.Show(
+            screenPoint,
+            isDark,
+            items,
+            onCommand: id => PostToWeb(new { type = "menu-command", id }),
+            onClosed: () => PostToWeb(new { type = "menu-closed", menu = "__context__" }));
+    }
+
+    /// <summary>"open-context-menu"のitems配列(入れ子のsubmenuを含む)をJSONから
+    /// <see cref="NativeMenu.MenuItemData"/>へ変換する(MainForm.ParseMenuItemsと同一のロジック。
+    /// 別クラスのprivateメソッドのため重複定義になる)。</summary>
+    private static List<NativeMenu.MenuItemData> ParseMenuItems(JsonElement arrayElement)
+    {
+        var list = new List<NativeMenu.MenuItemData>();
+        foreach (JsonElement el in arrayElement.EnumerateArray())
+        {
+            string? id = el.TryGetProperty("id", out JsonElement idProp) && idProp.ValueKind == JsonValueKind.String ? idProp.GetString() : null;
+            string label = el.TryGetProperty("label", out JsonElement labelProp) ? labelProp.GetString() ?? "" : "";
+            string shortcut = el.TryGetProperty("shortcut", out JsonElement scProp) ? scProp.GetString() ?? "" : "";
+            bool enabled = !el.TryGetProperty("enabled", out JsonElement enProp) || enProp.ValueKind != JsonValueKind.False;
+            bool isChecked = el.TryGetProperty("checked", out JsonElement chProp) && chProp.ValueKind == JsonValueKind.True;
+            bool separatorAfter = el.TryGetProperty("separatorAfter", out JsonElement sepProp) && sepProp.ValueKind == JsonValueKind.True;
+            string note = el.TryGetProperty("note", out JsonElement noteProp) ? noteProp.GetString() ?? "" : "";
+            List<NativeMenu.MenuItemData>? submenu = el.TryGetProperty("submenu", out JsonElement subProp) && subProp.ValueKind == JsonValueKind.Array
+                ? ParseMenuItems(subProp)
+                : null;
+            list.Add(new NativeMenu.MenuItemData(id, label, shortcut, enabled, isChecked, separatorAfter, note, submenu));
+        }
+        return list;
     }
 
     private void PostToWeb(object message)

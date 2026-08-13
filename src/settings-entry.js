@@ -9,9 +9,15 @@
 // editor.jsから読まずローカル定数に持つよう変更済み)ため、このエントリのバンドルに
 // CodeMirrorが巻き込まれることはない。
 import { createSettings } from "./settings.js";
-import { buildCommands } from "./commands.js";
+import { buildCommands, initContextMenu, routeNativeMenuCommand, routeNativeMenuClosed } from "./commands.js";
 
 const bridge = window.chrome?.webview ?? null;
+
+// ブラウザ既定の右クリックメニューを一切出さない(docs/コンテキストメニュー仕様.md 大原則1・第5節)。
+// 設定ウィンドウはCodeMirror本体を持たないため、出すメニューは入力欄用の最小構成のみ
+// (initContextMenu自身がinput/textareaかどうかを最優先判定する。それ以外の場所は
+// resolveTreeにnullを返させ、何も表示しない)。
+document.addEventListener("contextmenu", (e) => e.preventDefault(), true);
 
 // 実機での不具合調査用ログ。main.jsのlogToHostと同じ作法でC#側のLoggerへ送る。
 function logToHost(level, message) {
@@ -47,6 +53,11 @@ const ctx = {
 
 const settingsUI = createSettings(ctx, { mode: "page" });
 
+// 入力欄用の最小コンテキストメニュー(docs/コンテキストメニュー仕様.md 第5節)。
+// このウィンドウにはCodeMirror本体が無いため、resolveTree自体は常にnull
+// (initContextMenuが入力欄かどうかを自前で最優先判定するため、これで十分)。
+initContextMenu(document, ctx, () => null);
+
 // テーマ(仕様書 第10.2節・第2.10節 C-06)を"settings"応答の内容から適用する。
 // index.html/main.js側の適用ロジックと同じ考え方: 手動選択(light/dark)があればそれを、
 // "system"ならindex.html同様の起動時スクリプト(prefers-color-scheme)で決めた値のまま。
@@ -74,6 +85,11 @@ if (bridge) {
       settingsUI.handleSettingsLoaded(msg);
     } else if (msg.type === "save-settings-result") {
       settingsUI.handleSaveResult(msg);
+    } else if (msg.type === "menu-command") {
+      // 入力欄の右クリックメニュー(Pane/NativeMenu.cs)で項目が選ばれた。
+      routeNativeMenuCommand(msg.id);
+    } else if (msg.type === "menu-closed") {
+      routeNativeMenuClosed(msg.menu);
     }
   });
 }

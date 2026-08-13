@@ -5,7 +5,7 @@ import { EditorView, keymap, Decoration, ViewPlugin, WidgetType, lineNumbers } f
 import { EditorState, Compartment, StateEffect, StateField, Prec } from "@codemirror/state";
 import { markdown } from "@codemirror/lang-markdown";
 import { Strikethrough, Table, Superscript, Subscript, Emoji, Autolink } from "@lezer/markdown";
-import { defaultKeymap, history, historyKeymap, indentWithTab, insertNewline, undo, redo, moveLineUp, moveLineDown, copyLineDown, deleteLine, indentLess, indentSelection } from "@codemirror/commands";
+import { defaultKeymap, history, historyKeymap, indentWithTab, insertNewline, undo, redo, moveLineUp, moveLineDown, copyLineDown, deleteLine, indentLess, indentSelection, selectAll } from "@codemirror/commands";
 import { syntaxTree, syntaxHighlighting, HighlightStyle, LanguageDescription, bracketMatching, indentUnit } from "@codemirror/language";
 import { autocompletion, closeBrackets, closeBracketsKeymap, startCompletion } from "@codemirror/autocomplete";
 import { search, setSearchQuery, getSearchQuery, SearchQuery, findNext, findPrevious, replaceNext, replaceAll } from "@codemirror/search";
@@ -383,7 +383,12 @@ class ImageWidget extends WidgetType {
     // クリックすると記法を展開して編集できる(仕様書 2.9.2)。posAtDOMで現在のドキュメント上の
     // 位置を求める(TableWidgetのpos()と同じ考え方。docの変更でウィジェットが使い回されても
     // 正しい位置を取れる)。取得できない場合のみ構築時のfromへフォールバックする。
+    // 右クリック(e.button!==0)では反応しない。反応するとウィジェットが即座に生テキストへ
+    // 置き換わってしまい、直後のcontextmenuイベントのe.targetが別のDOMに変わって右クリック
+    // メニュー(docs/コンテキストメニュー仕様.md)の文脈判定(画像の上かどうか)を妨げてしまう
+    // ため(キャレット移動自体はcontextmenu側のresolveClickContextが別途行う)。
     wrap.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
       e.preventDefault();
       let pos = this.from;
       try { pos = view.posAtDOM(wrap); } catch { /* フォールバックのfromを使う */ }
@@ -457,6 +462,7 @@ class TocWidget extends WidgetType {
       a.className = `cm-toc-item cm-toc-h${h.level}`;
       a.textContent = h.text;
       a.addEventListener("mousedown", (e) => {
+        if (e.button !== 0) return; // 右クリックでは反応しない(理由は他のウィジェットと同じ)
         e.preventDefault();
         view.dispatch({ selection: { anchor: h.from }, effects: EditorView.scrollIntoView(h.from, { y: "center" }) });
         view.focus();
@@ -1249,7 +1255,9 @@ class TableWidget extends WidgetType {
       if (cols > 1) ctl.appendChild(mkBtn("&#x2212;", "この列を削除", () => mutateTable(view, pos(), (x) => { x.header.splice(cc, 1); x.aligns.splice(cc, 1); for (const r of x.body) r.splice(cc, 1); })));
       if (cc < cols - 1) ctl.appendChild(mkBtn("&#x25B6;", "列を右へ移動", () => mutateTable(view, pos(), (x) => { for (const arr of [x.header, x.aligns, ...x.body]) arr.splice(cc + 1, 0, ...arr.splice(cc, 1)); })));
       th.appendChild(ctl);
-      th.addEventListener("mousedown", (e) => { if (e.target.closest(".tbl-ctl,.cm-table-col-resizer")) return; e.preventDefault(); selectCell(view, tableAt(view.state, pos()) || t, 0, cc); });
+      // 右クリックでは反応しない(理由はImageWidgetのmousedownコメントと同じ:
+      // 反応すると表ウィジェットが生テキストへ置き換わり、右クリックメニューの文脈判定を妨げる)。
+      th.addEventListener("mousedown", (e) => { if (e.button !== 0 || e.target.closest(".tbl-ctl,.cm-table-col-resizer")) return; e.preventDefault(); selectCell(view, tableAt(view.state, pos()) || t, 0, cc); });
       // 列幅リサイザ(最終列の右端には出さない)
       if (cc < cols - 1) {
         const resizer = document.createElement("div");
@@ -1276,14 +1284,18 @@ class TableWidget extends WidgetType {
           td.appendChild(ctl);
         }
         const rc = ri, cc = c;
-        td.addEventListener("mousedown", (e) => { if (e.target.closest(".tbl-ctl,[data-href]")) return; e.preventDefault(); selectCell(view, tableAt(view.state, pos()) || t, rc + 2, cc); });
+        td.addEventListener("mousedown", (e) => { if (e.button !== 0 || e.target.closest(".tbl-ctl,[data-href]")) return; e.preventDefault(); selectCell(view, tableAt(view.state, pos()) || t, rc + 2, cc); });
         tr.appendChild(td);
       }
       tb.appendChild(tr);
     });
     tbl.appendChild(tb); wrap.appendChild(tbl);
-    // セル内リンクのクリック
+    // セル内リンクのクリック。右クリック(e.button!==0)は無視する(既定はcontextmenuイベントに
+    // 譲る。ここで反応するとリンクを開く確認ダイアログが右クリック時にも出てしまい、
+    // 直後のcontextmenuイベントのe.targetがそのダイアログに奪われて右クリックメニューの
+    // 文脈判定を妨げてしまうため)。
     wrap.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
       const a = e.target.closest?.("[data-href]");
       if (a) { e.preventDefault(); openOrJumpLink(view, a.getAttribute("data-href") || "", e.ctrlKey || e.metaKey); }
     });
@@ -2046,7 +2058,12 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
           cut: (e) => wholeLineClipboardHandler(view, e, true),
           // リンク装飾のタップでリンク先を開く(mousedownで先取りしてカーソル移動を抑止)。
           // 内部アンカー(#見出し)はCtrl/Cmd+クリック時のみジャンプする(仕様書 M-15)。
+          // 右クリック(e.button!==0)はここで反応しない。反応すると右クリックのたびに
+          // 外部リンク確認ダイアログが開いてしまい、直後のcontextmenuイベントのe.targetが
+          // そのダイアログに奪われて右クリックメニュー(docs/コンテキストメニュー仕様.md)の
+          // 文脈判定(リンクの上かどうか)を妨げてしまう。
           mousedown: (e) => {
+            if (e.button !== 0) return false;
             const el = e.target?.closest?.(".tok-link[data-href]");
             if (!el) return false;
             e.preventDefault();
@@ -2269,6 +2286,12 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
     },
     // カーソル位置の行に記法を挿入(ツールバー用)
     applyAction: (action, payload) => applyMdAction(view, action, payload),
+    // 右クリックメニュー(docs/コンテキストメニュー仕様.md 第2章): クリック位置の文脈判定。
+    resolveContextMenu: (x, y, targetEl) => resolveClickContext(view, x, y, targetEl),
+    // リンクを開く/内部見出しへジャンプ(既存のクリック時の経路と同じ。外部サイトは
+    // confirmOpenExternalを必ず通る)。modifierKeyをtrue固定にすることで、#見出しの
+    // 内部アンカーもCtrlクリック相当としてジャンプさせる(右クリックメニューからの明示操作のため)。
+    openLink: (href) => openOrJumpLink(view, href, true),
     // 選択範囲をテキストで置き換える(プレーンテキスト貼り付け・スマートペースト用)
     pasteText: (text) => { view.dispatch(view.state.replaceSelection(text)); view.focus(); },
     // themeRefreshEffectも併せて発行し、Mermaid図(mermaidBlockDecoField)をdark/lightに
@@ -2420,6 +2443,219 @@ function eraseFormatting(text) {
     .replace(/~([^~]+)~/g, "$1");
 }
 
+// ---- 右クリックメニューの文脈判定(docs/コンテキストメニュー仕様.md 第2章) ----
+// 右クリック位置がリンク/画像/表/コードブロック/見出し/リストのどれの上かを判定して返す。
+// メニューの組み立て自体(どの項目を出すか)はmain.js側の責務で、ここは「そこに何があるか」
+// だけを返す(コマンドの実装はJS側という方針の中でも、構文木を読む部分はeditor.jsに閉じ込め、
+// main.jsは構文木を直接読まない)。
+function findAncestorNode(state, pos, name) {
+  let node = syntaxTree(state).resolveInner(pos, 1);
+  for (let n = node; n; n = n.parent) if (n.name === name) return n;
+  return null;
+}
+function imageInfoFromNode(state, n) {
+  const text = state.doc.sliceString(n.from, n.to);
+  const m = text.match(/^!\[([^\]]*)\]\(([^)]*)\)$/);
+  if (!m) return null;
+  return { alt: m[1], src: m[2].trim(), from: n.from, to: n.to };
+}
+function linkInfoFromNode(state, n) {
+  const text = state.doc.sliceString(n.from, n.to);
+  // 直接記法[text](url)のみ対応する(参照形式[text][id]はラベル解決が絡み簡易対応の範囲を
+  // 超えるため、ここでは検出せず素の段落として扱う)。
+  const m = text.match(/^\[([^\]]*)\]\(([^)]*)\)$/);
+  if (!m) return null;
+  return { href: m[2].trim(), from: n.from, to: n.to };
+}
+// ライブプレビューで画像が<img>ウィジェットに置き換わっている間は、posAtCoordsが
+// ウィジェットの境界(from/to)のどちらかしか返せない(1個のウィジェットの内部座標までは
+// 分からない)。DOM側(.cm-image-widget)がクリックされたことが分かっている場合は、
+// view.posAtDOM()でそのウィジェットの位置(=nf)を取り、そこから構文木を辿り直す
+// (ImageWidget.toDOMのmousedownハンドラと同じ手筋)。
+function imageInfoAtDom(view, imgEl) {
+  let pos;
+  try { pos = view.posAtDOM(imgEl); } catch { return null; }
+  const node = findAncestorNode(view.state, pos, "Image");
+  return node ? imageInfoFromNode(view.state, node) : null;
+}
+// 表も画像と同じ理由(TableWidgetは表全体を1個のブロックウィジェットとして置き換える)で、
+// 行/列の判定にはDOM(実際にクリックされた<td>/<th>)を使う。ヘッダー行は仕様上「行の削除」
+// が効かないため、rowKind:"header"とbodyIndex:-1で区別する。
+function tableInfoAtDom(view, tableEl, targetEl) {
+  let pos;
+  try { pos = view.posAtDOM(tableEl); } catch { return null; }
+  const t = tableAt(view.state, pos);
+  if (!t) return null;
+  const cols = Math.max(t.header.length, ...(t.body.length ? t.body.map((r) => r.length) : [0]), 1);
+  const cellEl = targetEl?.closest?.("td, th");
+  let rowKind = "header", bodyIndex = -1, col = 0;
+  if (cellEl) {
+    col = Math.min(cols - 1, cellEl.cellIndex ?? 0);
+    if (cellEl.closest("tbody")) {
+      rowKind = "body";
+      const trEl = cellEl.closest("tr");
+      bodyIndex = trEl ? Array.prototype.indexOf.call(trEl.parentElement.children, trEl) : 0;
+    }
+  }
+  return { t, rowKind, bodyIndex, col, cols };
+}
+// ソースコードモード・選択がテーブルへ触れている間などはTableWidgetが使われず生テキストの
+// ままになる(buildTableDeco参照)。その場合はDOM要素が無いため、行内の"|"の数からセル位置を
+// 逆算する(selectStyleRangeAtCursorのテーブル分岐と同じ考え方)。
+function tableInfoFromPos(state, t, pos) {
+  const line = state.doc.lineAt(pos);
+  const rowIdx = line.number - t.startLine; // 0=見出し 1=区切り 2以降=ボディ
+  const cols = Math.max(t.header.length, ...(t.body.length ? t.body.map((r) => r.length) : [0]), 1);
+  const before = line.text.slice(0, pos - line.from);
+  const col = Math.min(cols - 1, Math.max(0, (before.match(/\|/g) || []).length - 1));
+  const rowKind = rowIdx <= 1 ? "header" : "body";
+  const bodyIndex = rowIdx <= 1 ? -1 : rowIdx - 2;
+  return { t, rowKind, bodyIndex, col, cols };
+}
+// カーソル位置を含む数式ブロック($$...$$)。$$…$$のブロック集合はmathBlocksFieldが
+// 既に(docChangedのたびに全文再走査ではなく差分更新で)保持しているものをそのまま使う。
+export function mathBlockAt(view, pos) {
+  const blocks = view.state.field(mathBlocksField, false) ?? [];
+  return blocks.find((b) => pos >= b.from && pos <= b.to) ?? null;
+}
+// インライン数式 $...$。ライブプレビュー本体(buildLiveDeco)と同じ正規表現で該当行を調べる。
+function inlineMathAt(state, pos) {
+  const line = state.doc.lineAt(pos);
+  const re = /\$([^\s$](?:[^$\n]*[^\s$])?)\$/g;
+  let m;
+  while ((m = re.exec(line.text))) {
+    const f = line.from + m.index, tt = f + m[0].length;
+    if (pos >= f && pos <= tt) return { from: f, to: tt };
+  }
+  return null;
+}
+// ブロック/インラインどちらの数式かを区別せず返す共通の入口。
+function mathAt(view, pos) {
+  const mb = mathBlockAt(view, pos);
+  if (mb) return { from: mb.from, to: mb.to, display: true };
+  const im = inlineMathAt(view.state, pos);
+  if (im) return { from: im.from, to: im.to, display: false };
+  return null;
+}
+// カーソル位置を含むFencedCode(コードブロック)ノード。開始/終了行・言語(CodeInfo)・
+// 中身のテキストをまとめて返す(コピー・言語変更・削除のいずれもこれ1つから組み立てられる)。
+function codeBlockAt(view, pos) {
+  const state = view.state;
+  const node = findAncestorNode(state, pos, "FencedCode");
+  if (!node) return null;
+  const marks = node.getChildren("CodeMark");
+  if (marks.length < 2) return null; // 未終端(閉じフェンス無し)は対象外(ライブプレビューと同じ条件)
+  const open = state.doc.lineAt(node.from);
+  const close = state.doc.lineAt(Math.max(node.from, node.to - 1));
+  const infoNode = node.getChild("CodeInfo");
+  const lang = infoNode ? state.doc.sliceString(infoNode.from, infoNode.to).trim() : "";
+  let code = "";
+  if (close.number > open.number) {
+    code = state.sliceDoc(
+      state.doc.line(Math.min(open.number + 1, close.number)).from,
+      close.from > 0 ? close.from - 1 : close.from
+    );
+  }
+  return { from: open.from, to: close.to, openLine: open, closeLine: close, openMark: marks[0], infoNode, lang, code };
+}
+// リストの現在の種別(見出しレベルアイコンのcheckedに使う。convertListTypeの逆引き)。
+function detectListType(text) {
+  if (/^\s*[-*+]\s+\[[ xX]\]\s/.test(text)) return "check";
+  if (/^\s*\d+[.)]\s/.test(text)) return "ordered";
+  return "bullet";
+}
+
+// 右クリックの文脈をまとめて判定する。呼び出し前に「クリック位置へキャレットを移す」
+// (選択範囲の中への右クリックは選択を保持する、仕様書 大原則5)処理もここで行う。
+// x/yはCodeMirrorのcontentDOM基準のクライアント座標(contextmenuイベントのclientX/clientY)、
+// targetEl はイベントのtarget(ライブプレビューのウィジェット判定に使う。省略可)。
+export function resolveClickContext(view, x, y, targetEl) {
+  const before = view.state;
+  let pos = view.posAtCoords({ x, y });
+  if (pos == null) pos = before.doc.length;
+
+  // ---- ライブプレビューの置換ウィジェット越し(DOMヒットテストを優先する) ----
+  // 必ず次のキャレット移動より先に行う。キャレット移動(view.dispatch)はウィジェットを
+  // 生テキストへ置き換えることがあり(表・画像はcursorInside/選択範囲がその内側に入った
+  // 時点で即座に切り替わる)、そうなるとtargetElがDOMツリーから切り離されてclosest()が
+  // 辿れなくなったり、view.posAtDOM()が古い(既に取り除かれた)ノードに対して失敗したり
+  // するため、DOM参照がまだ有効なうちに必要な情報を読み切っておく。
+  let domContext = null;
+  if (targetEl instanceof Element) {
+    const linkEl = targetEl.closest("[data-href]");
+    if (linkEl) {
+      domContext = { kind: "link", href: linkEl.getAttribute("data-href") || "" };
+      try { pos = view.posAtDOM(linkEl); } catch { /* posAtCoordsの結果をそのまま使う */ }
+    } else {
+      const imgEl = targetEl.closest(".cm-image-widget");
+      if (imgEl) {
+        const info = imageInfoAtDom(view, imgEl);
+        if (info) { domContext = { kind: "image", ...info }; pos = info.from; }
+      } else {
+        const tableEl = targetEl.closest(".cm-table");
+        if (tableEl) {
+          const info = tableInfoAtDom(view, tableEl, targetEl);
+          // 表全体(TableWidget)は1個のブロックウィジェットとして置き換わっており、
+          // posAtCoords(x,y)はウィジェットの境界(from/to)のどちらかしか返せない。
+          // to側(表の直後)に倒れるとtableAt()で表自体を再特定できず、後続の
+          // mutateTable(view, カーソル位置, ...)が「表が見つからない」として何もしなくなって
+          // しまう。それを避けるため、実際にクリックされた行(info.rowKind/bodyIndex、
+          // DOMから判定済み)の行頭を使う。「行を削除」(deleteTableRow)のように
+          // payloadを取らずカーソル位置だけで対象行を判定する既存アクションとの
+          // 整合性も保てる(表の先頭に固定してしまうと常にヘッダー行として扱われてしまう)。
+          if (info) {
+            domContext = { kind: "table", ...info };
+            const rowLine = info.rowKind === "body" ? info.t.startLine + 2 + info.bodyIndex : info.t.startLine;
+            pos = before.doc.line(Math.min(Math.max(1, rowLine), before.doc.lines)).from;
+          }
+        }
+      }
+    }
+  }
+
+  // 大原則5: 右クリック位置にキャレットを移す(選択範囲の中への右クリックは選択を保持する)。
+  const selBefore = before.selection.main;
+  if (pos < selBefore.from || pos > selBefore.to) {
+    view.dispatch({ selection: { anchor: pos } });
+  }
+  const state = view.state;
+  const sel = state.selection.main;
+  const hasSelection = !sel.empty;
+
+  if (domContext) return { ...domContext, hasSelection };
+
+  // ---- ここから先は生テキスト(構文木・行テキスト)からの判定 ----
+  const t = tableAt(state, pos);
+  if (t) return { kind: "table", ...tableInfoFromPos(state, t, pos), hasSelection };
+
+  const cb = codeBlockAt(view, pos);
+  if (cb) return { kind: "codeblock", ...cb, hasSelection };
+
+  const m = mathAt(view, pos);
+  if (m) return { kind: "math", ...m, hasSelection };
+
+  const imgNode = findAncestorNode(state, pos, "Image");
+  if (imgNode) {
+    const info = imageInfoFromNode(state, imgNode);
+    if (info) return { kind: "image", ...info, hasSelection };
+  }
+  const linkNode = findAncestorNode(state, pos, "Link");
+  if (linkNode) {
+    const info = linkInfoFromNode(state, linkNode);
+    if (info) return { kind: "link", ...info, hasSelection };
+  }
+
+  const line = state.doc.lineAt(pos);
+  const atx = line.text.match(/^ {0,3}(#{1,6})\s/);
+  if (atx) return { kind: "heading", level: atx[1].length, hasSelection };
+
+  if (/^\s*(?:[-*+]\s+(?:\[[ xX]\]\s*)?|\d+\.\s+)/.test(line.text)) {
+    return { kind: "list", listType: detectListType(line.text), hasSelection };
+  }
+
+  return { kind: "paragraph", hasSelection };
+}
+
 // ツールバーの記法挿入(CodeMirror版)
 function applyMdAction(view, action, payload) {
   const { state } = view;
@@ -2468,6 +2704,115 @@ function applyMdAction(view, action, payload) {
     case "selectLine": selectLineAtCursor(view); break; // 仕様書 E-09
     case "selectStyleRange": selectStyleRangeAtCursor(view); break; // 仕様書 E-11
     case "deleteTableRow": deleteTableRowAtCursor(view); break; // 表の行を削除
+    // ---- 表の行/列の挿入・削除・配置(docs/コンテキストメニュー仕様.md 第2.5節、新規実装) ----
+    // いずれもmutateTable(TableWidgetのボタン群と同じ土台)で構造データを組み替えてから
+    // formatTableText()で書き戻す。行/列位置はpayload(bodyIndex/col)で受け取る。
+    // ライブプレビュー中の表はTableWidgetという1個のブロックウィジェットに置き換わっており、
+    // カーソル位置(posAtCoords)だけでは正確な行/列までは分からないため、右クリック時に
+    // DOM(実際にクリックされた<td>/<th>)から判定した値をmain.js側から渡してもらう
+    // (resolveClickContextのtableInfoAtDom/tableInfoFromPosと同じ値)。
+    case "tableInsertRowAbove": mutateTable(view, s, (t) => {
+      const cols = Math.max(t.header.length, ...(t.body.length ? t.body.map((r) => r.length) : [0]), 1);
+      t.body.splice(Math.max(0, payload?.bodyIndex ?? 0), 0, Array(cols).fill(""));
+    }); break;
+    case "tableInsertRowBelow": mutateTable(view, s, (t) => {
+      const cols = Math.max(t.header.length, ...(t.body.length ? t.body.map((r) => r.length) : [0]), 1);
+      t.body.splice(Math.max(0, (payload?.bodyIndex ?? -1) + 1), 0, Array(cols).fill(""));
+    }); break;
+    case "tableInsertColLeft": mutateTable(view, s, (t) => {
+      const col = payload?.col ?? 0;
+      t.header.splice(col, 0, ""); t.aligns.splice(col, 0, null);
+      for (const r of t.body) r.splice(col, 0, "");
+    }); break;
+    case "tableInsertColRight": mutateTable(view, s, (t) => {
+      const col = payload?.col ?? 0;
+      t.header.splice(col + 1, 0, ""); t.aligns.splice(col + 1, 0, null);
+      for (const r of t.body) r.splice(col + 1, 0, "");
+    }); break;
+    case "tableDeleteCol": mutateTable(view, s, (t) => {
+      if (t.header.length <= 1) return; // 最後の1列は消さない(TableWidgetの列削除ボタンと同じ条件)
+      const col = payload?.col ?? 0;
+      t.header.splice(col, 1); t.aligns.splice(col, 1);
+      for (const r of t.body) r.splice(col, 1);
+    }); break;
+    case "tableDelete": {
+      const t = tableAt(state, s);
+      if (t) view.dispatch({ changes: { from: t.from, to: t.to, insert: "" } });
+      break;
+    }
+    case "tableAlignLeft": mutateTable(view, s, (t) => { t.aligns[payload?.col ?? 0] = "left"; }); break;
+    case "tableAlignCenter": mutateTable(view, s, (t) => { t.aligns[payload?.col ?? 0] = "center"; }); break;
+    case "tableAlignRight": mutateTable(view, s, (t) => { t.aligns[payload?.col ?? 0] = "right"; }); break;
+    case "tableAlignNone": mutateTable(view, s, (t) => { t.aligns[payload?.col ?? 0] = null; }); break;
+    // ---- リンク/画像(第2.3節・第2.4節) ----
+    case "linkUnlink": { // [text](url) → text
+      const node = findAncestorNode(state, s, "Link");
+      if (!node) break;
+      const m = state.sliceDoc(node.from, node.to).match(/^\[([^\]]*)\]\(([^)]*)\)$/);
+      if (!m) break;
+      view.dispatch({ changes: { from: node.from, to: node.to, insert: m[1] } });
+      break;
+    }
+    case "linkEditUrl": { // URL部分を選択してキャレットを置く(直接編集できるように)
+      const node = findAncestorNode(state, s, "Link");
+      if (!node) break;
+      const text = state.sliceDoc(node.from, node.to);
+      const m = text.match(/^(\[[^\]]*\]\()([^)]*)(\))$/);
+      if (!m) break;
+      const urlFrom = node.from + m[1].length;
+      view.dispatch({ selection: { anchor: urlFrom, head: urlFrom + m[2].length } });
+      break;
+    }
+    case "imageDelete": {
+      const node = findAncestorNode(state, s, "Image");
+      if (node) view.dispatch({ changes: { from: node.from, to: node.to, insert: "" } });
+      break;
+    }
+    case "imageEditPath": { // パス部分を選択してキャレットを置く
+      const node = findAncestorNode(state, s, "Image");
+      if (!node) break;
+      const text = state.sliceDoc(node.from, node.to);
+      const m = text.match(/^(!\[[^\]]*\]\()([^)]*)(\))$/);
+      if (!m) break;
+      const pFrom = node.from + m[1].length;
+      view.dispatch({ selection: { anchor: pFrom, head: pFrom + m[2].length } });
+      break;
+    }
+    // ---- コードブロック(第2.6節) ----
+    case "codeblockSetLang": {
+      const cb = codeBlockAt(view, s);
+      if (!cb) break;
+      const lang = payload?.lang ?? "";
+      if (cb.infoNode) view.dispatch({ changes: { from: cb.infoNode.from, to: cb.infoNode.to, insert: lang } });
+      else if (cb.openMark) view.dispatch({ changes: { from: cb.openMark.to, insert: lang } });
+      break;
+    }
+    case "codeblockDelete": {
+      const cb = codeBlockAt(view, s);
+      if (cb) view.dispatch({ changes: { from: cb.from, to: cb.to, insert: "" } });
+      break;
+    }
+    // ---- 数式ブロック/インライン数式(第2.9節) ----
+    case "mathEditSelect": { // ソースを見せて中身を選択状態にする(display:trueならmathBlockDecoField等が
+      // 選択範囲が中に入った時点で自動的に生テキスト表示へ切り替える。ここでは選択するだけでよい)
+      const m = mathAt(view, s);
+      if (!m) break;
+      if (m.display) {
+        const openLine = state.doc.lineAt(m.from);
+        const closeLine = state.doc.lineAt(Math.max(m.from, m.to - 1));
+        const cf = openLine.to + 1, ct = Math.max(cf, closeLine.from - 1);
+        view.dispatch({ selection: { anchor: cf, head: ct } });
+      } else {
+        view.dispatch({ selection: { anchor: m.from + 1, head: m.to - 1 } });
+      }
+      break;
+    }
+    case "mathDelete": {
+      const m = mathAt(view, s);
+      if (m) view.dispatch({ changes: { from: m.from, to: m.to, insert: "" } });
+      break;
+    }
+    case "selectAll": selectAll(view); break; // 仕様書 第2.1節・第5節
     case "scrollToSelection": view.dispatch({ effects: EditorView.scrollIntoView(state.selection.main.head, { y: "center" }) }); break; // 仕様書 E-16
     case "headingUp": shiftHeadingLevel(view, -1); break; // 仕様書 P-03
     case "headingDown": shiftHeadingLevel(view, 1); break; // 仕様書 P-04

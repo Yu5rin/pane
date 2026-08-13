@@ -186,6 +186,16 @@ export function isAssignableShortcut(shortcutString) {
   return FUNCTION_KEY_RE.test(key);
 }
 
+// ---- ネイティブポップアップの「いま開いているのはどちらか」の一元管理 ----
+// メニューバー(initMenuBar)と右クリックメニュー(initContextMenu)は、C#側(Pane/NativeMenu.cs)では
+// 「1つのポップアップ」という同じ概念を共有しており、"menu-command" / "menu-closed" もどちらの
+// 経路から開いたかに関わらず同じメッセージ形で届く。同時に開けるポップアップは常に1つだけ
+// (NativeMenu.Show内のCloseCurrent()が前のポップアップを必ず閉じる)なので、最後に開いた側だけが
+// 応答を受け取れるよう、ここで「いま応答を受けるべき相手」を1つだけ覚えておく。
+let activeNativeOwner = null; // { handleMenuCommand(id), handleMenuClosed(menu) } | null
+export function routeNativeMenuCommand(id) { activeNativeOwner?.handleMenuCommand(id); }
+export function routeNativeMenuClosed(menu) { activeNativeOwner?.handleMenuClosed(menu); }
+
 // ---- メニューバー(仕様書 第10.1節・第10.4節) ----
 // 既定は表示。Altキーで表示・非表示をトグルする(表示中はショートカット一覧としても機能する)。
 // 内部の分類キー(コマンド定義の menu プロパティ、File/Edit/Paragraph/Format/View)は
@@ -260,6 +270,7 @@ export function initMenuBar(container, commands, ctx) {
     const items = commands.filter((c) => c.menu === menuName && !c.contextOnly).map(buildNativeItem);
     nativeOpenBtn = btn;
     nativeOpenMenuName = menuName;
+    activeNativeOwner = { handleMenuCommand, handleMenuClosed }; // 応答は自分宛てとして受け取る
     btn.classList.add("open");
     // WebView2内のCSSピクセル座標で送る。C#側(Pane/MainForm.HandleOpenMenuRequest)で
     // DeviceDpiとWebView2の画面上の位置(_webView.PointToScreen)を使って画面座標へ変換する。
@@ -534,34 +545,171 @@ export function initCommandPalette(root, commands, ctx) {
   return { open, close };
 }
 
-// ---- 右クリックコンテキストメニュー(仕様書 第10.1節「右クリックからも呼び出せる」) ----
-export function initContextMenu(hostEl, commands, ctx, resolveContextCommandIds) {
-  let menuEl = null;
-  function close() { menuEl?.remove(); menuEl = null; }
-  hostEl.addEventListener("contextmenu", (e) => {
-    const ids = resolveContextCommandIds(ctx, e);
-    if (!ids || !ids.length) return; // 既定のブラウザメニューに任せる(未対応箇所)
-    e.preventDefault();
-    close();
-    menuEl = document.createElement("div");
-    menuEl.className = "menu-dropdown";
-    menuEl.style.left = e.clientX + "px";
-    menuEl.style.top = e.clientY + "px";
-    for (const id of ids) {
-      const cmd = commands.find((c) => c.id === id);
-      if (!cmd) continue;
+// ---- 右クリック(コンテキスト)メニュー(docs/コンテキストメニュー仕様.md) ----
+// 「文脈ノード」の形: { label, shortcut?, checked?, enabled?(既定true), note?, run?, separatorAfter?, submenu?(同じ形の配列) }。
+// run を持つ項目が葉、submenu を持つ項目が入れ子(仕様書は1階層のみ使う)。
+// commands配列(File/Edit/...)のような「id→定義」の静的レジストリではなく、呼び出し側
+// (main.js・sidebar.js)がクリック位置の文脈に応じてその場で組み立てて渡す動的な木である点が
+// buildCommands()と異なる(同じ仕組みに無理に統合しない)。
+
+// 入力欄(input/textarea)の上の最小メニュー(仕様書 第5節)。OS標準相当の構成のみで、
+// マークダウン固有の項目は一切出さない。document.execCommandは非推奨だが、input/textarea
+// 単体への操作(cut/copy/paste/delete/undo/redo)としては現役でどのブラウザでも確実に効く
+// (Clipboard APIの非同期権限確認を待たずに済む利点もある)。
+function buildInputMenuTree(target) {
+  const hasSelection = target.selectionStart !== target.selectionEnd;
+  const exec = (cmd) => () => { target.focus(); document.execCommand(cmd); };
+  return [
+    { label: "元に戻す", run: exec("undo") },
+    { label: "やり直す", run: exec("redo"), separatorAfter: true },
+    { label: "切り取り", enabled: hasSelection, run: exec("cut") },
+    { label: "コピー", enabled: hasSelection, run: exec("copy") },
+    { label: "貼り付け", run: exec("paste") },
+    { label: "削除", enabled: hasSelection, run: exec("delete"), separatorAfter: true },
+    { label: "すべて選択", run: () => { target.focus(); target.select(); } },
+  ];
+}
+
+// 文脈ノードの木 → NativeMenu.MenuItemData(open-menuと同じJSON形)への変換。
+// idは「実行したい関数」を引くためだけの使い捨てキーで、commands配列のドット付きid
+// (例: "file.save")とは別名前空間にする(絶対に衝突しないよう、ドットを含まない連番にする)。
+let ctxIdSeq = 0;
+function compileForNative(tree) {
+  const registry = new Map();
+  function conv(nodes) {
+    return nodes.map((n) => {
+      const hasSubmenu = !!n.submenu;
+      const id = hasSubmenu ? null : `ctx${ctxIdSeq++}`;
+      if (id) registry.set(id, n.run);
+      return {
+        id,
+        label: n.label,
+        shortcut: n.shortcut ?? "",
+        enabled: n.enabled !== false,
+        checked: !!n.checked,
+        separatorAfter: !!n.separatorAfter,
+        note: n.note ?? "",
+        submenu: hasSubmenu ? conv(n.submenu) : undefined,
+      };
+    });
+  }
+  return { items: conv(tree), registry };
+}
+
+// HTMLフォールバック(ブリッジが無い環境。検証スクリプト・ブラウザ単体確認用)のレンダリング。
+// メニューバーのHTMLフォールバック(renderDropdown/renderSubmenu、上のinitMenuBar内)と
+// ほぼ同じ見た目・構造にするが、文脈ノードの木(run/submenuを直接持つ)を描くための
+// 独立した実装として持つ(呼び出し元がcommands配列を経由しないため共有できない)。
+function renderFallbackTree(tree, x, y) {
+  const root = document.createElement("div");
+  root.className = "menu-dropdown";
+  root.style.left = x + "px";
+  root.style.top = y + "px";
+
+  function renderInto(container, nodes) {
+    for (const n of nodes) {
       const row = document.createElement("button");
       row.type = "button";
-      row.className = "menu-item";
-      row.innerHTML = `<span class="menu-item-check"></span><span class="menu-item-label">${cmd.label}</span><span class="menu-item-shortcut">${cmd.shortcut ?? ""}</span>`;
-      row.addEventListener("click", () => { close(); cmd.run(); });
-      menuEl.appendChild(row);
+      const enabled = n.enabled !== false;
+      row.className = "menu-item" + (enabled ? "" : " disabled");
+      row.innerHTML = `<span class="menu-item-check">${n.checked ? "✓" : ""}</span>` +
+        `<span class="menu-item-label">${n.label}</span>` +
+        `<span class="menu-item-shortcut">${n.submenu ? "▶" : n.shortcut ? n.shortcut : (n.note ?? "")}</span>`;
+      if (n.submenu) {
+        let subEl = null;
+        row.addEventListener("mouseenter", () => {
+          subEl?.remove();
+          subEl = document.createElement("div");
+          subEl.className = "menu-dropdown";
+          const rect = row.getBoundingClientRect();
+          subEl.style.left = rect.right + "px";
+          subEl.style.top = rect.top + "px";
+          renderInto(subEl, n.submenu);
+          root.appendChild(subEl);
+        });
+        row.addEventListener("mouseleave", (e) => {
+          if (subEl && !subEl.contains(e.relatedTarget)) { subEl.remove(); subEl = null; }
+        });
+      } else if (enabled) {
+        row.addEventListener("click", () => { closeFallbackMenu(); n.run(); });
+      } else {
+        row.disabled = true;
+        if (n.note) row.title = n.note;
+      }
+      container.appendChild(row);
+      if (n.separatorAfter) {
+        const sep = document.createElement("div");
+        sep.className = "menu-separator";
+        container.appendChild(sep);
+      }
     }
-    document.body.appendChild(menuEl);
-    const onOutside = (ev) => { if (!menuEl.contains(ev.target)) { close(); document.removeEventListener("mousedown", onOutside, true); } };
-    document.addEventListener("mousedown", onOutside, true);
+  }
+  renderInto(root, tree);
+  document.body.appendChild(root);
+  return root;
+}
+let fallbackMenuEl = null;
+let fallbackOutsideHandler = null;
+function closeFallbackMenu() {
+  fallbackMenuEl?.remove();
+  fallbackMenuEl = null;
+  if (fallbackOutsideHandler) {
+    document.removeEventListener("mousedown", fallbackOutsideHandler, true);
+    fallbackOutsideHandler = null;
+  }
+}
+
+// ネイティブポップアップ経路での「WebView2内クリックで閉じる」監視(initMenuBarの
+// watchOutsideClick/stopOutsideClickWatchと同じ理由・同じ作法。ポップアップは別ウィンドウの
+// ため、WebView2の中のクリックはポップアップ側からは検知できない)。
+let ctxOutsideClickHandler = null;
+function stopCtxOutsideWatch() {
+  if (!ctxOutsideClickHandler) return;
+  window.removeEventListener("pointerdown", ctxOutsideClickHandler, true);
+  ctxOutsideClickHandler = null;
+}
+function watchCtxOutsideClick(ctx) {
+  stopCtxOutsideWatch();
+  ctxOutsideClickHandler = () => { stopCtxOutsideWatch(); ctx.bridge?.postMessage({ type: "close-menu" }); };
+  window.addEventListener("pointerdown", ctxOutsideClickHandler, true);
+}
+
+// 文脈ノードの木を実際に表示する。ブリッジがあればネイティブポップアップ(Pane/NativeMenu.cs)、
+// 無ければHTMLの.menu-dropdownにフォールバックする(仕様書 大原則2)。
+// 呼び出し元(本文・サイドバーのアウトライン/ファイル一覧/ファイルツリー・入力欄)から共通に使う。
+export function showContextMenu(ctx, x, y, tree) {
+  closeFallbackMenu();
+  if (ctx.bridge) {
+    const { items, registry } = compileForNative(tree);
+    const handleMenuCommand = (id) => { stopCtxOutsideWatch(); registry.get(id)?.(); };
+    // menu-closedのmenuは常に"__context__"(C#側 MainForm.HandleOpenContextMenuRequest)。
+    // メニューバー側から遅れて届いた別名の通知を誤って自分宛てと解釈しないよう名前を確認する
+    // (initMenuBarのhandleMenuClosedと同じ理由の防御)。
+    const handleMenuClosed = (menu) => { if (menu !== "__context__") return; stopCtxOutsideWatch(); };
+    activeNativeOwner = { handleMenuCommand, handleMenuClosed };
+    ctx.bridge.postMessage({ type: "open-context-menu", x, y, items });
+    watchCtxOutsideClick(ctx);
+  } else {
+    fallbackMenuEl = renderFallbackTree(tree, x, y);
+    fallbackOutsideHandler = (e) => { if (!fallbackMenuEl.contains(e.target)) closeFallbackMenu(); };
+    document.addEventListener("mousedown", fallbackOutsideHandler, true);
+  }
+}
+
+// contextmenu イベントの受け口。rootEl配下のどこで右クリックされても、まず入力欄
+// (input/textarea)かどうかを最優先で判定し(仕様書 第5節、どの文脈にいても入力欄は
+// 入力欄用の最小メニューになる)、そうでなければ resolveTree(ctx, e) に文脈の判定を委ねる。
+// resolveTree が null/空配列を返した場所(メニューバー・ステータスバー・サイドバーの余白等)
+// では何も表示しない(仕様書 第6節。既定メニューの抑止自体は呼び出し元が別途、最外周で
+// document.addEventListener("contextmenu", ..., true) により行う)。
+export function initContextMenu(rootEl, ctx, resolveTree) {
+  rootEl.addEventListener("contextmenu", (e) => {
+    const inputTarget = e.target instanceof Element ? e.target.closest("input, textarea") : null;
+    const tree = inputTarget ? buildInputMenuTree(inputTarget) : resolveTree?.(ctx, e);
+    if (!tree || !tree.length) return;
+    e.preventDefault();
+    showContextMenu(ctx, e.clientX, e.clientY, tree);
   });
-  return { close };
 }
 
 // ---- ショートカット・ディスパッチ ----

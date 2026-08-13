@@ -4,7 +4,7 @@
 // 使えない場合(単体のブラウザで動作確認する場合)は File System Access API /
 // File API による仮実装にフォールバックする(Phase 1からの経路をそのまま維持)。
 import { createEditor, DEFAULT_FONT_SIZE } from "./editor.js";
-import { buildCommands, initMenuBar, initCommandPalette, initContextMenu, bindShortcuts, applyKeyBindings } from "./commands.js";
+import { buildCommands, initMenuBar, initCommandPalette, initContextMenu, routeNativeMenuCommand, routeNativeMenuClosed, bindShortcuts, applyKeyBindings } from "./commands.js";
 import { createSearchUI } from "./search-ui.js";
 import { createSidebar } from "./sidebar.js";
 import { createQuickOpen } from "./quick-open.js";
@@ -44,6 +44,12 @@ const adBannerClose = document.getElementById("ad-banner-close");
 const LANGUAGE_LABELS = Object.fromEntries(FILE_TYPES.map((t) => [t.id, t.label]));
 
 const bridge = window.chrome?.webview ?? null;
+
+// ブラウザ既定の右クリックメニューを一切出さない(docs/コンテキストメニュー仕様.md 大原則1)。
+// WebView2側でもAreDefaultContextMenusEnabled=falseを設定しているが(Pane/MainForm.cs)、
+// 保険としてJS側でも最外周(捕捉フェーズ)で止める。独自メニューを出す/出さないの判断は
+// このあと個別に登録するcontextmenuリスナー(initContextMenu、バブルフェーズ)側で行う。
+document.addEventListener("contextmenu", (e) => e.preventDefault(), true);
 
 // ---- 実機での不具合調査用ログ(仕様書外・デバッグ支援) ----
 // C#側のLogger(%LOCALAPPDATA%\Pane\logs\)へJS側のログもまとめて送る。DevTools(Shift+F12)を
@@ -343,7 +349,11 @@ function scheduleAutoDetectIdle() {
 // 選び直す。既存のコマンドパレット/クイックオープンと同じ.palette-overlayの仕組みを流用する。
 let langPickerOverlay = null;
 function closeLanguagePicker() { langPickerOverlay?.remove(); langPickerOverlay = null; }
-function openLanguagePicker() {
+// onChoose(languageId)を渡すと、選択時にコードモード全体の言語切替(既定の挙動)ではなく
+// そちらを呼ぶ(右クリックメニュー「コードブロックの中」→「言語を選択…」、
+// docs/コンテキストメニュー仕様.md 第2.6節が、コードモード全体ではなくフェンス1個の
+// 情報文字列だけを書き換えたいために一覧UIだけを再利用する)。
+function openLanguagePicker(onChoose) {
   if (langPickerOverlay) { closeLanguagePicker(); return; } // 開いている状態での再呼び出しはトグルで閉じる
   const items = codeLanguages
     .map((d) => ({ id: d.name, label: LANGUAGE_LABELS[d.name] ?? d.name }))
@@ -361,6 +371,7 @@ function openLanguagePicker() {
   let sel = 0;
   function choose(item) {
     closeLanguagePicker();
+    if (onChoose) { onChoose(item.id); return; }
     editor.setCodeLanguage(item.id).then(updateStatusMode);
     // 手動での言語選択(仕様書 第1章の拡張): 以後この文書には自動判定を行わない。
     autoDetectState.locked = true;
@@ -669,6 +680,15 @@ const ctx = {
         editor.pasteText(text);
       } catch { /* クリップボード読み取り権限が無ければ何もしない */ }
     },
+    // 右クリックメニュー「画像を開く」(docs/コンテキストメニュー仕様.md 2.4)。
+    // 既定のビューアで開く操作自体はC#(WinForms)側の機能のため、ブリッジが無い
+    // ブラウザ単体動作では提供できない。
+    openImageFile(rawSrc) {
+      if (!bridge) { window.alert("既定のビューアで開く機能はデスクトップアプリ版でのみ利用できます。"); return; }
+      const resolved = resolveImageFsPath(rawSrc);
+      if (!resolved) return;
+      bridge.postMessage({ type: "open-in-default-app", path: resolved });
+    },
     openSearch() { searchUI.open(false); },
     openReplace() { searchUI.open(true); },
     insertImageFlow() {
@@ -777,7 +797,12 @@ const commands = buildCommands(ctx);
 bindShortcuts(commands, ctx);
 const menuBar = initMenuBar(menubarEl, commands, ctx);
 const commandPalette = initCommandPalette(document.body, commands, ctx);
-initContextMenu(host, commands, ctx, resolveContextCommandIds);
+// 右クリック(コンテキスト)メニュー(docs/コンテキストメニュー仕様.md)。documentに1つだけ
+// 登録し、入力欄(input/textarea)かどうかはinitContextMenu自身が最優先で判定する
+// (検索ボックス・設定画面の入力欄など、どこにあっても同じ最小メニューになる、第5節)。
+// それ以外は本文(CodeMirror)の上かどうかで判定する(サイドバーの行別メニューは
+// sidebar.js自身がshowContextMenuを使って個別に配線しており、ここには含めない)。
+initContextMenu(document, ctx, (c, e) => (host.contains(e.target) ? buildEditorContextMenuTree(c, e) : null));
 
 // 設定画面(仕様書 第2.10節)。キーバインドタブがコマンド一覧を必要とするため、
 // buildCommands()の後でctx.commandsとして公開してから生成する。
@@ -794,17 +819,198 @@ if (!bridge) {
   window.__paneDebugCtx = ctx;
 }
 
-// 右クリックメニュー: リスト行の上ではリスト種別の相互変換(仕様書 P-13)を提示する。
-// それ以外は既定のブラウザメニューに任せる(コンテキストメニューの対応範囲はPhase 5時点ではここまで)。
-function resolveContextCommandIds(_ctx, e) {
-  const view = editor.view;
-  const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
-  if (pos == null) return null;
-  const line = view.state.doc.lineAt(pos);
-  if (/^\s*(?:[-*+]\s+(?:\[[ xX]\]\s*)?|\d+\.\s+)/.test(line.text)) {
-    return ["para.listBullet", "para.listOrdered", "para.listCheck"];
+// ---- 右クリックメニュー: 本文(CodeMirror)の上(docs/コンテキストメニュー仕様.md 第2章・第3章) ----
+// commands配列(File/Edit/Paragraph/Format/View)の中から、右クリックメニューでも使う項目を
+// そのまま拝借する小さなヘルパー。有効/チェック状態の評価もcommands配列の定義(grayed/enabled/
+// checked)にそのまま従うため、メニューバー・コマンドパレットと表示が食い違わない。
+function fromCommand(id, overrides) {
+  const c = commands.find((cmd) => cmd.id === id);
+  if (!c) return null;
+  const grayed = c.grayed?.(ctx) ?? false;
+  const enabled = !grayed && (c.enabled ? c.enabled(ctx) : true);
+  return { label: c.label, shortcut: c.shortcut, enabled, checked: !!c.checked?.(ctx), run: c.run, ...overrides };
+}
+const clip = (text) => navigator.clipboard.writeText(text).catch(() => {}); // クリップボードコピーはベストエフォート
+
+function buildEditorContextMenuTree(c, e) {
+  const mode = editor.getMode();
+  const info = editor.resolveContextMenu(e.clientX, e.clientY, e.target);
+  if (!info) return null;
+  const hasSelection = info.hasSelection;
+
+  // ---- コード/プレーンテキストモード(第3章): マークダウン固有の項目は一切出さない ----
+  if (mode !== "markdown") {
+    const tree = [
+      { label: "切り取り", enabled: hasSelection, run: () => document.execCommand("cut") },
+      { label: "コピー", enabled: hasSelection, run: () => document.execCommand("copy") },
+      { label: "貼り付け", run: () => pasteRichFromContextMenu() },
+      { label: "すべて選択", run: () => editor.applyAction("selectAll"), separatorAfter: true },
+      { label: "元に戻す", run: () => editor.applyAction("undo") },
+      { label: "やり直す", run: () => editor.applyAction("redo"), separatorAfter: true },
+      fromCommand("edit.find"),
+      { ...fromCommand("edit.replace"), separatorAfter: mode !== "code" },
+    ];
+    if (mode === "code") tree.push({ label: "言語を選択…", run: () => openLanguagePicker() });
+    return tree;
   }
-  return null;
+
+  // ---- Markdownモード(第2章) ----
+  const tree = [];
+
+  // 2.3〜2.9: 文脈固有セクション(該当する場合のみ)
+  if (info.kind === "link") {
+    tree.push(
+      { label: "リンクを開く", run: () => editor.openLink(info.href) },
+      { label: "リンクのURLをコピー", run: () => clip(info.href) },
+      { label: "リンクを編集…", run: () => editor.applyAction("linkEditUrl") },
+      { label: "リンクを解除", run: () => editor.applyAction("linkUnlink"), separatorAfter: true },
+    );
+  } else if (info.kind === "image") {
+    const isOnline = /^[a-zA-Z][\w+.-]*:/.test(info.src) || info.src.startsWith("//");
+    if (isOnline) {
+      tree.push({ label: "このURLをコピー", run: () => clip(info.src), separatorAfter: true });
+    } else {
+      tree.push(
+        { label: "画像を開く", enabled: !!bridge, run: () => ctx.actions.openImageFile(info.src) },
+        { label: "画像のパスをコピー", run: () => clip(info.src) },
+        { label: "画像のパスを編集…", run: () => editor.applyAction("imageEditPath") },
+        { label: "画像を削除", run: () => editor.applyAction("imageDelete"), separatorAfter: true },
+      );
+    }
+  } else if (info.kind === "table") {
+    tree.push(
+      { label: "行を上に挿入", run: () => editor.applyAction("tableInsertRowAbove", info) },
+      { label: "行を下に挿入", run: () => editor.applyAction("tableInsertRowBelow", info) },
+      { label: "列を左に挿入", run: () => editor.applyAction("tableInsertColLeft", info) },
+      { label: "列を右に挿入", run: () => editor.applyAction("tableInsertColRight", info), separatorAfter: true },
+      { label: "行を削除", enabled: info.rowKind === "body", run: () => editor.applyAction("deleteTableRow") },
+      { label: "列を削除", enabled: info.cols > 1, run: () => editor.applyAction("tableDeleteCol", info) },
+      { label: "表を削除", run: () => editor.applyAction("tableDelete"), separatorAfter: true },
+      {
+        label: "列の配置",
+        submenu: [
+          { label: "左揃え", run: () => editor.applyAction("tableAlignLeft", info) },
+          { label: "中央揃え", run: () => editor.applyAction("tableAlignCenter", info) },
+          { label: "右揃え", run: () => editor.applyAction("tableAlignRight", info) },
+          { label: "指定なし", run: () => editor.applyAction("tableAlignNone", info) },
+        ],
+        separatorAfter: true,
+      },
+    );
+  } else if (info.kind === "codeblock") {
+    tree.push(
+      { label: "言語を選択…", run: () => openLanguagePicker((id) => editor.applyAction("codeblockSetLang", { lang: id })) },
+      { label: "コードブロックの内容をコピー", run: () => clip(info.code) },
+      { label: "コードブロックを削除", run: () => editor.applyAction("codeblockDelete"), separatorAfter: true },
+    );
+  } else if (info.kind === "heading") {
+    const levels = [1, 2, 3, 4, 5, 6].map((lv) => ({ label: `見出し${lv}`, checked: info.level === lv, run: () => editor.applyAction(`h${lv}`) }));
+    tree.push({ label: "見出しレベル", submenu: [...levels, { label: "段落(見出し解除)", run: () => editor.applyAction("h0") }], separatorAfter: true });
+  } else if (info.kind === "list") {
+    // 既存のpara.listBullet/listOrdered/listCheck(いずれもcontextOnly、commands.js)を
+    // そのまま使う。checkedだけは現在の種別(info.listType)から上書きする
+    // (これらのコマンド定義自体にはchecked判定を持たせていないため)。
+    tree.push(
+      fromCommand("para.listBullet", { checked: info.listType === "bullet" }),
+      fromCommand("para.listOrdered", { checked: info.listType === "ordered" }),
+      fromCommand("para.listCheck", { checked: info.listType === "check" }),
+      fromCommand("para.indent"),
+      { ...fromCommand("para.outdent"), separatorAfter: true },
+    );
+  } else if (info.kind === "math") {
+    tree.push(
+      { label: "数式を編集", run: () => editor.applyAction("mathEditSelect") },
+      { label: "数式を削除", run: () => editor.applyAction("mathDelete"), separatorAfter: true },
+    );
+  }
+
+  // 2.1: 編集セクション(常時)
+  tree.push(
+    { label: "切り取り", enabled: hasSelection, run: () => document.execCommand("cut") },
+    { label: "コピー", enabled: hasSelection, run: () => document.execCommand("copy") },
+    { label: "貼り付け", run: () => pasteRichFromContextMenu() },
+    fromCommand("edit.pastePlain"),
+    { label: "すべて選択", run: () => editor.applyAction("selectAll") },
+    { ...fromCommand("edit.copyMarkdown"), enabled: hasSelection },
+    { ...fromCommand("edit.copyHtml"), enabled: hasSelection, separatorAfter: true },
+  );
+
+  // 2.2: 書式サブメニュー(選択がある場合)
+  if (hasSelection) {
+    tree.push({
+      label: "書式",
+      submenu: [
+        fromCommand("format.bold"), fromCommand("format.italic"), fromCommand("format.underline"),
+        fromCommand("format.code"), fromCommand("format.strike"), fromCommand("format.highlight"),
+        fromCommand("format.superscript"), { ...fromCommand("format.subscript"), separatorAfter: true },
+        fromCommand("format.link"), fromCommand("format.eraseFormat"),
+      ],
+    });
+  }
+
+  // 2.11: 段落サブメニュー(選択も文脈も無い場合のみ)
+  if (!hasSelection && info.kind === "paragraph") {
+    tree.push({
+      label: "段落",
+      submenu: [
+        fromCommand("para.h1"), fromCommand("para.h2"), fromCommand("para.h3"),
+        fromCommand("para.h4"), fromCommand("para.h5"), { ...fromCommand("para.h6"), separatorAfter: true },
+        fromCommand("para.p"), fromCommand("para.quote"), fromCommand("para.list"), fromCommand("para.olist"),
+        { label: "タスクリスト", run: () => editor.applyAction("check"), separatorAfter: true },
+        fromCommand("para.table"), fromCommand("para.codeblock"), fromCommand("para.mathBlock"),
+        { label: "水平線", run: () => editor.applyAction("hr") },
+      ],
+    });
+  }
+
+  // 2.10: その他セクション(常時)
+  tree.push({ label: "元に戻す", run: () => editor.applyAction("undo") });
+  tree.push({ label: "やり直す", run: () => editor.applyAction("redo"), separatorAfter: true });
+  tree.push({ label: "検索…", run: () => ctx.actions.openSearch() });
+  if (hasSelection) tree.push({ label: "選択箇所を検索", run: () => ctx.actions.openSearch() });
+
+  return tree;
+}
+
+// 貼り付け(仕様書 コンテキストメニュー仕様 2.1「常時 | 既存の貼り付け経路」)。
+// 通常のキー操作(Ctrl+V)はcontentDOMへの本物のpasteイベント(main.jsのonPaste)で処理されるが、
+// 右クリックメニューからは本物のpasteイベントを発生させられないため、非同期Clipboard API
+// (navigator.clipboard.read())でHTML/画像/プレーンテキストを順に試す。onPasteと同じ優先順位
+// (HTML→画像→プレーン)に揃える。read()自体が使えない/権限が無い環境ではプレーンテキスト
+// 貼り付け(既存のpasteAsPlainText経路)へフォールバックする。
+async function pasteRichFromContextMenu() {
+  if (!navigator.clipboard?.read) { await ctx.actions.pasteAsPlainText(); return; }
+  try {
+    const items = await navigator.clipboard.read();
+    for (const item of items) {
+      if (!item.types.includes("text/html")) continue;
+      const html = await (await item.getType("text/html")).text();
+      const md = htmlToMarkdown(html).trim();
+      if (md) { editor.pasteText(md); return; }
+    }
+    for (const item of items) {
+      const imgType = item.types.find((ty) => ty.startsWith("image/"));
+      if (!imgType) continue;
+      const blob = await item.getType(imgType);
+      await insertImageFile(new File([blob], "clipboard." + imgType.split("/")[1], { type: imgType }));
+      return;
+    }
+  } catch {
+    // クリップボード読み取り権限が無い等はプレーンテキストへフォールバック
+  }
+  await ctx.actions.pasteAsPlainText();
+}
+
+// 画像を既定のビューアで開く(docs/コンテキストメニュー仕様.md 2.4)。ライブプレビューの<img>の
+// srcはWebView2内で表示するための解決(resolveImageSrc、typora-root-url対応)であって実際の
+// ファイルシステム上のパスではないため、ここでは現在の文書のフォルダを基準に別途解決する
+// (front matterのtypora-root-urlまでは追わない簡易実装)。
+function resolveImageFsPath(rawSrc) {
+  if (!rawSrc || /^[a-zA-Z][\w+.-]*:/.test(rawSrc) || rawSrc.startsWith("//")) return null; // オンライン画像等
+  if (/^[a-zA-Z]:[\\/]/.test(rawSrc) || rawSrc.startsWith("\\\\")) return rawSrc; // 既に絶対パス
+  if (!currentPath) return null; // 無題文書では相対パスの基準が無い
+  const dir = currentPath.replace(/[\\/][^\\/]*$/, "");
+  return dir + "\\" + rawSrc.replace(/\//g, "\\");
 }
 
 // コマンドパレット(Ctrl+Shift+P、仕様書 第10.1節)。5つのメニューのどれにも属さないため
@@ -1159,13 +1365,15 @@ async function handleHostMessage(msg) {
       windowState = { fullscreen: !!msg.fullscreen, alwaysOnTop: !!msg.alwaysOnTop };
       break;
     case "menu-command":
-      // ネイティブメニュー(Pane/NativeMenu.cs)で項目が選ばれた。既存のcommands配列から
-      // idで引いて実行する(コマンドの実装はC#側に持たせない。commands.js参照)。
-      menuBar.handleMenuCommand(msg.id);
+      // ネイティブメニュー(Pane/NativeMenu.cs)で項目が選ばれた。メニューバー/右クリック
+      // メニューのどちらから開いたかに応じて、最後に開いた側(commands.jsが覚えている)へ
+      // ルーティングする(コマンドの実装はC#側に持たせない。commands.js参照)。
+      routeNativeMenuCommand(msg.id);
       break;
     case "menu-closed":
-      // ネイティブメニューが選択なしで閉じられた。見出しのハイライトを解除するだけ。
-      menuBar.handleMenuClosed(msg.menu);
+      // ネイティブメニューが選択なしで閉じられた。見出しのハイライト解除・外側クリック監視の
+      // 解除を、開いていた側(メニューバー or 右クリックメニュー)だけに委ねる。
+      routeNativeMenuClosed(msg.menu);
       break;
   }
 }
