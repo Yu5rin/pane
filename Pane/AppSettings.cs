@@ -43,4 +43,10 @@ internal sealed class AppSettings
 
     /// <summary>数式の自動採番(C-04)。既定OFF。</summary>
     public bool MathAutoNumberEnabled { get; set; }
+
+    /// <summary>"markdown" | "html"。既定のコピー形式(仕様書 第2.9.3節)。</summary>
+    public string DefaultCopyFormat { get; set; } = "markdown";
+
+    /// <summary>最近使ったファイル(仕様書 F-09)。先頭が最新。最大件数はRecentFilesService側で制御する。</summary>
+    public List<string> RecentFiles { get; set; } = new();
 }

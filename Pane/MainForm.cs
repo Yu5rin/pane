@@ -1,3 +1,6 @@
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
@@ -27,6 +30,7 @@ internal sealed class MainForm : Form
     private readonly WebView2 _webView = new();
     private readonly string? _initialPath;
     private readonly AutoSaveSnapshot? _recoverFrom;
+    private readonly Action<string?>? _requestNewWindow;
     private readonly System.Windows.Forms.Timer _autoSaveTimer;
     private readonly System.Windows.Forms.Timer _externalChangeDebounceTimer;
 
@@ -48,10 +52,11 @@ internal sealed class MainForm : Form
 
     public bool IsDirty => _isDirty;
 
-    public MainForm(string? initialPath, AutoSaveSnapshot? recoverFrom = null)
+    public MainForm(string? initialPath, AutoSaveSnapshot? recoverFrom = null, Action<string?>? requestNewWindow = null)
     {
         _initialPath = initialPath;
         _recoverFrom = recoverFrom;
+        _requestNewWindow = requestNewWindow;
 
         Text = "Pane";
         Width = 960;
@@ -99,6 +104,12 @@ internal sealed class MainForm : Form
         // Formのドラッグ&ドロップ(コマンドライン引数・D&Dと同じOpenFile経路)を使うため、
         // WebView2自身にドロップを処理させない。
         _webView.AllowExternalDrop = false;
+        // ブラウザ既定のアクセラレータキー(Ctrl+U=ソース表示、Ctrl+F=検索、Ctrl+P=印刷、
+        // F3=検索、F12=DevTools等)を無効化する。無効化しないとPane独自のショートカット
+        // (仕様書 第2章のCtrl+U下線・Ctrl+F検索・Ctrl+Alt+P印刷等)より先にWebView2側の
+        // 既定動作が奪ってしまい、JS側のkeydownハンドラに届かない。開発者ツールは
+        // Viewメニュー(Shift+F12、独自ハンドラ)から明示的に開けるようにしている。
+        _webView.CoreWebView2.Settings.AreBrowserAcceleratorKeysEnabled = false;
         _webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
 
         string distPath = ResolveDistPath();
@@ -139,7 +150,7 @@ internal sealed class MainForm : Form
         switch (type)
         {
             case "ready":
-                PostExtensionToggles();
+                PostCapabilities();
                 if (_recoverFrom is not null) RestoreFromSnapshot(_recoverFrom);
                 else if (_initialPath is not null) OpenFile(_initialPath);
                 else OpenNewDocument();
@@ -147,6 +158,12 @@ internal sealed class MainForm : Form
                 break;
             case "open":
                 HandleOpenRequest();
+                break;
+            case "open-path":
+                if (root.TryGetProperty("path", out JsonElement openPathProp))
+                {
+                    OpenFile(openPathProp.GetString() ?? "");
+                }
                 break;
             case "save":
                 HandleSaveRequest(root);
@@ -165,6 +182,27 @@ internal sealed class MainForm : Form
                 break;
             case "open-settings":
                 ShowSettingsDialog();
+                break;
+            case "new":
+                OpenNewDocument();
+                break;
+            case "new-window":
+                _requestNewWindow?.Invoke(null);
+                break;
+            case "close":
+                Close();
+                break;
+            case "print":
+                _ = HandlePrintRequestAsync();
+                break;
+            case "open-devtools":
+                _webView.CoreWebView2.OpenDevToolsWindow();
+                break;
+            case "export":
+                _ = HandleExportRequestAsync(root);
+                break;
+            case "insert-image":
+                HandleInsertImageRequest(root);
                 break;
         }
     }
@@ -262,6 +300,7 @@ internal sealed class MainForm : Form
             _isReadOnly = IsFileReadOnly(path);
             SetDirty(false);
             StartWatching(path);
+            AddRecentFile(path);
             PostToWeb(new
             {
                 type = "file-opened",
@@ -509,15 +548,17 @@ internal sealed class MainForm : Form
         settings.HighlightEnabled = dialog.HighlightEnabled;
         settings.InlineMathEnabled = dialog.InlineMathEnabled;
         settings.MathAutoNumberEnabled = dialog.MathAutoNumberEnabled;
+        settings.DefaultCopyFormat = dialog.DefaultCopyFormat;
         SettingsService.Save(settings);
-        PostExtensionToggles();
+        PostCapabilities();
     }
 
     /// <summary>
-    /// マークダウン記法拡張のON/OFF(仕様書 第2.10節 C-01)をJS側へ伝える。
-    /// 起動時("ready"受信直後)と、設定画面でOKが押されるたびに送る。
+    /// マークダウン記法拡張のON/OFF(仕様書 第2.10節 C-01)・最近使ったファイル(F-09)・
+    /// Pandoc導入状況・既定コピー形式をJS側へ伝える。起動時("ready"受信直後)、設定画面でOKが
+    /// 押されるたび、最近使ったファイルが更新されるたびに送る。
     /// </summary>
-    private void PostExtensionToggles()
+    private void PostCapabilities()
     {
         AppSettings settings = SettingsService.Load();
         PostToWeb(new
@@ -528,6 +569,201 @@ internal sealed class MainForm : Form
             highlightEnabled = settings.HighlightEnabled,
             inlineMathEnabled = settings.InlineMathEnabled,
             mathAutoNumberEnabled = settings.MathAutoNumberEnabled,
+            defaultCopyFormat = settings.DefaultCopyFormat,
+            recentFiles = settings.RecentFiles,
+            pandocAvailable = DetectPandocAvailable(),
         });
+    }
+
+    /// <summary>最近使ったファイル一覧(仕様書 F-09)を更新する。先頭が最新、重複除去、最大10件。</summary>
+    private static void AddRecentFile(string path)
+    {
+        AppSettings settings = SettingsService.Load();
+        settings.RecentFiles.RemoveAll(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase));
+        settings.RecentFiles.Insert(0, path);
+        if (settings.RecentFiles.Count > 10)
+        {
+            settings.RecentFiles.RemoveRange(10, settings.RecentFiles.Count - 10);
+        }
+        SettingsService.Save(settings);
+    }
+
+    private static bool? _pandocAvailableCache;
+
+    /// <summary>Pandocの導入有無を検出する(仕様書: Word/EPUBエクスポートに必要)。プロセス起動1回のみでキャッシュする。</summary>
+    private static bool DetectPandocAvailable()
+    {
+        if (_pandocAvailableCache is bool cached) return cached;
+        bool available;
+        try
+        {
+            using var proc = Process.Start(new ProcessStartInfo("pandoc", "--version")
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            });
+            available = proc is not null && proc.WaitForExit(3000) && proc.ExitCode == 0;
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or IOException)
+        {
+            available = false; // Pandoc未導入(PATHに無い)
+        }
+        _pandocAvailableCache = available;
+        return available;
+    }
+
+    // ---- 印刷(仕様書 File項目「印刷」)。WebView2既定の印刷ダイアログを開く。 ----
+    private Task HandlePrintRequestAsync()
+    {
+        try
+        {
+            _webView.CoreWebView2.ShowPrintUI(CoreWebView2PrintDialogKind.Browser);
+        }
+        catch (Exception ex) when (ex is COMException or InvalidOperationException)
+        {
+            // 印刷ダイアログを開けない環境ではベストエフォートで諦める
+        }
+        return Task.CompletedTask;
+    }
+
+    // ---- エクスポート(仕様書 F-XX)。PDF/画像はWebView2のネイティブ機能、HTMLは
+    // JS側で組み立て済みのHTML文字列をそのまま保存、Word/EPUBはPandocに委譲する。 ----
+    private async Task HandleExportRequestAsync(JsonElement message)
+    {
+        string format = message.TryGetProperty("format", out JsonElement fmtProp) ? fmtProp.GetString() ?? "" : "";
+        string text = message.TryGetProperty("text", out JsonElement textProp) ? textProp.GetString() ?? "" : "";
+        string baseName = _currentPath is null ? "無題" : Path.GetFileNameWithoutExtension(_currentPath);
+
+        (string filter, string ext) = format switch
+        {
+            "pdf" => ("PDF (*.pdf)|*.pdf", ".pdf"),
+            "html" or "html-plain" => ("HTML (*.html)|*.html", ".html"),
+            "png" => ("PNG画像 (*.png)|*.png", ".png"),
+            "docx" => ("Word文書 (*.docx)|*.docx", ".docx"),
+            "epub" => ("EPUB (*.epub)|*.epub", ".epub"),
+            _ => ("すべてのファイル (*.*)|*.*", ""),
+        };
+        using var dialog = new SaveFileDialog { Filter = filter, FileName = baseName + ext };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        string targetPath = dialog.FileName;
+
+        try
+        {
+            switch (format)
+            {
+                case "pdf":
+                    await _webView.CoreWebView2.PrintToPdfAsync(targetPath);
+                    break;
+                case "html":
+                case "html-plain":
+                    await File.WriteAllTextAsync(targetPath, text, new UTF8Encoding(false));
+                    break;
+                case "png":
+                    await using (FileStream stream = File.Create(targetPath))
+                    {
+                        await _webView.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, stream);
+                    }
+                    break;
+                case "docx":
+                case "epub":
+                    await ExportViaPandocAsync(text, targetPath);
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"エクスポートに失敗しました。\n{ex.Message}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private static async Task ExportViaPandocAsync(string markdownText, string targetPath)
+    {
+        string tempMd = Path.Combine(Path.GetTempPath(), $"pane-export-{Guid.NewGuid():N}.md");
+        try
+        {
+            await File.WriteAllTextAsync(tempMd, markdownText, new UTF8Encoding(false));
+            var psi = new ProcessStartInfo("pandoc")
+            {
+                UseShellExecute = false,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+            psi.ArgumentList.Add(tempMd);
+            psi.ArgumentList.Add("-o");
+            psi.ArgumentList.Add(targetPath);
+            using var proc = Process.Start(psi);
+            if (proc is null) throw new InvalidOperationException("Pandocを起動できませんでした。");
+            string stderr = await proc.StandardError.ReadToEndAsync();
+            await proc.WaitForExitAsync();
+            if (proc.ExitCode != 0) throw new InvalidOperationException(string.IsNullOrWhiteSpace(stderr) ? "Pandocの変換に失敗しました。" : stderr);
+        }
+        finally
+        {
+            try { File.Delete(tempMd); } catch (IOException) { /* ベストエフォート */ }
+        }
+    }
+
+    // ---- 画像挿入(仕様書 R-07)。文書と同じフォルダの images/ 配下へコピーし、相対パスを返す。 ----
+    private void HandleInsertImageRequest(JsonElement message)
+    {
+        if (_currentPath is null)
+        {
+            MessageBox.Show(this, "画像を挿入する前に、文書を一度保存してください。", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        string docDir = Path.GetDirectoryName(Path.GetFullPath(_currentPath))!;
+        string imagesDir = Path.Combine(docDir, "images");
+
+        string? sourcePath = null;
+        byte[]? bytes = null;
+        string suggestedName = "image.png";
+
+        if (message.TryGetProperty("dataBase64", out JsonElement dataProp) && dataProp.ValueKind == JsonValueKind.String)
+        {
+            bytes = Convert.FromBase64String(dataProp.GetString() ?? "");
+            if (message.TryGetProperty("name", out JsonElement nameProp) && nameProp.GetString() is string n && n.Length > 0)
+            {
+                suggestedName = n;
+            }
+        }
+        else
+        {
+            using var dialog = new OpenFileDialog
+            {
+                Filter = "画像ファイル (*.png;*.jpg;*.jpeg;*.gif;*.svg;*.webp)|*.png;*.jpg;*.jpeg;*.gif;*.svg;*.webp",
+            };
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            sourcePath = dialog.FileName;
+            suggestedName = Path.GetFileName(sourcePath);
+        }
+
+        try
+        {
+            Directory.CreateDirectory(imagesDir);
+            string destPath = UniqueDestinationPath(imagesDir, suggestedName);
+            if (sourcePath is not null) File.Copy(sourcePath, destPath);
+            else File.WriteAllBytes(destPath, bytes!);
+
+            string relative = Path.GetRelativePath(docDir, destPath).Replace(Path.DirectorySeparatorChar, '/');
+            PostToWeb(new { type = "image-inserted", alt = Path.GetFileNameWithoutExtension(destPath), path = relative });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"画像を挿入できませんでした。\n{ex.Message}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private static string UniqueDestinationPath(string dir, string fileName)
+    {
+        string name = Path.GetFileNameWithoutExtension(fileName);
+        string ext = Path.GetExtension(fileName);
+        string candidate = Path.Combine(dir, fileName);
+        for (int i = 1; File.Exists(candidate); i++)
+        {
+            candidate = Path.Combine(dir, $"{name}-{i}{ext}");
+        }
+        return candidate;
     }
 }

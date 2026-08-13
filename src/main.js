@@ -1,24 +1,38 @@
 // Pane エントリポイント。
 // WebView2(window.chrome.webview)が使える場合はpostMessageブリッジでC#側に
-// ファイルの開閉・保存を委譲する(Phase 2、仕様書 第7章)。
+// ファイルの開閉・保存・エクスポート・印刷・画像挿入等を委譲する(仕様書 第7章)。
 // 使えない場合(単体のブラウザで動作確認する場合)は File System Access API /
 // File API による仮実装にフォールバックする(Phase 1からの経路をそのまま維持)。
 import { createEditor } from "./editor.js";
+import { buildCommands, initMenuBar, initCommandPalette, initContextMenu, createShortcutHandler, bindGlobalShortcuts } from "./commands.js";
+import { createSearchUI } from "./search-ui.js";
+import { htmlToMarkdown } from "./html-to-markdown.js";
 
 const host = document.getElementById("cm-host");
 const titlebar = document.getElementById("titlebar");
 const filenameEl = document.getElementById("filename");
+const menubarEl = document.getElementById("menubar");
+const statusMode = document.getElementById("status-mode");
 const statusCount = document.getElementById("status-count");
 const statusEncoding = document.getElementById("status-encoding");
 const statusLineEnding = document.getElementById("status-line-ending");
+const statusWrapBtn = document.getElementById("status-wrap");
 const fileInput = document.getElementById("file-input");
+const imageInput = document.getElementById("image-input");
 
 const bridge = window.chrome?.webview ?? null;
 
 let currentHandle = null; // File System Access API(ブラウザ単体時のみ使用)
+let currentPath = null; // ブリッジ経由で開いた際のフルパス(最近使ったファイル・画像挿入・reopenClosedに使う)
 let currentName = "無題";
 let currentEncoding = null;
 let currentLineEnding = null;
+let wordWrapOn = true;
+let defaultCopyFormat = "markdown"; // "markdown" | "html"(仕様書 第2.9.3節、設定で切替)
+let pandocAvailable = false;
+let recentFiles = [];
+const closedFiles = []; // 閉じたファイルを再度開く(このウィンドウ内での置き換え履歴、ブリッジ利用時のみ)
+const CLOSED_FILES_CAP = 20;
 
 function setDirty(v) {
   titlebar.classList.toggle("dirty", v);
@@ -35,15 +49,197 @@ function updateStatusMeta() {
   statusEncoding.textContent = currentEncoding ?? "";
   statusLineEnding.textContent = currentLineEnding ?? "";
 }
+const MODE_LABELS = { markdown: "Markdown", code: "コード", plain: "プレーンテキスト" };
+function updateStatusMode() {
+  const mode = editor.getMode();
+  statusMode.textContent = MODE_LABELS[mode] ?? mode;
+  host.classList.toggle("mode-code", mode === "code");
+}
+function updateWrapButton() {
+  statusWrapBtn.textContent = wordWrapOn ? "折り返し: あり" : "折り返し: なし";
+}
+function pushClosedFile(path) {
+  if (!path) return;
+  closedFiles.push(path);
+  if (closedFiles.length > CLOSED_FILES_CAP) closedFiles.shift();
+}
+function setReadOnly(readOnly) {
+  editor.setEditable(!readOnly);
+  titlebar.classList.toggle("readonly", !!readOnly);
+}
+
+// ショートカットはcommands.js側(createShortcutHandler)が担うが、そのコマンド一覧の
+// 構築にはeditorの生成が必要な循環があるため、実体は後で差し替える前提の間接参照にする。
+let shortcutHandler = () => false;
 
 const editor = createEditor(host, {
   onChange() {
     setDirty(true);
     updateCount();
   },
+  onKeydown: (e) => shortcutHandler(e),
+  // スマートペースト(仕様書 第2.9.3節): クリップボードにHTMLがあればMarkdownへ変換して挿入する。
+  // プレーンテキストのみの場合は既定の貼り付け(CM6の処理)に任せる。
+  onPaste: (e) => {
+    const html = e.clipboardData?.getData("text/html");
+    if (!html) return false;
+    const md = htmlToMarkdown(html).trim();
+    if (!md) return false;
+    editor.pasteText(md);
+    return true;
+  },
+  // 既定のコピー形式(仕様書 第2.9.3節、設定でHTML同時コピーに切替可能)
+  onCopy: (e) => {
+    if (defaultCopyFormat !== "html") return false;
+    const sel = editor.view.state.selection.main;
+    if (sel.from === sel.to) return false;
+    const md = editor.getMarkdownForClipboard();
+    const html = editor.getHtmlForClipboard();
+    e.clipboardData.setData("text/plain", md);
+    e.clipboardData.setData("text/html", html);
+    return true;
+  },
 });
 updateCount();
 updateStatusMeta();
+updateStatusMode();
+updateWrapButton();
+
+const searchUI = createSearchUI(editor, host);
+
+function getState() {
+  return {
+    mode: editor.getMode(),
+    isReadOnly: titlebar.classList.contains("readonly"),
+    pandocAvailable,
+    wordWrap: wordWrapOn,
+    hasClosedFile: closedFiles.length > 0,
+    recentFiles,
+  };
+}
+
+const ctx = {
+  editor,
+  bridge,
+  getState,
+  actions: {
+    async newDocument() {
+      if (bridge) { bridge.postMessage({ type: "new" }); return; }
+      if (titlebar.classList.contains("dirty") && !window.confirm("保存されていない変更があります。新規文書を開くと失われますが、よろしいですか?")) return;
+      pushClosedFile(currentPath);
+      await applyNewDocumentLocal();
+    },
+    newWindow() {
+      if (bridge) bridge.postMessage({ type: "new-window" });
+      else window.open(location.href, "_blank", "noopener");
+    },
+    openFile,
+    save: () => saveFile(false),
+    saveAs: () => saveFile(true),
+    reopenClosed() {
+      if (!closedFiles.length || !bridge) return;
+      const path = closedFiles.pop();
+      bridge.postMessage({ type: "open-path", path });
+    },
+    openRecentFile(path) {
+      bridge?.postMessage({ type: "open-path", path });
+    },
+    async exportAs(format) {
+      if (!bridge) { window.alert("エクスポートはデスクトップアプリ版でのみ利用できます。"); return; }
+      let text;
+      if (format === "html") text = editor.getStandaloneHtml(currentName, true);
+      else if (format === "html-plain") text = editor.getStandaloneHtml(currentName, false);
+      else text = editor.getValue(); // pdf/pngは本文を使わない。docx/epubはMarkdown原文をPandocへ渡す。
+      bridge.postMessage({ type: "export", format, text });
+    },
+    print() {
+      if (bridge) bridge.postMessage({ type: "print" });
+      else window.print();
+    },
+    openSettings() { bridge?.postMessage({ type: "open-settings" }); },
+    async closeWindow() {
+      if (titlebar.classList.contains("dirty") && !window.confirm("保存されていない変更があります。閉じてもよろしいですか?")) return;
+      if (bridge) bridge.postMessage({ type: "close" });
+      else window.close();
+    },
+    async copyAsMarkdown() {
+      try { await navigator.clipboard.writeText(editor.getMarkdownForClipboard()); } catch { /* クリップボード権限が無い環境ではベストエフォート */ }
+    },
+    async copyAsHtml() {
+      const html = editor.getHtmlForClipboard();
+      const md = editor.getMarkdownForClipboard();
+      try {
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            "text/html": new Blob([html], { type: "text/html" }),
+            "text/plain": new Blob([md], { type: "text/plain" }),
+          }),
+        ]);
+      } catch {
+        try { await navigator.clipboard.writeText(md); } catch { /* ベストエフォート */ }
+      }
+    },
+    async pasteAsPlainText() {
+      try {
+        const text = await navigator.clipboard.readText();
+        editor.pasteText(text);
+      } catch { /* クリップボード読み取り権限が無ければ何もしない */ }
+    },
+    openSearch() { searchUI.open(false); },
+    openReplace() { searchUI.open(true); },
+    insertImageFlow() {
+      if (bridge) { bridge.postMessage({ type: "insert-image" }); return; }
+      imageInput.click(); // ブラウザ単体時のフォールバック
+    },
+    async setMode(mode) {
+      await editor.setFileMode(currentPath ?? currentName, mode);
+      updateStatusMode();
+    },
+    toggleWordWrap() {
+      wordWrapOn = !wordWrapOn;
+      editor.setWordWrap(wordWrapOn);
+      updateWrapButton();
+    },
+    gotoLineFlow() {
+      const total = editor.getValue().split("\n").length;
+      const input = window.prompt(`移動する行番号を入力してください(1〜${total})`);
+      if (!input) return;
+      const n = parseInt(input, 10);
+      if (Number.isFinite(n)) editor.gotoLine(n);
+    },
+    openDevTools() { bridge?.postMessage({ type: "open-devtools" }); },
+  },
+};
+
+const commands = buildCommands(ctx);
+shortcutHandler = createShortcutHandler(commands, ctx);
+bindGlobalShortcuts(commands, ctx);
+initMenuBar(menubarEl, commands, ctx);
+const commandPalette = initCommandPalette(document.body, commands, ctx);
+initContextMenu(host, commands, ctx, resolveContextCommandIds);
+
+// 右クリックメニュー: リスト行の上ではリスト種別の相互変換(仕様書 P-13)を提示する。
+// それ以外は既定のブラウザメニューに任せる(コンテキストメニューの対応範囲はPhase 5時点ではここまで)。
+function resolveContextCommandIds(_ctx, e) {
+  const view = editor.view;
+  const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
+  if (pos == null) return null;
+  const line = view.state.doc.lineAt(pos);
+  if (/^\s*(?:[-*+]\s+(?:\[[ xX]\]\s*)?|\d+\.\s+)/.test(line.text)) {
+    return ["para.listBullet", "para.listOrdered", "para.listCheck"];
+  }
+  return null;
+}
+
+// コマンドパレット(Ctrl+Shift+P、仕様書 第10.1節)。5つのメニューのどれにも属さないため
+// commands.jsの宣言的なショートカット一覧ではなく、ここで直接待ち受ける。
+window.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "p") {
+    e.preventDefault();
+    commandPalette.open();
+  }
+});
+statusWrapBtn.addEventListener("click", () => ctx.actions.toggleWordWrap());
 
 // ---- WebView2ブリッジ(Phase 2) ----
 if (bridge) {
@@ -51,38 +247,47 @@ if (bridge) {
   bridge.postMessage({ type: "ready" });
 }
 
-function setReadOnly(readOnly) {
-  editor.setEditable(!readOnly);
-  titlebar.classList.toggle("readonly", !!readOnly);
+async function applyFileOpened(msg) {
+  pushClosedFile(currentPath);
+  await editor.setFileMode(msg.fileName); // 拡張子から編集モードを切替(仕様書 第1章)
+  editor.setValue(msg.text);
+  setName(msg.fileName);
+  currentPath = msg.path ?? null;
+  currentEncoding = msg.encoding;
+  currentLineEnding = msg.lineEnding;
+  setReadOnly(msg.readOnly);
+  setDirty(false);
+  updateCount();
+  updateStatusMeta();
+  updateStatusMode();
+}
+async function applyNewDocumentLocal() {
+  await editor.setFileMode(null); // 無題の新規文書は既定でMarkdownモード
+  editor.setValue("");
+  setName("無題");
+  currentPath = null;
+  currentEncoding = null;
+  currentLineEnding = null;
+  setReadOnly(false);
+  setDirty(false);
+  updateCount();
+  updateStatusMeta();
+  updateStatusMode();
 }
 
 async function handleHostMessage(msg) {
   switch (msg?.type) {
     case "file-opened":
-      await editor.setFileMode(msg.fileName); // 拡張子から編集モードを切替(仕様書 第1章)
-      editor.setValue(msg.text);
-      setName(msg.fileName);
-      currentEncoding = msg.encoding;
-      currentLineEnding = msg.lineEnding;
-      setReadOnly(msg.readOnly);
-      setDirty(false);
-      updateCount();
-      updateStatusMeta();
+      await applyFileOpened(msg);
       break;
     case "new-document":
-      await editor.setFileMode(null); // 無題の新規文書は既定でMarkdownモード
-      editor.setValue("");
-      setName("無題");
-      currentEncoding = null;
-      currentLineEnding = null;
-      setReadOnly(false);
-      setDirty(false);
-      updateCount();
-      updateStatusMeta();
+      pushClosedFile(currentPath);
+      await applyNewDocumentLocal();
       break;
     case "save-result":
       if (msg.ok) {
         setName(msg.fileName);
+        currentPath = msg.path ?? currentPath;
         currentEncoding = msg.encoding;
         currentLineEnding = msg.lineEnding;
         setReadOnly(false);
@@ -96,7 +301,8 @@ async function handleHostMessage(msg) {
       bridge?.postMessage({ type: "text-response", text: editor.getValue() });
       break;
     case "apply-settings":
-      // マークダウン記法拡張のON/OFF(仕様書 第2.10節 C-01)。起動時と設定変更時に届く。
+      // マークダウン記法拡張のON/OFF(仕様書 第2.10節 C-01)・最近使ったファイル(F-09)・
+      // Pandoc導入状況・既定コピー形式。起動時と設定変更時、最近使ったファイル更新時に届く。
       editor.setExtensionToggles({
         callouts: msg.calloutsEnabled,
         superSub: msg.superSubEnabled,
@@ -104,6 +310,13 @@ async function handleHostMessage(msg) {
         inlineMath: msg.inlineMathEnabled,
         mathAutoNumber: msg.mathAutoNumberEnabled,
       });
+      defaultCopyFormat = msg.defaultCopyFormat ?? "markdown";
+      pandocAvailable = !!msg.pandocAvailable;
+      recentFiles = msg.recentFiles ?? [];
+      break;
+    case "image-inserted":
+      // 画像挿入(仕様書 R-07)。C#側でファイルコピー・相対パス解決を終えたものが届く。
+      editor.applyAction("image", { alt: msg.alt ?? "", path: msg.path ?? "" });
       break;
   }
 }
@@ -130,6 +343,7 @@ async function openFile() {
     setName(file.name);
     setDirty(false);
     updateCount();
+    updateStatusMode();
     return;
   }
   fileInput.click();
@@ -144,7 +358,22 @@ fileInput.addEventListener("change", async () => {
   setName(file.name);
   setDirty(false);
   updateCount();
+  updateStatusMode();
   fileInput.value = "";
+});
+
+// 画像挿入のブラウザ単体フォールバック(仕様書 R-07): ブリッジが無い場合は
+// 相対パス保存ができないため、data URIとして直接埋め込む(開発確認用の簡易対応)。
+imageInput.addEventListener("change", async () => {
+  const file = imageInput.files[0];
+  if (!file) return;
+  const dataUrl = await new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.readAsDataURL(file);
+  });
+  editor.applyAction("image", { alt: file.name.replace(/\.[^.]+$/, ""), path: dataUrl });
+  imageInput.value = "";
 });
 
 async function saveFile(forcePicker) {
@@ -181,26 +410,17 @@ async function saveFile(forcePicker) {
   setDirty(false);
 }
 
-document.getElementById("btn-open").addEventListener("click", openFile);
-document.getElementById("btn-save").addEventListener("click", () => saveFile(false));
-document.getElementById("btn-save-as").addEventListener("click", () => saveFile(true));
 document.getElementById("btn-theme").addEventListener("click", () => {
   const cur = document.documentElement.dataset.theme;
   document.documentElement.dataset.theme = cur === "dark" ? "light" : "dark";
+  editor.refreshTheme();
 });
 // 設定ダイアログはC#側のネイティブウィンドウで表示する(Phase 3時点の最小実装、Phase 8で置き換え)。
 const btnSettings = document.getElementById("btn-settings");
 if (btnSettings) {
   btnSettings.hidden = !bridge;
-  btnSettings.addEventListener("click", () => bridge?.postMessage({ type: "open-settings" }));
+  btnSettings.addEventListener("click", () => ctx.actions.openSettings());
 }
-
-window.addEventListener("keydown", (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
-    e.preventDefault();
-    saveFile(e.shiftKey);
-  }
-});
 
 window.addEventListener("beforeunload", (e) => {
   if (titlebar.classList.contains("dirty")) {
