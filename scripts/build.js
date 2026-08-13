@@ -9,7 +9,7 @@ const esbuild = require("esbuild");
 const serve = process.argv.includes("--serve");
 const watch = process.argv.includes("--watch") || serve;
 
-const staticFiles = ["index.html", "style.css", "icon.svg"];
+const staticFiles = ["index.html", "style.css", "themes.css", "icon.svg"];
 
 function copyStaticFiles() {
   fs.mkdirSync("dist", { recursive: true });
@@ -24,6 +24,95 @@ function copyStaticFiles() {
 // ビルド時定数として注入して回避する(mathjax-full自身のドキュメントに明記された対処法)。
 const mathjaxVersion = require("mathjax-full/package.json").version;
 
+const FILE_TYPES_SOURCE = path.join("src", "file-types.js");
+const FILE_TYPES_CS_OUTPUT = path.join("Pane", "FileTypes.generated.cs");
+
+// src/file-types.js(対応ファイル種別の単一ソース)を読み込み、
+// { FILE_TYPES, CATEGORIES } を取り出す。
+//
+// src/file-types.js はESM(export構文)で書かれており、各言語の load フィールドは
+// @codemirror/lang-* 等への動的importを含む。これを素朴に require() すると
+// export構文でSyntaxErrorになり、かといってNodeの動的import()に頼ると
+// package.jsonに "type": "module" が無い環境では実行するNodeのバージョンによって
+// 挙動が変わってしまう(モジュール種別の自動判定に対応していない古いNodeでは
+// 失敗し、対応していても "MODULE_TYPELESS_PACKAGE_JSON" 警告と再パースの
+// オーバーヘッドが出る)。
+//
+// そのためNode側の挙動には頼らず、プロジェクトが既にビルドに使っている
+// esbuildでCommonJS形式に変換してから読み込む。@codemirror/* 等のパッケージは
+// packages: "external" によりバンドルへ含めず require(...) 呼び出しのまま残す
+// (呼ばれた場合はそれぞれのpackage.jsonが持つ"require"条件で解決できる)。
+// ここで実際に使うのは FILE_TYPES のメタデータ(id/label/category/extensions)
+// だけで load 関数そのものは一度も呼び出さないため、legacy-modes側のimportが
+// 解決できるかどうかはここでは問題にならない(呼ばれなければ評価されない)。
+function loadFileTypes() {
+  const result = esbuild.buildSync({
+    entryPoints: [FILE_TYPES_SOURCE],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    packages: "external",
+    write: false,
+    logLevel: "silent",
+  });
+  const code = result.outputFiles[0].text;
+  const mod = { exports: {} };
+  const fn = new Function("module", "exports", "require", code);
+  fn(mod, mod.exports, require);
+  return mod.exports;
+}
+
+// C#の文字列リテラルとして安全な形にエスケープする
+// (拡張子は英数字のみの想定だが、念のため最低限の対応をしておく)。
+function csharpStringLiteral(value) {
+  return `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+// src/file-types.js の FILE_TYPES から Pane/FileTypes.generated.cs を生成する。
+// C#側(Pane/FolderService.cs)がPaneを開けるファイルの拡張子一覧を判定するのに使う
+// HashSet<string> をここから供給し、JS/C#間の二重管理を解消する。
+// 内容が変わっていない場合はファイルへ書き込まない(タイムスタンプだけ更新して
+// 無駄にC#側の再ビルドを走らせないため)。
+function generateFileTypesCs() {
+  const { FILE_TYPES, CATEGORIES } = loadFileTypes();
+
+  const lines = [];
+  lines.push("// このファイルは scripts/build.js が src/file-types.js から自動生成する。");
+  lines.push("// 直接編集しないこと(次回ビルド時に内容が上書きされます)。");
+  lines.push("// 生成元: src/file-types.js の FILE_TYPES(対応ファイル種別の単一ソース)");
+  lines.push("");
+  lines.push("namespace Pane;");
+  lines.push("");
+  lines.push("/// <summary>");
+  lines.push("/// Paneが開けるファイルの拡張子(拡張子なし・小文字)の一覧。");
+  lines.push("/// src/file-types.js の FILE_TYPES から自動生成される、拡張子分類の単一ソース。");
+  lines.push("/// </summary>");
+  lines.push("internal static class FileTypes");
+  lines.push("{");
+  lines.push("    public static readonly HashSet<string> OpenableExtensions = new(StringComparer.OrdinalIgnoreCase)");
+  lines.push("    {");
+  // カテゴリ→言語の順に並べ、生成元(file-types.js)と同じ見通しのコメントを付ける。
+  for (const categoryId of Object.keys(CATEGORIES)) {
+    const typesInCategory = FILE_TYPES.filter((t) => t.category === categoryId);
+    if (typesInCategory.length === 0) continue;
+    lines.push(`        // ${CATEGORIES[categoryId]}`);
+    for (const type of typesInCategory) {
+      const exts = type.extensions.map(csharpStringLiteral).join(", ");
+      lines.push(`        ${exts}, // ${type.label}`);
+    }
+  }
+  lines.push("    };");
+  lines.push("}");
+  lines.push("");
+
+  const content = lines.join("\n");
+  const existing = fs.existsSync(FILE_TYPES_CS_OUTPUT) ? fs.readFileSync(FILE_TYPES_CS_OUTPUT, "utf8") : null;
+  if (existing !== content) {
+    fs.writeFileSync(FILE_TYPES_CS_OUTPUT, content);
+    console.log(`generated: ${FILE_TYPES_CS_OUTPUT}`);
+  }
+}
+
 const buildOptions = {
   entryPoints: ["src/main.js"],
   bundle: true,
@@ -35,6 +124,7 @@ const buildOptions = {
 
 async function run() {
   copyStaticFiles();
+  generateFileTypesCs();
 
   if (watch) {
     const ctx = await esbuild.context(buildOptions);
@@ -42,6 +132,7 @@ async function run() {
     for (const f of staticFiles) {
       fs.watchFile(path.join("src", f), () => copyStaticFiles());
     }
+    fs.watchFile(FILE_TYPES_SOURCE, () => generateFileTypesCs());
     if (serve) {
       const { host, port } = await ctx.serve({ servedir: "dist", port: 8000 });
       console.log(`Pane dev server: http://${host}:${port}`);

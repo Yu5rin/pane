@@ -12,12 +12,17 @@
   } catch (e) {}
 </script>
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="themes.css">
 <style>
-  /* 第10.4節の画面構成: メニューバー・本文・ステータスバーの三段
+  /* 第10.4節の画面構成: メニューバー・本文(#main-area)・ステータスバーの三段。
+     本文はサイドバー(#sidebar)と編集領域(#cm-host)の横並び(第2.8節)。
      (タイトル・ダーティ表示・読み取り専用表示はOSネイティブのウィンドウタイトルが兼ねるため、
      HTML側の専用タイトルバー行は持たない)。 */
   html, body { height: 100%; margin: 0; }
   body { display: flex; flex-direction: column; background: var(--paper); color: var(--ink); font-family: var(--font-body); position: relative; }
+  /* #main-area: サイドバー(#sidebar)と本文(#cm-host)を横並びにする行(第2.8節・第10.4節)。
+     サイドバーの開閉スタイル自体はstyle.css側にまとめる。 */
+  #main-area { flex: 1; min-height: 0; display: flex; }
   #cm-host { flex: 1; min-height: 0; overflow: hidden; position: relative; }
   #statusbar { display: flex; gap: 16px; padding: 0 10px; height: 24px; align-items: center; border-top: 1px solid var(--rule); font-size: 11px; color: var(--ink-mute); flex: none; font-family: var(--font-mono); }
   #statusbar button { border: none; background: transparent; color: inherit; font: inherit; cursor: pointer; padding: 0 4px; }
@@ -32,15 +37,36 @@
       <svg id="theme-icon-dark" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" hidden><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/></svg>
     </button>
   </div>
-  <div id="cm-host"></div>
+  <div id="main-area">
+    <div id="sidebar" class="collapsed">
+      <div class="sidebar-tabs">
+        <button type="button" class="sidebar-tab" data-panel="outline" title="アウトライン">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h10M4 18h13"/></svg>
+        </button>
+        <button type="button" class="sidebar-tab" data-panel="files" title="ファイル">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>
+        </button>
+        <button type="button" class="sidebar-tab" data-panel="tree" title="ファイルツリー">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4v16M5 8h5M5 13h5M5 18h5"/><rect x="12" y="6" width="7" height="4" rx="1"/><rect x="12" y="15" width="7" height="4" rx="1"/></svg>
+        </button>
+      </div>
+      <div class="sidebar-body" id="sidebar-body"></div>
+    </div>
+    <div id="cm-host"></div>
+  </div>
   <div id="statusbar">
+    <button id="status-sidebar" type="button" title="サイドバーの表示切替 (Ctrl+Shift+L)" aria-label="サイドバーの表示切替">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>
+    </button>
     <span id="status-mode">Markdown</span>
+    <span id="status-position">行 1, 列 1</span>
     <span id="status-encoding"></span>
     <span id="status-line-ending"></span>
     <button id="status-wrap" type="button" title="折り返し表示を切り替え"></button>
-    <span id="status-count">0文字</span>
+    <button id="status-count" type="button" title="クリックで文字数の詳細を表示">0文字</button>
+    <button id="status-zoom" type="button" title="クリックで実際のサイズに戻す">100%</button>
     <span style="flex:1"></span>
-    <button id="btn-settings" type="button" hidden>設定</button>
+    <button id="btn-settings" type="button" title="設定 (Ctrl+,)">設定</button>
   </div>
   <input id="file-input" type="file" accept=".md,.markdown,.mdown,.txt" hidden>
   <input id="image-input" type="file" accept="image/*" hidden>

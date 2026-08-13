@@ -21,7 +21,21 @@ internal static class Program
         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 
         // コマンドライン引数でのファイル指定(仕様書 N-25 / F-14): Pane.exe <file>
-        string? initialPath = args.Length > 0 ? args[0] : null;
+        // "--preload"(B-1: スタートアップ登録から起動されるプリロード常駐フラグ)は
+        // ファイルパスではなくフラグとして別扱いにし、それ以外の最初の引数をファイルパスとして扱う。
+        bool preload = false;
+        string? initialPath = null;
+        foreach (string arg in args)
+        {
+            if (string.Equals(arg, "--preload", StringComparison.OrdinalIgnoreCase))
+            {
+                preload = true;
+            }
+            else if (initialPath is null)
+            {
+                initialPath = arg;
+            }
+        }
 
         // 多重起動制御(仕様書 第8.1節): 名前付きMutexで既存プロセスの有無を判定する。
         // 既に起動中なら、名前付きパイプでファイルパスを渡して新規ウィンドウを頼み、
@@ -30,6 +44,15 @@ internal static class Program
         using var mutex = new Mutex(initiallyOwned: true, SingleInstance.MutexName, out bool createdNew);
         if (!createdNew)
         {
+            if (preload)
+            {
+                // 既に他プロセスが起動済み(ユーザーが手動で起動済み、または既にpreload常駐中)
+                // なら、ログオン時のスタートアップ起動としてこれ以上何もする必要は無い。
+                // パイプ経由で新規ウィンドウを頼んでしまうと、ユーザーが見ていないログオン
+                // 直後に空のウィンドウが出てしまうため、何も送らずに終了する。
+                Logger.Write("--preload起動だが既存プロセスが起動済みのため、何もせず終了する");
+                return;
+            }
             if (SingleInstance.TrySendToExistingInstance(initialPath))
             {
                 return;
@@ -40,12 +63,22 @@ internal static class Program
 
         ApplicationConfiguration.Initialize();
 
-        var context = new PaneApplicationContext(initialPath);
+        // preload起動時はPaneApplicationContextがウィンドウを1枚も作らないまま待機し続けるため、
+        // フォーム生成をトリガーに自動インストールされるWindowsFormsSynchronizationContextが
+        // いつまで経ってもインストールされない可能性がある。SingleInstanceServerがUIスレッドへ
+        // 安全にPostできるよう、フォームの有無に関わらずここで明示的にインストールしておく
+        // (通常起動時に先に済ませておいても副作用は無い)。
+        // WindowsFormsSynchronizationContext.InstallIfNeeded()相当はassembly内部限定公開のため
+        // 直接呼べず、同じ効果をSetSynchronizationContextで自前実装する。
+        if (SynchronizationContext.Current is not WindowsFormsSynchronizationContext)
+        {
+            SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
+        }
 
-        // PaneApplicationContext が最初のウィンドウを生成した時点で
-        // WindowsFormsSynchronizationContext がインストール済みになる。
+        var context = new PaneApplicationContext(initialPath, preload);
+
         var server = new SingleInstanceServer(SynchronizationContext.Current!);
-        server.FileRequested += path => context.OpenWindow(path);
+        server.FileRequested += path => context.OpenWindowFromPipeRequest(path);
         server.Start();
 
         Application.Run(context);

@@ -16,10 +16,51 @@ internal sealed class PaneApplicationContext : ApplicationContext
     private readonly List<MainForm> _windows = new();
     private readonly AppSettings _settings;
 
-    public PaneApplicationContext(string? cliInitialPath)
+    /// <summary>--preloadで起動されたプロセスかどうか(B-1)。trueの間は、最後のウィンドウが
+    /// 閉じられてもプロセスを終了させず、ウィンドウ0枚の常駐状態へ戻す(OnWindowClosed参照)。
+    /// 一度trueになったらプロセスの生存期間中ずっとtrueのまま(常駐プロセスとしての性質)。</summary>
+    private readonly bool _preload;
+
+    /// <summary>preload起動直後、まだ一度もウィンドウを見せていない(復元確認・セッション復元が
+    /// 未実施の)間だけtrue。名前付きパイプ経由で最初の要求が来た時点でfalseになる。</summary>
+    private bool _initialOpenPending;
+
+    public PaneApplicationContext(string? cliInitialPath, bool preload = false)
     {
         _settings = SettingsService.Load();
+        _preload = preload;
 
+        if (preload)
+        {
+            // プリロード起動(B-1): ユーザーが見ていないタイミングで復元確認ダイアログを
+            // 出すと不快なため、ここでは一切のダイアログ・セッション復元・ウィンドウ生成を
+            // 行わない。ユーザーが実際にファイルを開こうとした瞬間(OpenWindowFromPipeRequest)
+            // まで先送りする。
+            _initialOpenPending = true;
+            Logger.Write("PaneApplicationContext: preload起動 - ウィンドウ0枚のまま待機を開始");
+
+            // WebView2環境を先に生成しておく(B-2)。待機中に済ませておくことで、実際に
+            // 最初のウィンドウを開いたときの体感速度が上がる。失敗しても致命的ではなく、
+            // 実際にウィンドウを開く際にMainForm.OnLoadAsyncが改めてEnsureEnvironmentAsyncを
+            // 呼ぶため、そちらでリトライされる。
+            // ApplicationContext.MainForm(継承プロパティ)と型名Pane.MainFormが同名で衝突するため、
+            // 名前空間で完全修飾して呼び出す。
+            _ = Pane.MainForm.EnsureEnvironmentAsync().ContinueWith(
+                t => Logger.WriteException("preload時のWebView2環境の事前生成に失敗", t.Exception!),
+                TaskContinuationOptions.OnlyOnFaulted);
+            return;
+        }
+
+        RunRecoveryAndInitialOpen(cliInitialPath);
+    }
+
+    /// <summary>
+    /// 起動時(通常起動時はコンストラクタから、preload起動時は最初のウィンドウ要求が来た時点で
+    /// <see cref="OpenWindowFromPipeRequest"/> から)呼ぶ、異常終了からのリカバリー提案・
+    /// セッション復元・最初のウィンドウを開く処理本体。
+    /// </summary>
+    private void RunRecoveryAndInitialOpen(string? cliInitialPath)
+    {
         var openedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         bool openedAny = false;
 
@@ -85,6 +126,8 @@ internal sealed class PaneApplicationContext : ApplicationContext
             recoverFrom,
             requestNewWindow: p => OpenWindow(p),
             requestNewWindowWithContent: content => OpenWindow(null, null, content),
+            requestSwitchDocument: SwitchToNextWindow,
+            requestBroadcastSettings: BroadcastSettingsChanged,
             droppedFile: droppedFile);
 
         int width = _settings.WindowWidth ?? DefaultWidth;
@@ -124,6 +167,60 @@ internal sealed class PaneApplicationContext : ApplicationContext
         form.Show();
     }
 
+    /// <summary>
+    /// 名前付きパイプ経由の要求(多重起動時の2つ目以降のプロセスから、または
+    /// preload待機中に届いた最初の要求)を受け取る入口。<see cref="Program"/> はここを通す。
+    /// preload起動でまだ一度もウィンドウを見せていない場合のみ、ここで初めて
+    /// 異常終了からのリカバリー提案・セッション復元を行ってからウィンドウを開く。
+    /// それ以外(通常起動後、またはpreloadで既に一度ウィンドウを開いたことがある場合)は
+    /// 従来どおり単純に<see cref="OpenWindow"/>を呼ぶ。
+    /// </summary>
+    public void OpenWindowFromPipeRequest(string? path)
+    {
+        if (_initialOpenPending)
+        {
+            _initialOpenPending = false;
+            Logger.Write($"preload: 最初のウィンドウ要求を受信(path={path ?? "(なし)"})。復元確認・セッション復元を行う");
+            RunRecoveryAndInitialOpen(path);
+            return;
+        }
+        OpenWindow(path);
+    }
+
+    /// <summary>
+    /// Ctrl+Tab(仕様書 V-11): 開いている他のPaneウィンドウへフォーカスを移す。
+    /// ウィンドウ一覧上で自分の次のウィンドウへ、末尾なら先頭へ回る順送り。
+    /// ウィンドウが1つしかない場合は何もしない。
+    /// </summary>
+    private void SwitchToNextWindow(MainForm current)
+    {
+        if (_windows.Count <= 1) return;
+        int index = _windows.IndexOf(current);
+        if (index < 0) return;
+
+        MainForm next = _windows[(index + 1) % _windows.Count];
+        if (next.WindowState == FormWindowState.Minimized)
+        {
+            next.WindowState = FormWindowState.Normal;
+        }
+        next.Activate();
+        Logger.Write($"SwitchToNextWindow: {index} -> {_windows.IndexOf(next)}");
+    }
+
+    /// <summary>
+    /// 設定画面(WinForms版・HTML製ブリッジのどちらでも)で設定が保存された後に呼ばれる。
+    /// 設定はアプリ全体で共有されるため、保存した本人のウィンドウだけでなく、開いている
+    /// すべてのウィンドウへ apply-settings を再送して反映させる(requestSwitchDocumentと同じ、
+    /// MainFormからのコールバックとして受け取る流儀)。
+    /// </summary>
+    private void BroadcastSettingsChanged(MainForm origin)
+    {
+        foreach (MainForm window in _windows)
+        {
+            window.PostCapabilities();
+        }
+    }
+
     private void OnWindowClosed(MainForm form)
     {
         bool isLastWindow = _windows.Count == 1 && _windows[0] == form;
@@ -154,7 +251,20 @@ internal sealed class PaneApplicationContext : ApplicationContext
             latest.WindowHeight = _settings.WindowHeight;
             if (openFilePaths is not null) latest.OpenFilePaths = openFilePaths;
             SettingsService.Save(latest);
-            ExitThread();
+
+            if (_preload)
+            {
+                // preload起動の常駐プロセスは、最後のウィンドウが閉じられてもプロセスを
+                // 終了させず、再びウィンドウ0枚の待機状態へ戻る(次にファイルを開くときも
+                // WebView2環境のキャッシュを保ったまま高速に開けるようにするため)。
+                // 次にOpenWindowFromPipeRequestが呼ばれたときも、既にウィンドウを一度
+                // 見せた後なので復元確認は再実行しない(_initialOpenPendingは既にfalse)。
+                Logger.Write("preload: 最後のウィンドウが閉じられた。ExitThreadは呼ばず常駐状態へ戻る");
+            }
+            else
+            {
+                ExitThread();
+            }
         }
     }
 }

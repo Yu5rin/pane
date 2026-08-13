@@ -1,98 +1,29 @@
-// 仕様書 第5章の初期対応言語(14言語)を個別に列挙する。
-// @codemirror/language-data の全言語同梱は行わず、load はすべて動的import。
+// コードモード(仕様書 第1章・第5章)で使うCodeMirror言語一覧。
+// 対応言語そのものの定義(拡張子・カテゴリ・ローダー)は src/file-types.js に
+// 一元化してあり、ここではその FILE_TYPES から LanguageDescription の配列を
+// 組み立てるだけにする(Pane/FileTypes.generated.cs もFILE_TYPESから生成されるため、
+// 「対応拡張子」の定義元は常にfile-types.js の1箇所に保たれる)。
 // alias はMarkdownのフェンス情報文字列(```js 等)の解決に、
 // extensions はコードモード(第1章)でのファイル拡張子解決に使う
 // (どちらも LanguageDescription.matchLanguageName / matchFilename が参照する)。
-import { LanguageDescription, StreamLanguage } from "@codemirror/language";
+import { LanguageDescription } from "@codemirror/language";
+import { FILE_TYPES } from "./file-types.js";
 
-export const codeLanguages = [
+// load が null の言語(プレーンテキスト扱い: txt/csv 等)はハイライト対象ではないため
+// LanguageDescription を作らない。拡張子としては後述の resolveFileMode 判定にのみ
+// 使われ、その場合は自然と "plain" に落ちる(codeLanguages に無いので code 判定されない)。
+export const codeLanguages = FILE_TYPES.filter((type) => type.load).map((type) =>
   LanguageDescription.of({
-    name: "javascript",
-    alias: ["js", "jsx", "mjs", "cjs"],
-    extensions: ["js", "jsx", "mjs", "cjs"],
-    load: () => import("@codemirror/lang-javascript").then((m) => m.javascript({ jsx: true })),
-  }),
-  LanguageDescription.of({
-    name: "typescript",
-    alias: ["ts", "tsx"],
-    extensions: ["ts", "tsx"],
-    load: () => import("@codemirror/lang-javascript").then((m) => m.javascript({ typescript: true, jsx: true })),
-  }),
-  LanguageDescription.of({
-    name: "python",
-    alias: ["py"],
-    extensions: ["py"],
-    load: () => import("@codemirror/lang-python").then((m) => m.python()),
-  }),
-  LanguageDescription.of({
-    name: "csharp",
-    alias: ["cs", "c#"],
-    extensions: ["cs"],
-    load: () => import("@codemirror/legacy-modes/mode/clike").then((m) => StreamLanguage.define(m.csharp)),
-  }),
-  LanguageDescription.of({
-    name: "sql",
-    alias: ["sql"],
-    extensions: ["sql"],
-    load: () => import("@codemirror/lang-sql").then((m) => m.sql()),
-  }),
-  LanguageDescription.of({
-    name: "json",
-    alias: ["json"],
-    extensions: ["json"],
-    load: () => import("@codemirror/lang-json").then((m) => m.json()),
-  }),
-  LanguageDescription.of({
-    name: "yaml",
-    alias: ["yml"],
-    extensions: ["yaml", "yml"],
-    load: () => import("@codemirror/lang-yaml").then((m) => m.yaml()),
-  }),
-  LanguageDescription.of({
-    name: "html",
-    alias: ["htm"],
-    extensions: ["html", "htm"],
-    load: () => import("@codemirror/lang-html").then((m) => m.html()),
-  }),
-  LanguageDescription.of({
-    name: "css",
-    alias: [],
-    extensions: ["css"],
-    load: () => import("@codemirror/lang-css").then((m) => m.css()),
-  }),
-  LanguageDescription.of({
-    name: "xml",
-    alias: [],
-    extensions: ["xml"],
-    load: () => import("@codemirror/lang-xml").then((m) => m.xml()),
-  }),
-  LanguageDescription.of({
-    name: "markdown",
-    alias: ["md"],
-    extensions: ["md", "markdown", "mdown", "mkd", "mmd"],
-    load: () => import("@codemirror/lang-markdown").then((m) => m.markdown()),
-  }),
-  LanguageDescription.of({
-    name: "powershell",
-    alias: ["posh", "ps1"],
-    extensions: ["ps1", "psm1", "psd1"],
-    load: () => import("@codemirror/legacy-modes/mode/powershell").then((m) => StreamLanguage.define(m.powerShell)),
-  }),
-  LanguageDescription.of({
-    name: "batch",
-    alias: ["bat", "cmd"],
-    extensions: ["bat", "cmd"],
-    load: () => import("./lang-batch.js").then((m) => StreamLanguage.define(m.batch)),
-  }),
-  LanguageDescription.of({
-    name: "vb",
-    alias: ["vbnet", "vbs"],
-    extensions: ["vb"],
-    load: () => import("@codemirror/legacy-modes/mode/vb").then((m) => StreamLanguage.define(m.vb)),
-  }),
-];
+    name: type.id,
+    alias: [type.id, ...type.extensions],
+    extensions: type.extensions,
+    load: type.load,
+  })
+);
 
-const MARKDOWN_EXTENSIONS = new Set(["md", "markdown", "mdown", "mkd", "mmd"]);
+const MARKDOWN_EXTENSIONS = new Set(
+  FILE_TYPES.find((type) => type.id === "markdown").extensions
+);
 
 // ファイル種別と編集モード(仕様書 第1章): markdown / code / plain のいずれか。
 export function resolveFileMode(filename) {

@@ -1,0 +1,114 @@
+/* ===== テーマプリセット(仕様書 第2.10節 C-06) =====
+   style.css側で定義済みのCSS変数(--paper/--surface/--ink/--ink-sub/--ink-mute/
+   --line/--rule/--accent/--accent-hover/--accent-soft/--code-bg)を上書きするだけで、
+   新しい変数は増やさない。
+
+   適用の仕組み: main.jsがapply-settings受信時にdocument.documentElement(=html)へ
+   data-light-theme="<id>" / data-dark-theme="<id>" を付与する(既定値は"default")。
+   style.css側の配色は
+     :root { --paper: ...; }                      (ライト既定値, 特異度 0-1-0)
+     html[data-theme="dark"] { --paper: ...; }     (ダーク既定値, 特異度 0-1-1)
+   という構成のため、ここでは
+     html[data-theme="light"][data-light-theme="sepia"] { ... }  (特異度 0-2-1)
+   のように data-theme と data-light-theme/data-dark-theme を同時に指定し、
+   両方より高い特異度でも上書きできるようにする。
+   このファイルはstyle.cssより後に読み込む(index.html参照)ため、
+   ソース順でも上書きが効く。
+
+   "default"(既定)は上書き無しとして扱うため、対応するルールは存在しない
+   (data-light-theme="default" / data-dark-theme="default" が付いていても
+   何も上書きされず、style.css既定の配色のまま)。 */
+
+/* ---- ライト用プリセット ---- */
+
+/* sepia: セピア調の紙色。長時間の読書を意識した暖色系。 */
+html[data-theme="light"][data-light-theme="sepia"] {
+  --paper: #F4ECD8;
+  --surface: #FBF3E3;
+  --ink: #3B2F22;
+  --ink-sub: #7A6A55;
+  --ink-mute: #7A6A55;
+  --line: #E3D5B8;
+  --rule: #E3D5B8;
+  --accent: #A9762C;
+  --accent-hover: #8F5F1E;
+  --accent-soft: #EDE0C0;
+  --code-bg: #ECE0C4;
+}
+
+/* github: GitHub風。白背景+青系アクセント。 */
+html[data-theme="light"][data-light-theme="github"] {
+  --paper: #FFFFFF;
+  --surface: #F6F8FA;
+  --ink: #1F2328;
+  --ink-sub: #59636E;
+  --ink-mute: #59636E;
+  --line: #D0D7DE;
+  --rule: #D0D7DE;
+  --accent: #0969DA;
+  --accent-hover: #0550AE;
+  --accent-soft: #DDF4FF;
+  --code-bg: #F6F8FA;
+}
+
+/* solarized-light: Solarized(Ethan Schoonover配色)のライト側。 */
+html[data-theme="light"][data-light-theme="solarized-light"] {
+  --paper: #FDF6E3;
+  --surface: #EEE8D5;
+  --ink: #073642;
+  --ink-sub: #657B83;
+  --ink-mute: #657B83;
+  --line: #D3CBB7;
+  --rule: #D3CBB7;
+  --accent: #268BD2;
+  --accent-hover: #1E6FA8;
+  --accent-soft: #E3EFFA;
+  --code-bg: #EEE8D5;
+}
+
+/* ---- ダーク用プリセット ---- */
+
+/* nord: Nord配色。 */
+html[data-theme="dark"][data-dark-theme="nord"] {
+  --paper: #2E3440;
+  --surface: #3B4252;
+  --ink: #ECEFF4;
+  --ink-sub: #D8DEE9;
+  --ink-mute: #9AA5B1;
+  --line: #434C5E;
+  --rule: #434C5E;
+  --accent: #88C0D0;
+  --accent-hover: #8FBCBB;
+  --accent-soft: #3B4A52;
+  --code-bg: #333A47;
+}
+
+/* dracula: Dracula配色。 */
+html[data-theme="dark"][data-dark-theme="dracula"] {
+  --paper: #282A36;
+  --surface: #343746;
+  --ink: #F8F8F2;
+  --ink-sub: #B4B9D6;
+  --ink-mute: #8892B0;
+  --line: #44475A;
+  --rule: #44475A;
+  --accent: #BD93F9;
+  --accent-hover: #FF79C6;
+  --accent-soft: #3B3D52;
+  --code-bg: #2F3140;
+}
+
+/* solarized-dark: Solarizedのダーク側。 */
+html[data-theme="dark"][data-dark-theme="solarized-dark"] {
+  --paper: #002B36;
+  --surface: #073642;
+  --ink: #93A1A1;
+  --ink-sub: #839496;
+  --ink-mute: #586E75;
+  --line: #0A3C4A;
+  --rule: #0A3C4A;
+  --accent: #268BD2;
+  --accent-hover: #4CA6E0;
+  --accent-soft: #0E4B5E;
+  --code-bg: #073642;
+}
