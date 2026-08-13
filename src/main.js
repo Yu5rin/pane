@@ -4,14 +4,22 @@
 // 使えない場合(単体のブラウザで動作確認する場合)は File System Access API /
 // File API による仮実装にフォールバックする(Phase 1からの経路をそのまま維持)。
 import { createEditor, DEFAULT_FONT_SIZE } from "./editor.js";
-import { buildCommands, initMenuBar, initCommandPalette, initContextMenu, bindShortcuts } from "./commands.js";
+import { buildCommands, initMenuBar, initCommandPalette, initContextMenu, bindShortcuts, applyKeyBindings } from "./commands.js";
 import { createSearchUI } from "./search-ui.js";
+import { createSidebar } from "./sidebar.js";
+import { createQuickOpen } from "./quick-open.js";
+import { createWordCountPopup } from "./word-count.js";
+import { createSettings } from "./settings.js";
 import { htmlToMarkdown } from "./html-to-markdown.js";
+import { resolveFileMode } from "./languages.js";
 
 const host = document.getElementById("cm-host");
 const menubarEl = document.getElementById("menubar");
+const statusSidebarBtn = document.getElementById("status-sidebar");
 const statusMode = document.getElementById("status-mode");
+const statusPosition = document.getElementById("status-position");
 const statusCount = document.getElementById("status-count");
+const statusZoom = document.getElementById("status-zoom");
 const statusEncoding = document.getElementById("status-encoding");
 const statusLineEnding = document.getElementById("status-line-ending");
 const statusWrapBtn = document.getElementById("status-wrap");
@@ -43,12 +51,40 @@ let wordWrapOn = true;
 let defaultCopyFormat = "markdown"; // "markdown" | "html"(仕様書 第2.9.3節、設定で切替)
 let pandocAvailable = false;
 let recentFiles = [];
+// 直近読み込みに成功したフォルダ(仕様書 第2.8節: ファイルを開くと親フォルダが自動読み込まれる)。
+// { rootPath, rootName, entries, truncated } 。未読み込み・読み込み失敗時はnullのまま
+// (失敗時のエラー表示はサイドバー側にだけ渡し、ここでは保持しない)。
+let folderData = null;
 // ダーティ・読み取り専用の表示はOSネイティブのウィンドウタイトルが兼ねる(C#側UpdateTitle)ため、
 // HTML側は確認ダイアログの判定等に使う内部状態としてのみ保持する。
 let isDirty = false;
 let isReadOnly = false;
 const closedFiles = []; // 閉じたファイルを再度開く(このウィンドウ内での置き換え履歴、ブリッジ利用時のみ)
 const CLOSED_FILES_CAP = 20;
+// グローバル検索のヒット行クリック(仕様書 第2.6節 G-02)から「開いたら指定行へジャンプする」
+// 保留状態。openFileByPath(path, line)で設定し、file-openedが届いたタイミングで
+// applyFileOpened側が消費する。{ path, line } または未設定時はnull。
+let pendingGotoLine = null;
+// 文字数カウントの表示ON/OFF(仕様書 V-13)。C#側の設定受け口が未実装でも動作に支障が
+// 出ないよう、既定値はON(従来どおり表示)にしておく。
+let showWordCount = true;
+// キーバインドのカスタマイズ(仕様書 第2.10節 C-10)。コマンドID→ショートカット文字列。
+// apply-settingsで届くたびに更新し、commands.jsのapplyKeyBindings()で既存のcommands配列
+// (メニューバー・コマンドパレット・ショートカット待受け・設定画面が共有する同一インスタンス)
+// へ即座に反映する(再起動不要)。getState()にも公開し、起動直後のbuildCommands()呼び出し
+// 自体もこの値を参照できるようにする。
+let keyBindings = {};
+// 編集モード決定(仕様書 第1章)の優先順位2・3を上書きする設定。いずれもapply-settingsで届く。
+// fileModeOverrides: 拡張子(ドット無し・小文字)→モード名。perFileModes: フルパス→手動で選んだモード名
+// (優先順位1。同一セッション内での即時反映用にローカルにもキャッシュし、setMode()で都度更新する)。
+let fileModeOverrides = {};
+let perFileModes = {};
+// 全画面表示・常に手前に表示(仕様書 V-08/V-12)の状態。実際のトグルはC#側(WinForms)が
+// 持っており、"window-state"で都度届く値をそのまま保持するだけ(第10.5節: JS側は表示専用)。
+let windowState = { fullscreen: false, alwaysOnTop: false };
+// 設定画面(仕様書 第2.10節)。ctx構築後(buildCommands()でctx.commandsが揃ってから)生成するため、
+// ctx.actions.openSettingsは変数越しに参照するだけにしておく(sidebar/quickOpenと同じ遅延生成の形)。
+let settingsUI = null;
 
 function setDirty(v) {
   isDirty = v;
@@ -57,8 +93,40 @@ function setDirty(v) {
 function setName(name) {
   currentName = name;
 }
+// 文字数(仕様書 W-01/W-03)。ステータスバーは軽い集計に留める(doc.lengthと選択範囲の
+// from/to差だけ、いずれもO(1))。単語数・段落数等の重い集計はポップアップを開いた時にだけ行う。
 function updateCount() {
-  statusCount.textContent = `${editor.getValue().length}文字`;
+  if (!showWordCount) { statusCount.textContent = ""; return; }
+  const total = editor.getDocLength();
+  const selLen = editor.getSelectionLength();
+  statusCount.textContent = selLen > 0 ? `${total}文字(選択 ${selLen}文字)` : `${total}文字`;
+}
+// 行/列(仕様書 N-03)。カーソル位置から直接取れる軽量な情報なので、選択変更のたびに呼んでよい。
+function updatePosition() {
+  const { line, col } = editor.getCursorInfo();
+  statusPosition.textContent = `行 ${line}, 列 ${col}`;
+}
+// ズーム率(仕様書 N-03)。既定サイズに対する本文フォントサイズの比率を表示する。
+function updateZoom() {
+  statusZoom.textContent = `${Math.round((editor.getFontSize() / DEFAULT_FONT_SIZE) * 100)}%`;
+}
+function updateWordCountVisibility() {
+  statusCount.hidden = !showWordCount;
+  if (!showWordCount) wordCountPopup.close();
+}
+// カスタムCSS(仕様書 第2.10節 C-07)。<head>内に専用<style id="custom-css">を用意し、
+// textContentとして反映する(信頼できないHTMLとして解釈されないようinnerHTMLは使わない)。
+let customCssEl = null;
+function applyCustomCss(css) {
+  if (!customCssEl) {
+    customCssEl = document.getElementById("custom-css");
+    if (!customCssEl) {
+      customCssEl = document.createElement("style");
+      customCssEl.id = "custom-css";
+      document.head.appendChild(customCssEl);
+    }
+  }
+  customCssEl.textContent = css || "";
 }
 function updateStatusMeta() {
   statusEncoding.textContent = currentEncoding ? `文字コード: ${currentEncoding}` : "";
@@ -110,7 +178,15 @@ window.addEventListener("afterprint", exitExportLayout);
 const editor = createEditor(host, {
   onChange() {
     setDirty(true);
+    // サイドバー(アウトラインパネル)の更新はsidebar.js側で300msデバウンスし、
+    // かつ閉じている間・アウトライン以外を見ている間は再計算しない(性能要件)。
+    sidebar.refresh();
+  },
+  // 文字数・行列表示(仕様書 N-03、W-01)。doc変化・カーソル移動のどちらでも軽い集計だけ
+  // 行う(重い単語数・段落数集計はW-02のポップアップを開いた時にだけ行う。性能要件)。
+  onSelectionChange() {
     updateCount();
+    updatePosition();
   },
   // スマートペースト(仕様書 第2.9.3節): クリップボードにHTMLがあればMarkdownへ変換して挿入する。
   // プレーンテキストのみの場合は既定の貼り付け(CM6の処理)に任せる。
@@ -135,11 +211,15 @@ const editor = createEditor(host, {
   },
 });
 updateCount();
+updatePosition();
 updateStatusMeta();
 updateStatusMode();
 updateWrapButton();
+updateZoom();
 
 const searchUI = createSearchUI(editor, host);
+// 文字数カウントの詳細ポップアップ(仕様書 W-02)。editorが必要なためここで生成する。
+const wordCountPopup = createWordCountPopup(editor, document.body);
 
 function getState() {
   return {
@@ -149,6 +229,16 @@ function getState() {
     wordWrap: wordWrapOn,
     hasClosedFile: closedFiles.length > 0,
     recentFiles,
+    sidebarOpen: sidebar.isOpen(),
+    sidebarPanel: sidebar.currentPanel(),
+    folderLoaded: !!folderData,
+    sourceMode: editor.isSourceMode(),
+    focusMode: editor.isFocusMode(),
+    typewriterMode: editor.isTypewriterMode(),
+    fullscreen: windowState.fullscreen,
+    alwaysOnTop: windowState.alwaysOnTop,
+    showWordCount,
+    keyBindings,
   };
 }
 
@@ -156,6 +246,10 @@ const ctx = {
   editor,
   bridge,
   getState,
+  getFolder: () => folderData, // quick-open.jsが絞り込み対象のファイル一覧を取るのに使う
+  // 設定画面(settings.js)がキーバインド再設定中(「キーを押してください」状態)だけtrueにする。
+  // commands.js側のbindShortcutsがこれを見て、既存のショートカット発火を一時的に止める。
+  shortcutsSuppressed: false,
   actions: {
     async newDocument() {
       if (bridge) { bridge.postMessage({ type: "new" }); return; }
@@ -191,7 +285,10 @@ const ctx = {
       if (bridge) bridge.postMessage({ type: "print" });
       else window.print();
     },
-    openSettings() { bridge?.postMessage({ type: "open-settings" }); },
+    // 設定画面(仕様書 第2.10節 C-01〜C-14)。HTML製の設定画面(settings.js)を開く。
+    // ブリッジが無いブラウザ単体動作でも画面自体は開けるが、保存はできない
+    // (settings.js側で保存操作時にその旨を案内する)。
+    openSettings(category) { settingsUI?.open(category); },
     async closeWindow() {
       // 未保存の変更がある場合の保存確認はC#側(FormClosing)が一元的に行う
       // (ネイティブのXボタン・Alt+F4で閉じた場合と挙動を揃えるため)。
@@ -231,6 +328,16 @@ const ctx = {
     async setMode(mode) {
       await editor.setFileMode(currentPath ?? currentName, mode);
       updateStatusMode();
+      // 手動切替の記憶(仕様書 第1章)。無題(パス無し)の場合はブリッジへ送らず、その場の変更のみ行う。
+      if (!currentPath) return;
+      if (mode === autoFileMode(currentName)) {
+        // 自動判定と同じ選択に戻した場合は記憶自体を消す(設定ファイルが不要に太るのを防ぐ)。
+        delete perFileModes[currentPath];
+        bridge?.postMessage({ type: "remember-file-mode", path: currentPath, mode: null });
+      } else {
+        perFileModes[currentPath] = mode;
+        bridge?.postMessage({ type: "remember-file-mode", path: currentPath, mode });
+      }
     },
     toggleWordWrap() {
       wordWrapOn = !wordWrapOn;
@@ -244,15 +351,71 @@ const ctx = {
       const n = parseInt(input, 10);
       if (Number.isFinite(n)) editor.gotoLine(n);
     },
+    // ソースコードモード(V-05)・フォーカスモード(V-06)・タイプライターモード(V-07)。
+    // いずれもcompartment切替の実体はeditor.js側に持ち、ここは単純なトグルの橋渡し。
+    toggleSourceMode() { editor.setSourceMode(!editor.isSourceMode()); },
+    toggleFocusMode() { editor.setFocusMode(!editor.isFocusMode()); },
+    toggleTypewriterMode() { editor.setTypewriterMode(!editor.isTypewriterMode()); },
+    // 全画面表示(V-08)・開いている文書を切り替え(V-11)・常に手前に表示(V-12)は
+    // いずれもC#側(WinForms)が実体を持つため、メッセージを送るだけ。実際の状態は
+    // "window-state"メッセージで折り返し届く(handleHostMessage参照)。
+    toggleFullscreen() { bridge?.postMessage({ type: "toggle-fullscreen" }); },
+    toggleAlwaysOnTop() { bridge?.postMessage({ type: "toggle-always-on-top" }); },
+    switchDocument() { bridge?.postMessage({ type: "switch-document" }); },
+    // 文字サイズ(V-09/V-10)。既存のCtrl+マウスホイールと同じeditor.setFontSize()を使い、
+    // 変更後はCtrl+ホイールと同じくset-font-sizeメッセージで永続化する(setFontSizeAndPersist参照)。
+    zoomIn() { setFontSizeAndPersist(editor.getFontSize() + 1); },
+    zoomOut() { setFontSizeAndPersist(editor.getFontSize() - 1); },
+    zoomReset() { setFontSizeAndPersist(DEFAULT_FONT_SIZE); },
+    // 文字数カウントの表示切替(V-13)。C#側に永続化の受け口がまだ無くても支障が無いよう、
+    // 送るだけで応答は待たない({ type: "set-show-word-count" }、専用メッセージ)。
+    toggleWordCount() {
+      showWordCount = !showWordCount;
+      updateWordCountVisibility();
+      bridge?.postMessage({ type: "set-show-word-count", value: showWordCount });
+    },
     openDevTools() { bridge?.postMessage({ type: "open-devtools" }); },
+    openFolder() {
+      // フォルダ選択ダイアログ自体がC#側(WinForms)の機能のため、ブリッジが無い
+      // ブラウザ単体動作では提供できない(仕様書 S-02/S-03はデスクトップアプリ前提)。
+      if (!bridge) { window.alert("フォルダを開く機能はデスクトップアプリ版でのみ利用できます。"); return; }
+      bridge.postMessage({ type: "open-folder" });
+    },
+    openFileByPath(path, line) {
+      // lineが指定された場合(グローバル検索の結果クリック等)は、file-openedが届いて
+      // 実際に開いたパスが一致した時点でその行へジャンプする(pendingGotoLine参照)。
+      pendingGotoLine = line != null ? { path, line } : null;
+      bridge?.postMessage({ type: "open-path", path });
+    },
+    // グローバル検索(仕様書 第2.6節 G-01)。Ctrl+Shift+Fから呼ばれる。
+    openGlobalSearch() { sidebar.openSearch(); },
+    // openQuickOpenはcreateQuickOpen(ctx)がctxを必要とする(sidebarと同じ循環依存)ため、
+    // quickOpen生成後にctx.actionsへ追加する(下方参照)。
   },
 };
+
+// サイドバー(仕様書 第2.8節・第10.4節)。ctxを引数に取るためctx構築後に生成し、
+// 開閉・パネル切替のactionsはここでctx.actionsへ追加する
+// (buildCommands等はctxへの参照を保持するだけで遅延評価するため、この順序で問題ない)。
+const sidebar = createSidebar(editor, ctx);
+ctx.actions.toggleSidebar = () => sidebar.toggle();
+ctx.actions.showSidebarPanel = (panel) => sidebar.showPanel(panel);
+statusSidebarBtn.addEventListener("click", () => ctx.actions.toggleSidebar());
+
+// クイックオープン(仕様書 F-05)。sidebarと同様、ctxを必要とするためctx構築後に生成する。
+const quickOpen = createQuickOpen(ctx);
+ctx.actions.openQuickOpen = () => quickOpen.open();
 
 const commands = buildCommands(ctx);
 bindShortcuts(commands, ctx);
 initMenuBar(menubarEl, commands, ctx);
 const commandPalette = initCommandPalette(document.body, commands, ctx);
 initContextMenu(host, commands, ctx, resolveContextCommandIds);
+
+// 設定画面(仕様書 第2.10節)。キーバインドタブがコマンド一覧を必要とするため、
+// buildCommands()の後でctx.commandsとして公開してから生成する。
+ctx.commands = commands;
+settingsUI = createSettings(ctx);
 
 // 右クリックメニュー: リスト行の上ではリスト種別の相互変換(仕様書 P-13)を提示する。
 // それ以外は既定のブラウザメニューに任せる(コンテキストメニューの対応範囲はPhase 5時点ではここまで)。
@@ -276,6 +439,17 @@ window.addEventListener("keydown", (e) => {
   }
 });
 statusWrapBtn.addEventListener("click", () => ctx.actions.toggleWordWrap());
+statusZoom.addEventListener("click", () => ctx.actions.zoomReset());
+statusCount.addEventListener("click", () => { if (showWordCount) wordCountPopup.toggle(statusCount); });
+
+// 本文の文字サイズを変更し、ズーム率表示を更新したうえでC#側へ永続化する(仕様書 V-09/V-10)。
+// Ctrl+マウスホイール(下記)とView メニューの拡大/縮小/実際のサイズ(ctx.actions)の
+// どちらから呼ばれても同じ経路を通る。
+function setFontSizeAndPersist(size) {
+  const applied = editor.setFontSize(size);
+  updateZoom();
+  bridge?.postMessage({ type: "set-font-size", size: applied });
+}
 
 // Ctrl+マウスホイールで本文の文字サイズを変更する。WebView2側のページズーム
 // (IsZoomControlEnabled=falseで無効化済み)はメニューバー・ステータスバーまで
@@ -283,8 +457,7 @@ statusWrapBtn.addEventListener("click", () => ctx.actions.toggleWordWrap());
 window.addEventListener("wheel", (e) => {
   if (!e.ctrlKey) return;
   e.preventDefault();
-  const applied = editor.setFontSize(editor.getFontSize() + (e.deltaY < 0 ? 1 : -1));
-  bridge?.postMessage({ type: "set-font-size", size: applied });
+  setFontSizeAndPersist(editor.getFontSize() + (e.deltaY < 0 ? 1 : -1));
 }, { passive: false });
 
 // ---- WebView2ブリッジ(Phase 2) ----
@@ -296,9 +469,29 @@ if (bridge) {
   bridge.postMessage({ type: "ready" });
 }
 
+// 拡張子既定(fileModeOverridesがあればそちらを優先)による自動判定。
+// setMode()が「手動で選んだモードが自動判定と一致するか」を調べるのにも使う
+// (この判定にはperFileModes自体は含めない。手動記憶を上書きするかどうかの判定のため)。
+function autoFileMode(fileName) {
+  const ext = fileName ? (fileName.split(".").pop() || "").toLowerCase() : null;
+  if (ext && Object.prototype.hasOwnProperty.call(fileModeOverrides, ext)) {
+    return fileModeOverrides[ext];
+  }
+  return resolveFileMode(fileName);
+}
+// 編集モード決定(仕様書 第1章)。優先順位: 1.そのファイルパスの手動記憶(perFileModes)
+// 2.拡張子ごとの既定モード上書き(fileModeOverrides) 3.拡張子からの既定判定(resolveFileMode)。
+function decideFileMode(path, fileName) {
+  if (path && Object.prototype.hasOwnProperty.call(perFileModes, path)) {
+    return perFileModes[path];
+  }
+  return autoFileMode(fileName);
+}
+
 async function applyFileOpened(msg) {
   pushClosedFile(currentPath);
-  await editor.setFileMode(msg.fileName); // 拡張子から編集モードを切替(仕様書 第1章)
+  // 拡張子だけでなく、拡張子ごとの既定モード上書き・ファイル単位の手動記憶も考慮する(仕様書 第1章)。
+  await editor.setFileMode(msg.fileName, decideFileMode(msg.path ?? null, msg.fileName));
   editor.setValue(msg.text);
   setName(msg.fileName);
   currentPath = msg.path ?? null;
@@ -309,9 +502,18 @@ async function applyFileOpened(msg) {
   updateCount();
   updateStatusMeta();
   updateStatusMode();
+  sidebar.setCurrentPath(currentPath); // files/treeパネルの現在ファイルハイライトを更新
+  // グローバル検索のヒット行クリックからの遷移なら、指定行へジャンプする。
+  // 開いたパスが期待と違う場合(保存確認でユーザーがキャンセルした等でC#側が別のファイルを
+  // 返した/開かなかった場合)は、一致しないので保留を捨てるだけにする。
+  if (pendingGotoLine) {
+    if (pendingGotoLine.path === currentPath) editor.gotoLine(pendingGotoLine.line);
+    pendingGotoLine = null;
+  }
 }
 async function applyNewDocumentLocal() {
-  await editor.setFileMode(null); // 無題の新規文書は既定でMarkdownモード
+  // 無題の新規文書はパス・ファイル名とも無いため、decideFileMode(null, null)は常にmarkdownを返す。
+  await editor.setFileMode(null, decideFileMode(null, null));
   editor.setValue("");
   setName("無題");
   currentPath = null;
@@ -322,6 +524,7 @@ async function applyNewDocumentLocal() {
   updateCount();
   updateStatusMeta();
   updateStatusMode();
+  sidebar.setCurrentPath(null); // 無題の新規文書には対応するファイルが無いのでハイライトを外す
 }
 
 async function handleHostMessage(msg) {
@@ -335,6 +538,10 @@ async function handleHostMessage(msg) {
       break;
     case "save-result":
       if (msg.ok) {
+        // 名前を付けて保存で拡張子が変わった場合はモードを再判定する(不具合修正: 従来は
+        // setName()するだけでeditor.setFileMode()を呼んでおらず、モードが古いままだった)。
+        const prevExt = (currentName.split(".").pop() || "").toLowerCase();
+        const nextExt = (msg.fileName.split(".").pop() || "").toLowerCase();
         setName(msg.fileName);
         currentPath = msg.path ?? currentPath;
         currentEncoding = msg.encoding;
@@ -342,6 +549,10 @@ async function handleHostMessage(msg) {
         setReadOnly(false);
         setDirty(false);
         updateStatusMeta();
+        if (nextExt !== prevExt) {
+          await editor.setFileMode(currentName, decideFileMode(currentPath, currentName));
+          updateStatusMode();
+        }
       }
       // キャンセル・失敗時はダーティ状態を維持する(msg.errorがあれば将来トースト表示等に使う)
       break;
@@ -371,10 +582,40 @@ async function handleHostMessage(msg) {
       // (index.htmlの起動時スクリプトが既に反映済み)のままにする。
       if (msg.theme === "light" || msg.theme === "dark") {
         document.documentElement.dataset.theme = msg.theme;
-        editor.refreshTheme();
       }
+      // テーマプリセット(仕様書 第2.10節 C-06)。src/themes.css側の
+      // :root[data-theme="light"][data-light-theme="..."] 等のセレクタで上書きされる。
+      // 未設定/不明な値でも属性自体は付けておき、"default"相当(上書きなし)にフォールバックする。
+      document.documentElement.dataset.lightTheme = msg.lightTheme || "default";
+      document.documentElement.dataset.darkTheme = msg.darkTheme || "default";
+      // CodeMirror側(キャレット色・選択範囲色)はgetComputedStyleで一度だけ色を読むため、
+      // ライト/ダーク切替・プリセット切替のいずれでも都度refreshThemeして反映させる。
+      editor.refreshTheme();
       // 本文の文字サイズ(Ctrl+マウスホイールでの変更を永続化している)
       editor.setFontSize(msg.editorFontSize || DEFAULT_FONT_SIZE);
+      updateZoom();
+      // 文字数カウントの表示(仕様書 V-13)。C#側にまだ受け口が無い場合はmsg.showWordCountが
+      // undefinedになるため、その場合は既定のON(showWordCountの初期値)を維持する。
+      if (typeof msg.showWordCount === "boolean") {
+        showWordCount = msg.showWordCount;
+        updateWordCountVisibility();
+      }
+      // 本文フォント(仕様書 第2.10節 C-08)。空文字/未設定ならCSS側の既定(var(--font-body)由来)
+      // に戻す(host.style.fontFamily = ""でインラインスタイルを外すと通常のカスケードに戻る)。
+      // CodeMirror側(.cm-scroller { fontFamily: "inherit" })がこれをそのまま継承する。
+      host.style.fontFamily = msg.editorFontFamily || "";
+      // カスタムCSS(仕様書 第2.10節 C-07)。C#側がファイル内容を読み込んで文字列として送ってくる
+      // (file://は仮想ホスト配下から読めないため)。<head>内の専用<style>要素のtextContentへ
+      // 反映する(innerHTMLは使わない)。要素が無ければここで生成する。
+      applyCustomCss(msg.customCss ?? "");
+      // キーバインド(仕様書 C-10)。既存のcommands配列を直接書き換えるため、メニューバー・
+      // コマンドパレット・ショートカット待受けはいずれも再起動なしに新しい割り当てを拾う。
+      keyBindings = msg.keyBindings ?? {};
+      applyKeyBindings(commands, keyBindings);
+      // 編集モード決定(仕様書 第1章)の優先順位2・3を上書きする設定。ブリッジが無い
+      // ブラウザ単体動作ではapply-settings自体が届かないため、その場合は既定の空のままになる。
+      fileModeOverrides = msg.fileModeOverrides ?? {};
+      perFileModes = msg.perFileModes ?? {};
       break;
     case "image-inserted":
       // 画像挿入(仕様書 R-07)。C#側でファイルコピー・相対パス解決を終えたものが届く。
@@ -383,6 +624,39 @@ async function handleHostMessage(msg) {
     case "export-done":
       // PNGエクスポート完了(成功・失敗いずれでも届く)。enterExportLayout()での展開を復元する。
       exitExportLayout();
+      break;
+    case "folder-loaded":
+      // フォルダ読み込み結果(仕様書 第2.8節 S-02/S-03)。"open-folder"/"load-folder"に加え、
+      // ファイルを開いた際の親フォルダ自動読み込みでも明示操作なしに届く。
+      if (msg.error) {
+        // クイックオープン用のfolderData(直近の成功データ)はそのまま残し、
+        // サイドバーの表示にだけ失敗した旨を伝える。
+        sidebar.setFolder({ error: msg.error });
+      } else {
+        folderData = msg;
+        sidebar.setFolder(msg);
+      }
+      break;
+    case "search-results":
+      // グローバル検索(仕様書 第2.6節 G-01/G-02)のヒットが逐次届く。
+      sidebar.handleSearchResults(msg.hits ?? []);
+      break;
+    case "search-done":
+      // グローバル検索の完了通知(打ち切り・エラー時もこのtypeで届く)。
+      sidebar.handleSearchDone(msg);
+      break;
+    case "settings":
+      // 設定画面(settings.js)からのget-settings応答。画面を開いていない/既に読み込み済みの
+      // 場合は内部でno-opになる。
+      settingsUI?.handleSettingsLoaded(msg);
+      break;
+    case "save-settings-result":
+      settingsUI?.handleSaveResult(msg);
+      break;
+    case "window-state":
+      // 全画面表示(V-08)・常に手前に表示(V-12)の実際の状態はC#側(WinForms)が持ち、
+      // トグル操作のたび・起動直後に届く。ここは表示専用(メニューのcheckedに反映するだけ)。
+      windowState = { fullscreen: !!msg.fullscreen, alwaysOnTop: !!msg.alwaysOnTop };
       break;
   }
 }
@@ -539,10 +813,10 @@ document.getElementById("btn-theme").addEventListener("click", () => {
   // 手動選択を永続化する(仕様書 第10.2節)。次回起動時もOS設定に戻らないようにする。
   bridge?.postMessage({ type: "set-theme", theme: next });
 });
-// 設定ダイアログはC#側のネイティブウィンドウで表示する(Phase 3時点の最小実装、Phase 8で置き換え)。
+// 設定画面(仕様書 第2.10節)はHTML製で、ブリッジが無いブラウザ単体動作でも開ける
+// (保存はできないが画面自体は操作できる。ctx.actions.openSettings参照)ため、常に表示する。
 const btnSettings = document.getElementById("btn-settings");
 if (btnSettings) {
-  btnSettings.hidden = !bridge;
   btnSettings.addEventListener("click", () => ctx.actions.openSettings());
 }
 

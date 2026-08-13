@@ -4,3 +4,6 @@ dist/
 # .NET (Pane/)
 bin/
 obj/
+
+# ローカル検証用のPlaywrightスクリプト(コミット対象外)
+.verify-*.mjs

@@ -10,6 +10,7 @@ internal sealed class SettingsForm : Form
     private readonly RadioButton _radioRestoreSession;
     private readonly RadioButton _radioBlank;
     private readonly CheckBox _checkFileAssociation;
+    private readonly CheckBox _checkPreloadOnStartup;
     private readonly CheckBox _checkCallouts;
     private readonly CheckBox _checkSuperSubscript;
     private readonly CheckBox _checkHighlight;
@@ -19,6 +20,7 @@ internal sealed class SettingsForm : Form
 
     public bool RestoreSessionOnStartup => _radioRestoreSession.Checked;
     public bool FileAssociationEnabled => _checkFileAssociation.Checked;
+    public bool PreloadOnStartup => _checkPreloadOnStartup.Checked;
     public bool CalloutsEnabled => _checkCallouts.Checked;
     public bool SuperSubscriptEnabled => _checkSuperSubscript.Checked;
     public bool HighlightEnabled => _checkHighlight.Checked;
@@ -35,7 +37,7 @@ internal sealed class SettingsForm : Form
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterParent;
         Width = 400;
-        Height = 560;
+        Height = 610;
         Font = new Font("Yu Gothic UI", 9f);
 
         var groupStartup = new GroupBox
@@ -151,11 +153,23 @@ internal sealed class SettingsForm : Form
             Checked = current.FileAssociationEnabled,
         };
 
+        // PCログオン時のプリロード常駐(B-3)。ウィンドウを出さずに常駐してWebView2を
+        // 事前初期化しておくことで、実際にファイルを開いたときの初回表示を高速化する。
+        _checkPreloadOnStartup = new CheckBox
+        {
+            Text = "PCの起動時にPaneを常駐させて起動を速くする",
+            Left = 16,
+            Top = 412,
+            Width = 356,
+            Height = 40,
+            Checked = current.PreloadOnStartup,
+        };
+
         var note = new Label
         {
             Text = "登録後、Windowsの設定画面で手動確認が必要な場合があります。",
             Left = 16,
-            Top = 414,
+            Top = 456,
             Width = 356,
             Height = 32,
             ForeColor = SystemColors.GrayText,
@@ -166,7 +180,7 @@ internal sealed class SettingsForm : Form
             Text = "OK",
             DialogResult = DialogResult.OK,
             Left = 210,
-            Top = 456,
+            Top = 506,
             Width = 80,
         };
         var btnCancel = new Button
@@ -174,7 +188,7 @@ internal sealed class SettingsForm : Form
             Text = "キャンセル",
             DialogResult = DialogResult.Cancel,
             Left = 296,
-            Top = 456,
+            Top = 506,
             Width = 80,
         };
 
@@ -183,6 +197,7 @@ internal sealed class SettingsForm : Form
         Controls.Add(groupMath);
         Controls.Add(_checkCopyHtml);
         Controls.Add(_checkFileAssociation);
+        Controls.Add(_checkPreloadOnStartup);
         Controls.Add(note);
         Controls.Add(btnOk);
         Controls.Add(btnCancel);

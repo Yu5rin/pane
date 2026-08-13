@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Security;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Web.WebView2.Core;
@@ -39,8 +40,24 @@ internal sealed class MainForm : Form
     private readonly DroppedFileContent? _droppedFile;
     private readonly Action<string?>? _requestNewWindow;
     private readonly Action<DroppedFileContent>? _requestNewWindowWithContent;
+    private readonly Action<MainForm>? _requestSwitchDocument;
+    /// <summary>設定の保存後、自分のウィンドウ以外にも変更を反映してもらうためのコールバック
+    /// (設定はアプリ全体で共有されるため)。<see cref="PaneApplicationContext"/> が全ウィンドウへ
+    /// apply-settingsを再送する処理を渡す。requestSwitchDocumentと同じ流儀。</summary>
+    private readonly Action<MainForm>? _requestBroadcastSettings;
     private readonly System.Windows.Forms.Timer _autoSaveTimer;
     private readonly System.Windows.Forms.Timer _externalChangeDebounceTimer;
+
+    // ---- 全画面表示(仕様書 第2.5節 V-08)。解除時に元のスタイル・状態へ正確に戻すため退避しておく。 ----
+    private bool _isFullscreen;
+    private FormBorderStyle _preFullscreenBorderStyle;
+    private FormWindowState _preFullscreenWindowState;
+
+    // WebView2環境をプロセス全体で1回だけ生成してキャッシュする(B-2: プリロード常駐時の高速化)。
+    // preload待機中にPaneApplicationContextが先取りで生成しておき、実際にウィンドウを開いたときは
+    // ここで再利用することでCreateAsyncの待ち時間を省く。通常起動時もこの経路を通って構わない。
+    private static readonly SemaphoreSlim EnvironmentLock = new(1, 1);
+    private static CoreWebView2Environment? _cachedEnvironment;
 
     private FileSystemWatcher? _watcher;
     private bool _suppressWatcher;
@@ -52,6 +69,15 @@ internal sealed class MainForm : Form
     private bool _hasTrailingNewline = true;
     private bool _isDirty;
     private bool _isReadOnly;
+
+    /// <summary>現在サイドバーに読み込み済みのフォルダのルートパス(仕様書 第2.8節)。
+    /// ファイルを開くたびに同じフォルダを再走査しないよう、これと比較する。</summary>
+    private string? _loadedFolderRootPath;
+    /// <summary>実行中のフォルダ走査を中断するためのトークン。新しい走査を始める際に前のものをキャンセルする。</summary>
+    private CancellationTokenSource? _folderScanCts;
+    /// <summary>実行中のグローバル検索を中断するためのトークン。フォルダ走査用とは独立させ、
+    /// 検索中に別のフォルダ走査(ファイルを開いた際の自動読み込み等)が走っても互いに干渉しないようにする。</summary>
+    private CancellationTokenSource? _searchCts;
 
     /// <summary>ConfirmDiscardDirtyAsyncの「保存する」選択時、JS側の保存完了(save-result)を待つための待機口。</summary>
     private TaskCompletionSource<bool>? _saveCompletionSource;
@@ -70,6 +96,8 @@ internal sealed class MainForm : Form
         AutoSaveSnapshot? recoverFrom = null,
         Action<string?>? requestNewWindow = null,
         Action<DroppedFileContent>? requestNewWindowWithContent = null,
+        Action<MainForm>? requestSwitchDocument = null,
+        Action<MainForm>? requestBroadcastSettings = null,
         DroppedFileContent? droppedFile = null)
     {
         _initialPath = initialPath;
@@ -77,6 +105,8 @@ internal sealed class MainForm : Form
         _droppedFile = droppedFile;
         _requestNewWindow = requestNewWindow;
         _requestNewWindowWithContent = requestNewWindowWithContent;
+        _requestSwitchDocument = requestSwitchDocument;
+        _requestBroadcastSettings = requestBroadcastSettings;
         Logger.Write($"MainForm生成: initialPath={initialPath ?? "(なし)"}, recoverFrom={(recoverFrom is null ? "なし" : recoverFrom.OriginalPath ?? "無題")}, droppedFile={droppedFile?.Name ?? "なし"}");
 
         Text = "Pane";
@@ -175,11 +205,8 @@ internal sealed class MainForm : Form
     private async void OnLoadAsync(object? sender, EventArgs e)
     {
         Logger.Write("OnLoadAsync開始");
-        string userDataFolder = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "Pane", "WebView2");
 
-        CoreWebView2Environment env = await CoreWebView2Environment.CreateAsync(userDataFolder: userDataFolder);
+        CoreWebView2Environment env = await EnsureEnvironmentAsync();
         await _webView.EnsureCoreWebView2Async(env);
         Logger.Write($"WebView2初期化完了: バージョン={_webView.CoreWebView2.Environment.BrowserVersionString}");
 
@@ -201,6 +228,35 @@ internal sealed class MainForm : Form
             VirtualHostName, distPath, CoreWebView2HostResourceAccessKind.Allow);
         _webView.CoreWebView2.Navigate($"https://{VirtualHostName}/index.html");
         Logger.Write("Navigate呼び出し完了");
+    }
+
+    /// <summary>
+    /// CoreWebView2Environmentの生成はプロセス全体で1回だけ行い、以後は使い回す(B-2)。
+    /// プリロード常駐時は<see cref="PaneApplicationContext"/>がウィンドウ生成前にこれを呼んで
+    /// 先にWebView2の初期化を済ませておくため、実際にウィンドウを表示する段になってから
+    /// CreateAsyncを待つ必要が無くなり、体感の起動速度が上がる。通常起動時もこの経路で構わない
+    /// (初回呼び出しがOnLoadAsync自身になるだけで、動作は従来どおり)。
+    /// </summary>
+    public static async Task<CoreWebView2Environment> EnsureEnvironmentAsync()
+    {
+        if (_cachedEnvironment is not null) return _cachedEnvironment;
+
+        await EnvironmentLock.WaitAsync();
+        try
+        {
+            if (_cachedEnvironment is not null) return _cachedEnvironment;
+
+            string userDataFolder = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Pane", "WebView2");
+            _cachedEnvironment = await CoreWebView2Environment.CreateAsync(userDataFolder: userDataFolder);
+            Logger.Write("CoreWebView2Environment生成完了(プロセス全体でキャッシュ)");
+            return _cachedEnvironment;
+        }
+        finally
+        {
+            EnvironmentLock.Release();
+        }
     }
 
     private static string ResolveDistPath()
@@ -243,6 +299,7 @@ internal sealed class MainForm : Form
         {
             case "ready":
                 PostCapabilities();
+                PostWindowState();
                 if (_recoverFrom is not null) RestoreFromSnapshot(_recoverFrom);
                 else if (_droppedFile is not null) OpenDroppedContent(_droppedFile.Name, _droppedFile.Bytes);
                 else if (_initialPath is not null) OpenFile(_initialPath);
@@ -320,7 +377,90 @@ internal sealed class MainForm : Form
                     SaveFontSize(sizeProp.GetInt32());
                 }
                 break;
+            case "open-folder":
+                HandleOpenFolderRequest();
+                break;
+            case "load-folder":
+                if (root.TryGetProperty("path", out JsonElement loadFolderPathProp))
+                {
+                    string? folderPath = loadFolderPathProp.GetString();
+                    if (!string.IsNullOrEmpty(folderPath))
+                    {
+                        _ = LoadFolderAsync(folderPath);
+                    }
+                }
+                break;
+            case "global-search":
+                HandleGlobalSearchRequest(root);
+                break;
+            case "cancel-search":
+                Logger.Write("cancel-search受信: 実行中の検索をキャンセル");
+                _searchCts?.Cancel();
+                break;
+            case "toggle-fullscreen":
+                ToggleFullscreen();
+                break;
+            case "toggle-always-on-top":
+                ToggleAlwaysOnTop();
+                break;
+            case "switch-document":
+                _requestSwitchDocument?.Invoke(this);
+                break;
+            case "get-settings":
+                // HTML製の設定画面(後続作業)からの読み込み要求。既存のopen-settings/SettingsForm
+                // とは独立した経路として追加する(置き換えはしない)。
+                PostSettingsSnapshot();
+                break;
+            case "save-settings":
+                HandleSaveSettingsRequest(root);
+                break;
+            case "remember-file-mode":
+                HandleRememberFileModeRequest(root);
+                break;
         }
+    }
+
+    // ---- ウィンドウ制御(仕様書 第2.5節 V-08・V-11・V-12) ----
+
+    /// <summary>
+    /// 全画面表示のトグル(F11)。全画面にする際はFormBorderStyle=NoneかつWindowState=Maximizedとし、
+    /// 解除時に正しく戻せるよう元のFormBorderStyle・WindowStateを退避しておく。
+    /// 既に最大化されていた状態から全画面→解除した場合も、最大化へ戻す(単純にNormalへ戻すと縮む)。
+    /// </summary>
+    private void ToggleFullscreen()
+    {
+        if (_isFullscreen)
+        {
+            // 復元: 先に外枠を戻してからWindowStateを戻す。WindowStateを先に戻すと
+            // (元がMaximizedの場合)枠の無いまま最大化された状態を経由してしまうため。
+            FormBorderStyle = _preFullscreenBorderStyle;
+            WindowState = _preFullscreenWindowState;
+            _isFullscreen = false;
+        }
+        else
+        {
+            _preFullscreenBorderStyle = FormBorderStyle;
+            _preFullscreenWindowState = WindowState;
+            FormBorderStyle = FormBorderStyle.None;
+            WindowState = FormWindowState.Maximized;
+            _isFullscreen = true;
+        }
+        Logger.Write($"ToggleFullscreen: fullscreen={_isFullscreen}");
+        PostWindowState();
+    }
+
+    /// <summary>常に手前に表示のトグル(仕様書 V-12)。</summary>
+    private void ToggleAlwaysOnTop()
+    {
+        TopMost = !TopMost;
+        Logger.Write($"ToggleAlwaysOnTop: alwaysOnTop={TopMost}");
+        PostWindowState();
+    }
+
+    /// <summary>全画面・常に手前に表示の現在値をメニューのチェック表示用にJS側へ通知する。</summary>
+    private void PostWindowState()
+    {
+        PostToWeb(new { type = "window-state", fullscreen = _isFullscreen, alwaysOnTop = TopMost });
     }
 
     private async Task HandleOpenPathRequestAsync(string path)
@@ -451,6 +591,9 @@ internal sealed class MainForm : Form
                 lineEnding = TextFileService.LineEndingLabel(result.LineEnding),
                 readOnly = _isReadOnly,
             });
+            // ファイルを開くと、その親フォルダを自動でサイドバーに読み込む
+            // (仕様書 第2.8節「ファイルを開くと、その親フォルダが自動的に読み込まれる」)。
+            AutoLoadParentFolder(path);
         }
         catch (Exception ex)
         {
@@ -462,6 +605,209 @@ internal sealed class MainForm : Form
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
         }
+    }
+
+    // ---- サイドバー用フォルダ走査(仕様書 第2.8節)。実体はFolderServiceに委譲する。 ----
+
+    /// <summary>
+    /// File &gt; フォルダを開く。<see cref="FolderBrowserDialog"/> で選ばせ、選ばれたら走査する。
+    /// </summary>
+    private void HandleOpenFolderRequest()
+    {
+        using var dialog = new FolderBrowserDialog();
+        if (dialog.ShowDialog(this) == DialogResult.OK)
+        {
+            _ = LoadFolderAsync(dialog.SelectedPath);
+        }
+    }
+
+    /// <summary>
+    /// ファイルを開いた際、その親フォルダを自動で読み込む(Typoraと同じ挙動)。
+    /// 既に同じフォルダを読み込み済みなら、ファイルを開くたびに毎回走査すると重いため
+    /// 再走査しない。
+    /// </summary>
+    private void AutoLoadParentFolder(string filePath)
+    {
+        string? parentDir = Path.GetDirectoryName(Path.GetFullPath(filePath));
+        if (parentDir is null) return;
+
+        if (_loadedFolderRootPath is not null && PathsEqual(_loadedFolderRootPath, parentDir))
+        {
+            Logger.Write($"AutoLoadParentFolder: 読み込み済みのため再走査をスキップ: {parentDir}");
+            return;
+        }
+
+        _ = LoadFolderAsync(parentDir);
+    }
+
+    private static bool PathsEqual(string a, string b)
+    {
+        static string Normalize(string p) => Path.GetFullPath(p).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return string.Equals(Normalize(a), Normalize(b), StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// 指定フォルダをFolderServiceで走査し、結果をJS側へfolder-loadedとして送る。
+    /// "open-folder"(ダイアログ選択)・"load-folder"(JSからのパス指定)・
+    /// AutoLoadParentFolder(ファイルを開いた際の自動読み込み)の3経路がすべてここを通る。
+    /// 走査中に別のフォルダ読み込みが始まった場合は、前の走査をキャンセルする。
+    /// </summary>
+    private async Task LoadFolderAsync(string path)
+    {
+        Logger.Write($"LoadFolderAsync開始: {path}");
+        _folderScanCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _folderScanCts = cts;
+        try
+        {
+            FolderScanResult result = await FolderService.ScanAsync(path, cts.Token);
+            if (cts.IsCancellationRequested) return;
+
+            _loadedFolderRootPath = result.RootPath;
+            Logger.Write($"LoadFolderAsync完了: {result.RootPath}, 件数={result.Entries.Count}, truncated={result.Truncated}");
+            PostToWeb(new
+            {
+                type = "folder-loaded",
+                rootPath = result.RootPath,
+                rootName = result.RootName,
+                entries = result.Entries.Select(entry => new
+                {
+                    path = entry.Path,
+                    name = entry.Name,
+                    relativePath = entry.RelativePath,
+                    isDirectory = entry.IsDirectory,
+                }),
+                truncated = result.Truncated,
+            });
+        }
+        catch (OperationCanceledException)
+        {
+            // 後続のフォルダ読み込みに置き換えられた場合の正常なキャンセル。何もしない。
+            Logger.Write($"LoadFolderAsync: キャンセルされた: {path}");
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException($"フォルダの読み込みに失敗: {path}", ex);
+            PostToWeb(new { type = "folder-loaded", error = ex.Message });
+        }
+        finally
+        {
+            if (ReferenceEquals(_folderScanCts, cts)) _folderScanCts = null;
+        }
+    }
+
+    // ---- グローバル検索(仕様書 第2.6節・第8.3節)。実体はSearchServiceに委譲する。 ----
+
+    /// <summary>
+    /// "global-search"メッセージを処理する。読み込み済みフォルダが無い・クエリが空の場合は
+    /// 検索を行わずsearch-doneのみ返す。新しい検索が始まったら前の検索は必ずキャンセルする
+    /// (検索欄への連続入力のたびに呼ばれるため)。
+    /// </summary>
+    private void HandleGlobalSearchRequest(JsonElement message)
+    {
+        string queryText = message.TryGetProperty("query", out JsonElement queryProp) ? queryProp.GetString() ?? "" : "";
+        bool caseSensitive = message.TryGetProperty("caseSensitive", out JsonElement csProp) && csProp.ValueKind == JsonValueKind.True;
+        bool regexp = message.TryGetProperty("regexp", out JsonElement reProp) && reProp.ValueKind == JsonValueKind.True;
+        bool wholeWord = message.TryGetProperty("wholeWord", out JsonElement wwProp) && wwProp.ValueKind == JsonValueKind.True;
+
+        _searchCts?.Cancel();
+
+        if (_loadedFolderRootPath is null)
+        {
+            Logger.Write("global-search: フォルダ未読込のため検索できない");
+            PostToWeb(new { type = "search-done", error = "フォルダが読み込まれていません" });
+            return;
+        }
+
+        if (string.IsNullOrEmpty(queryText))
+        {
+            PostToWeb(new { type = "search-done", total = 0, truncated = false });
+            return;
+        }
+
+        var cts = new CancellationTokenSource();
+        _searchCts = cts;
+        string rootPath = _loadedFolderRootPath;
+        var query = new SearchQuery(queryText, caseSensitive, regexp, wholeWord);
+        Logger.Write($"global-search開始: root={rootPath}, text=\"{queryText}\", caseSensitive={caseSensitive}, regexp={regexp}, wholeWord={wholeWord}");
+
+        _ = RunGlobalSearchAsync(rootPath, query, cts);
+    }
+
+    private async Task RunGlobalSearchAsync(string rootPath, SearchQuery query, CancellationTokenSource cts)
+    {
+        // totalはonBatchのラムダから直接インクリメントする(クロージャによる参照キャプチャ)。
+        // SearchService側はバッチを1つ処理し終えてから次のバッチへ進む(await onBatch(...))ため、
+        // 複数スレッドから同時に触られることはなく、単純なローカル変数で安全に積算できる。
+        int total = 0;
+        try
+        {
+            await SearchService.SearchAsync(
+                rootPath,
+                query,
+                onBatch: hits =>
+                {
+                    total += hits.Count;
+                    return PostSearchResultsToUiThreadAsync(hits);
+                },
+                cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            Logger.Write($"global-search: キャンセルされた: root={rootPath}");
+            return; // 後続の検索に置き換えられた・キャンセルされた場合は何も返さない
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException($"global-search失敗: root={rootPath}", ex);
+            if (ReferenceEquals(_searchCts, cts))
+            {
+                PostToWeb(new { type = "search-done", error = ex.Message });
+            }
+            return;
+        }
+        finally
+        {
+            if (ReferenceEquals(_searchCts, cts)) _searchCts = null;
+        }
+
+        // SearchAsyncはヒット総数を戻り値では返さない(仕様どおりTask)ため、
+        // SearchService.MaxHitsに達したかどうかで打ち切りの有無を判定する。
+        bool truncated = total >= SearchService.MaxHits;
+        Logger.Write($"global-search完了: root={rootPath}, total={total}, truncated={truncated}");
+        PostToWeb(new { type = "search-done", total, truncated });
+    }
+
+    /// <summary>
+    /// SearchServiceからのonBatchコールバックはワーカースレッドから呼ばれるため、
+    /// PostWebMessageAsJson(WebView2)の呼び出しはBeginInvokeでUIスレッドへマーシャリングする
+    /// (OnFileChangedExternallyと同じ作法)。
+    /// </summary>
+    private Task PostSearchResultsToUiThreadAsync(IReadOnlyList<SearchHit> hits)
+    {
+        Logger.Write($"global-search: バッチ送信 件数={hits.Count}");
+        BeginInvoke(new MethodInvoker(() =>
+        {
+            PostToWeb(new
+            {
+                type = "search-results",
+                hits = hits.Select(hit => new
+                {
+                    path = hit.Path,
+                    name = hit.Name,
+                    relativePath = hit.RelativePath,
+                    line = hit.Line,
+                    column = hit.Column,
+                    lineText = hit.LineText,
+                    // 強調位置はcolumn(元の行の列番号)ではなくmatchOffset/matchLengthを使う。
+                    // LineTextはSearchService側で前後100文字に切り詰められることがあり、
+                    // columnは元の行基準のままずれてしまうため(不具合1)。
+                    matchOffset = hit.MatchOffset,
+                    matchLength = hit.MatchLength,
+                }),
+            });
+        }));
+        return Task.CompletedTask;
     }
 
     /// <summary>
@@ -750,15 +1096,43 @@ internal sealed class MainForm : Form
         {
             try
             {
-                if (wantsAssociation) FileAssociationService.Register();
-                else FileAssociationService.Unregister();
+                // WinForms版の設定画面(SettingsForm)はON/OFFの単一チェックボックスしか持たず、
+                // 拡張子ごとの選択肢はまだ無いため、有効化時は従来どおり .md/.markdown/.mdown の
+                // 3つを対象にする(任意拡張子の選択は後続のHTML製設定画面(B節)で行う)。
+                IReadOnlyCollection<string> desiredExtensions = wantsAssociation
+                    ? FileAssociationService.LegacyDefaultExtensions
+                    : Array.Empty<string>();
+                FileAssociationService.Apply(desiredExtensions, settings.GetEffectiveAssociatedExtensions());
                 settings.FileAssociationEnabled = wantsAssociation;
+                settings.AssociatedExtensions = desiredExtensions.ToList();
             }
             catch (Exception ex)
             {
+                Logger.WriteException("ファイルの関連付け設定の変更に失敗", ex);
                 MessageBox.Show(
                     this,
                     $"ファイルの関連付け設定を変更できませんでした。\n{ex.Message}",
+                    "Pane",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+        }
+
+        bool wantsPreload = dialog.PreloadOnStartup;
+        if (wantsPreload != settings.PreloadOnStartup)
+        {
+            try
+            {
+                if (wantsPreload) StartupService.Register();
+                else StartupService.Unregister();
+                settings.PreloadOnStartup = wantsPreload;
+            }
+            catch (Exception ex)
+            {
+                // StartupService側で既にLogger.WriteException済みのため、ここではUI表示のみ。
+                MessageBox.Show(
+                    this,
+                    $"スタートアップ登録を変更できませんでした。\n{ex.Message}",
                     "Pane",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
@@ -773,15 +1147,21 @@ internal sealed class MainForm : Form
         settings.MathAutoNumberEnabled = dialog.MathAutoNumberEnabled;
         settings.DefaultCopyFormat = dialog.DefaultCopyFormat;
         SettingsService.Save(settings);
-        PostCapabilities();
+
+        // 設定はアプリ全体で共有されるため、自分のウィンドウだけでなく他のウィンドウにも
+        // 反映する。コールバックが渡されていない(想定外の生成経路)場合は自分のウィンドウだけでも
+        // 最新化しておく。
+        if (_requestBroadcastSettings is not null) _requestBroadcastSettings(this);
+        else PostCapabilities();
     }
 
     /// <summary>
     /// マークダウン記法拡張のON/OFF(仕様書 第2.10節 C-01)・最近使ったファイル(F-09)・
     /// Pandoc導入状況・既定コピー形式をJS側へ伝える。起動時("ready"受信直後)、設定画面でOKが
     /// 押されるたび、最近使ったファイルが更新されるたびに送る。
+    /// <see cref="PaneApplicationContext"/> が全ウィンドウへ再送する際にも呼ぶため internal。
     /// </summary>
-    private void PostCapabilities()
+    internal void PostCapabilities()
     {
         AppSettings settings = SettingsService.Load();
         PostToWeb(new
@@ -797,7 +1177,319 @@ internal sealed class MainForm : Form
             pandocAvailable = DetectPandocAvailable(),
             theme = settings.Theme,
             editorFontSize = settings.EditorFontSize,
+            // ---- ここから仕様書 第2.10節 C-01〜C-14のうちJS側の描画に関わる項目 ----
+            strictMode = settings.StrictMode,
+            codeBlockLineNumbers = settings.CodeBlockLineNumbers,
+            autoPairing = settings.AutoPairing,
+            showWordCount = settings.ShowWordCount,
+            editorFontFamily = settings.EditorFontFamily,
+            customCssPath = settings.CustomCssPath,
+            customCss = ReadCustomCss(settings.CustomCssPath),
+            lightTheme = settings.LightTheme,
+            darkTheme = settings.DarkTheme,
+            keyBindings = settings.KeyBindings,
+            defaultEncoding = settings.DefaultEncoding,
+            defaultLineEnding = settings.DefaultLineEnding,
+            displayMode = settings.DisplayMode,
+            // 拡張子ごとの既定モード上書き・ファイル単位の手動モード記憶(仕様書 第1章)。
+            fileModeOverrides = settings.FileModeOverrides,
+            perFileModes = settings.PerFileModes,
         });
+    }
+
+    /// <summary>カスタムCSS(仕様書 第2.10節 C-07)の読み込み上限。これを超えるファイルは読み込まない。</summary>
+    private const long CustomCssMaxBytes = 1024 * 1024; // 1MB
+
+    /// <summary>
+    /// カスタムCSSファイルの中身を読み込んで返す。WebView2の仮想ホスト配下からは
+    /// file://パスを直接読めないため、C#側でファイルを読んでテキストとしてJSへ渡す。
+    /// パス未設定・ファイルが存在しない・読み取り不可・サイズ上限超過の場合は例外を投げず
+    /// 空文字を返し、理由をLogger.Writeに記録する。
+    /// </summary>
+    private static string ReadCustomCss(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return "";
+        try
+        {
+            var info = new FileInfo(path);
+            if (!info.Exists)
+            {
+                Logger.Write($"カスタムCSS: ファイルが存在しないため読み込みをスキップ: {path}");
+                return "";
+            }
+            if (info.Length > CustomCssMaxBytes)
+            {
+                Logger.Write($"カスタムCSS: サイズ上限({CustomCssMaxBytes}バイト)を超えるため読み込みをスキップ: {path} ({info.Length}バイト)");
+                return "";
+            }
+            return File.ReadAllText(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or SecurityException)
+        {
+            Logger.WriteException($"カスタムCSSの読み込みに失敗: {path}", ex);
+            return "";
+        }
+    }
+
+    /// <summary>
+    /// { type: "get-settings" } への応答。設定画面(後続、HTML製)が全項目を読み込むための経路。
+    /// apply-settingsが「JS側の描画に必要な差分」だけを送るのに対し、こちらは仕様書 第2.10節
+    /// C-01〜C-14に相当する設定項目をすべて1つのオブジェクトにまとめて返す。
+    /// ファイル関連付け可能な拡張子一覧(FileTypes.generated.cs)は別エージェントが生成中で
+    /// 未確定のため、今回は含めない(後続作業で接続する)。
+    /// </summary>
+    private void PostSettingsSnapshot()
+    {
+        AppSettings settings = SettingsService.Load();
+        PostToWeb(new
+        {
+            type = "settings",
+            displayMode = settings.DisplayMode,
+            startupBehavior = settings.StartupBehavior,
+            fileAssociationEnabled = settings.FileAssociationEnabled,
+            associatedExtensions = settings.AssociatedExtensions,
+            preloadOnStartup = settings.PreloadOnStartup,
+            calloutsEnabled = settings.CalloutsEnabled,
+            superSubscriptEnabled = settings.SuperSubscriptEnabled,
+            highlightEnabled = settings.HighlightEnabled,
+            inlineMathEnabled = settings.InlineMathEnabled,
+            mathAutoNumberEnabled = settings.MathAutoNumberEnabled,
+            defaultCopyFormat = settings.DefaultCopyFormat,
+            theme = settings.Theme,
+            editorFontSize = settings.EditorFontSize,
+            strictMode = settings.StrictMode,
+            codeBlockLineNumbers = settings.CodeBlockLineNumbers,
+            autoPairing = settings.AutoPairing,
+            lightTheme = settings.LightTheme,
+            darkTheme = settings.DarkTheme,
+            customCssPath = settings.CustomCssPath,
+            editorFontFamily = settings.EditorFontFamily,
+            showWordCount = settings.ShowWordCount,
+            keyBindings = settings.KeyBindings,
+            defaultEncoding = settings.DefaultEncoding,
+            defaultLineEnding = settings.DefaultLineEnding,
+            pandocAvailable = DetectPandocAvailable(),
+            // 拡張子ごとの既定モード上書き(仕様書 第1章)。設定画面での編集対象。
+            fileModeOverrides = settings.FileModeOverrides,
+        });
+    }
+
+    /// <summary>
+    /// { type: "save-settings", settings: {...} } を受け取り、含まれている項目だけを
+    /// AppSettingsへ反映して保存する。JS側の設定画面は段階的に実装される想定のため、
+    /// 一部項目しか送られてこなくても他の項目を壊さないよう「含まれていれば上書き」とする。
+    /// 保存後、ファイル関連付け・スタートアップ登録の差分適用と、全ウィンドウへの再配信を行う。
+    /// </summary>
+    private void HandleSaveSettingsRequest(JsonElement root)
+    {
+        if (!root.TryGetProperty("settings", out JsonElement s) || s.ValueKind != JsonValueKind.Object)
+        {
+            Logger.Write("save-settings受信: settingsプロパティが無いため無視");
+            return;
+        }
+
+        AppSettings settings = SettingsService.Load();
+        IReadOnlyCollection<string> previousExtensions = settings.GetEffectiveAssociatedExtensions();
+        bool previousPreload = settings.PreloadOnStartup;
+
+        if (TryGetString(s, "displayMode", out string displayMode)) settings.DisplayMode = displayMode;
+        if (TryGetString(s, "startupBehavior", out string startupBehavior)) settings.StartupBehavior = startupBehavior;
+        if (TryGetBool(s, "preloadOnStartup", out bool preloadOnStartup)) settings.PreloadOnStartup = preloadOnStartup;
+        if (TryGetBool(s, "calloutsEnabled", out bool calloutsEnabled)) settings.CalloutsEnabled = calloutsEnabled;
+        if (TryGetBool(s, "superSubscriptEnabled", out bool superSub)) settings.SuperSubscriptEnabled = superSub;
+        if (TryGetBool(s, "highlightEnabled", out bool highlightEnabled)) settings.HighlightEnabled = highlightEnabled;
+        if (TryGetBool(s, "inlineMathEnabled", out bool inlineMathEnabled)) settings.InlineMathEnabled = inlineMathEnabled;
+        if (TryGetBool(s, "mathAutoNumberEnabled", out bool mathAutoNumberEnabled)) settings.MathAutoNumberEnabled = mathAutoNumberEnabled;
+        if (TryGetString(s, "defaultCopyFormat", out string defaultCopyFormat)) settings.DefaultCopyFormat = defaultCopyFormat;
+        if (TryGetString(s, "theme", out string theme) && theme is "light" or "dark" or "system") settings.Theme = theme;
+        if (TryGetInt(s, "editorFontSize", out int editorFontSize) && editorFontSize is >= 8 and <= 40) settings.EditorFontSize = editorFontSize;
+        if (TryGetBool(s, "strictMode", out bool strictMode)) settings.StrictMode = strictMode;
+        if (TryGetBool(s, "codeBlockLineNumbers", out bool codeBlockLineNumbers)) settings.CodeBlockLineNumbers = codeBlockLineNumbers;
+        if (TryGetBool(s, "autoPairing", out bool autoPairing)) settings.AutoPairing = autoPairing;
+        if (TryGetString(s, "lightTheme", out string lightTheme)) settings.LightTheme = lightTheme;
+        if (TryGetString(s, "darkTheme", out string darkTheme)) settings.DarkTheme = darkTheme;
+        if (s.TryGetProperty("customCssPath", out JsonElement cssProp))
+        {
+            settings.CustomCssPath = cssProp.ValueKind == JsonValueKind.String ? cssProp.GetString() : null;
+        }
+        if (s.TryGetProperty("editorFontFamily", out JsonElement fontFamilyProp))
+        {
+            settings.EditorFontFamily = fontFamilyProp.ValueKind == JsonValueKind.String ? fontFamilyProp.GetString() : null;
+        }
+        if (TryGetBool(s, "showWordCount", out bool showWordCount)) settings.ShowWordCount = showWordCount;
+        if (s.TryGetProperty("keyBindings", out JsonElement keyBindingsProp) && keyBindingsProp.ValueKind == JsonValueKind.Object)
+        {
+            var keyBindings = new Dictionary<string, string>();
+            foreach (JsonProperty prop in keyBindingsProp.EnumerateObject())
+            {
+                if (prop.Value.ValueKind == JsonValueKind.String) keyBindings[prop.Name] = prop.Value.GetString() ?? "";
+            }
+            settings.KeyBindings = keyBindings;
+        }
+        if (TryGetString(s, "defaultEncoding", out string defaultEncoding)) settings.DefaultEncoding = defaultEncoding;
+        if (TryGetString(s, "defaultLineEnding", out string defaultLineEnding)) settings.DefaultLineEnding = defaultLineEnding;
+        if (s.TryGetProperty("fileModeOverrides", out JsonElement fileModeOverridesProp) && fileModeOverridesProp.ValueKind == JsonValueKind.Object)
+        {
+            // キー(拡張子)は先頭ドットを除いて小文字へ正規化し、値が3種以外のものは捨てる。
+            var overrides = new Dictionary<string, string>();
+            foreach (JsonProperty prop in fileModeOverridesProp.EnumerateObject())
+            {
+                if (prop.Value.ValueKind != JsonValueKind.String) continue;
+                string mode = prop.Value.GetString() ?? "";
+                if (mode is not ("markdown" or "code" or "plain")) continue;
+                string ext = prop.Name.TrimStart('.').ToLowerInvariant();
+                if (ext.Length == 0) continue;
+                overrides[ext] = mode;
+            }
+            settings.FileModeOverrides = overrides;
+        }
+
+        List<string>? desiredExtensions = null;
+        if (s.TryGetProperty("associatedExtensions", out JsonElement extProp) && extProp.ValueKind == JsonValueKind.Array)
+        {
+            desiredExtensions = extProp.EnumerateArray()
+                .Where(e => e.ValueKind == JsonValueKind.String)
+                .Select(e => e.GetString() ?? "")
+                .Where(e => e.Length > 0)
+                .ToList();
+        }
+
+        // 例外はここで握りつぶさずログへ残し、JS側へも結果を通知する(呼び出し元がエラー表示できるように)。
+        string? errorMessage = null;
+
+        if (desiredExtensions is not null)
+        {
+            try
+            {
+                FileAssociationService.Apply(desiredExtensions, previousExtensions);
+                settings.AssociatedExtensions = desiredExtensions;
+                settings.FileAssociationEnabled = desiredExtensions.Count > 0;
+            }
+            catch (Exception ex)
+            {
+                errorMessage = $"ファイルの関連付け設定を変更できませんでした。{ex.Message}";
+            }
+        }
+
+        if (previousPreload != settings.PreloadOnStartup)
+        {
+            try
+            {
+                if (settings.PreloadOnStartup) StartupService.Register();
+                else StartupService.Unregister();
+            }
+            catch (Exception ex)
+            {
+                // StartupService側で既にLogger.WriteException済み。
+                errorMessage = errorMessage is null
+                    ? $"スタートアップ登録を変更できませんでした。{ex.Message}"
+                    : $"{errorMessage}\nスタートアップ登録を変更できませんでした。{ex.Message}";
+            }
+        }
+
+        SettingsService.Save(settings);
+        PostToWeb(new { type = "save-settings-result", ok = errorMessage is null, error = errorMessage });
+
+        // 設定はアプリ全体で共有されるため、自分のウィンドウだけでなく他のウィンドウにも反映する。
+        if (_requestBroadcastSettings is not null) _requestBroadcastSettings(this);
+        else PostCapabilities();
+    }
+
+    /// <summary>PerFileModes(ファイル単位の手動モード記憶)の最大件数。超過分は古いものから捨てる。</summary>
+    private const int PerFileModesMaxEntries = 100;
+
+    /// <summary>
+    /// { type: "remember-file-mode", path, mode } を受け取り、PerFileModesを更新する
+    /// (仕様書 第1章: 表示メニューで手動切替したモードを記憶する)。
+    /// modeがnull/空ならそのpathのエントリを削除する(=自動判定に戻す)。
+    /// 不正なmode値("markdown"/"code"/"plain"以外)は保存せずログに記録するだけにする。
+    /// </summary>
+    private void HandleRememberFileModeRequest(JsonElement root)
+    {
+        if (!root.TryGetProperty("path", out JsonElement pathProp) || pathProp.ValueKind != JsonValueKind.String)
+        {
+            Logger.Write("remember-file-mode受信: pathが無いため無視");
+            return;
+        }
+        string path = pathProp.GetString() ?? "";
+        if (path.Length == 0)
+        {
+            Logger.Write("remember-file-mode受信: pathが空のため無視");
+            return;
+        }
+
+        string? mode = null;
+        if (root.TryGetProperty("mode", out JsonElement modeProp) && modeProp.ValueKind == JsonValueKind.String)
+        {
+            mode = modeProp.GetString();
+        }
+
+        if (!string.IsNullOrEmpty(mode) && mode is not ("markdown" or "code" or "plain"))
+        {
+            Logger.Write($"remember-file-mode受信: 不正なmode値のため無視: {mode}");
+            return;
+        }
+
+        AppSettings settings = SettingsService.Load();
+        settings.PerFileModes = UpdatePerFileModes(settings.PerFileModes, path, mode);
+        SettingsService.Save(settings);
+    }
+
+    /// <summary>
+    /// PerFileModesへ1件挿入/更新/削除し、上限<see cref="PerFileModesMaxEntries"/>件を超えた
+    /// 古いものから捨てた新しいDictionaryを返す。
+    /// 既存のDictionaryに対して直接Remove/Addを行うと、内部スロットの再利用により
+    /// 列挙順(=挿入順)が崩れる可能性があるため、必ず現在の列挙順を保ったリストから
+    /// 作り直す(このメソッド自身はcurrentへ副作用を与えない)。
+    /// </summary>
+    private static Dictionary<string, string> UpdatePerFileModes(Dictionary<string, string> current, string path, string? mode)
+    {
+        var ordered = current.Where(kv => kv.Key != path).ToList();
+        if (!string.IsNullOrEmpty(mode))
+        {
+            ordered.Add(new KeyValuePair<string, string>(path, mode));
+        }
+        if (ordered.Count > PerFileModesMaxEntries)
+        {
+            ordered = ordered.Skip(ordered.Count - PerFileModesMaxEntries).ToList();
+        }
+        return ordered.ToDictionary(kv => kv.Key, kv => kv.Value);
+    }
+
+    private static bool TryGetString(JsonElement obj, string name, out string value)
+    {
+        if (obj.TryGetProperty(name, out JsonElement prop) && prop.ValueKind == JsonValueKind.String)
+        {
+            // ValueKind.String確認済みのため、GetString()がnullを返すことは無い(念のため既定値を用意)。
+            value = prop.GetString() ?? "";
+            return true;
+        }
+        value = "";
+        return false;
+    }
+
+    private static bool TryGetBool(JsonElement obj, string name, out bool value)
+    {
+        if (obj.TryGetProperty(name, out JsonElement prop) &&
+            (prop.ValueKind == JsonValueKind.True || prop.ValueKind == JsonValueKind.False))
+        {
+            value = prop.GetBoolean();
+            return true;
+        }
+        value = false;
+        return false;
+    }
+
+    private static bool TryGetInt(JsonElement obj, string name, out int value)
+    {
+        if (obj.TryGetProperty(name, out JsonElement prop) && prop.ValueKind == JsonValueKind.Number &&
+            prop.TryGetInt32(out int parsed))
+        {
+            value = parsed;
+            return true;
+        }
+        value = 0;
+        return false;
     }
 
     /// <summary>テーマ切替(仕様書 第10.2節)の手動選択を永続化する。"system"ならOS設定に追従したまま何もしない。</summary>

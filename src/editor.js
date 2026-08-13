@@ -7,13 +7,16 @@ import { markdown } from "@codemirror/lang-markdown";
 import { Strikethrough, Table, Superscript, Subscript, Emoji } from "@lezer/markdown";
 import { defaultKeymap, history, historyKeymap, indentWithTab, insertNewline, undo, redo, moveLineUp, moveLineDown, copyLineDown, deleteLine } from "@codemirror/commands";
 import { syntaxTree, syntaxHighlighting, HighlightStyle, LanguageDescription, bracketMatching } from "@codemirror/language";
-import { autocompletion } from "@codemirror/autocomplete";
+import { autocompletion, closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
 import { search, setSearchQuery, getSearchQuery, SearchQuery, findNext, findPrevious, replaceNext, replaceAll } from "@codemirror/search";
 import { tags as t } from "@lezer/highlight";
 import { codeLanguages, resolveFileMode } from "./languages.js";
 import { extractHeadings, findHeadingBySlug, findEmojiCompletions, EMOJI_SHORTCODES, CALLOUT_TYPES } from "./markdown-extras.js";
 import { renderMathToHtml } from "./math.js";
+import { renderMermaid } from "./mermaid-render.js";
 import { renderMarkdownToHtml, renderStandaloneHtml } from "./md-to-html.js";
+import { charClass, computeTextStats } from "./text-stats.js";
+import { sanitizeHtml } from "./html-sanitize.js";
 
 // コードのハイライト配色(仕様書 第5章・第10.2節)。色は単独で決め打ちせず、
 // style.cssで定義した--code-*トークン(--ink/--ink-mute/--accentから派生)を参照する。
@@ -40,6 +43,13 @@ const EXPORT_CSS = `body{font-family:"Yu Gothic UI","Segoe UI",sans-serif;line-h
 .pane-export th,.pane-export td{border:1px solid #D8DEDC;padding:.4em .7em;}
 .pane-export img{max-width:100%;}
 .pane-export mark{background:#FCE9A8;}`;
+
+// 現在のテーマがダークかどうか。main.js側で <html data-theme="dark"> を切り替えているので
+// (main.jsは編集対象外のため、その挙動に合わせてここから直接DOMを読む)、Mermaidの配色を
+// テーマに連動させる際の判定に使う。
+function isDarkTheme() {
+  return document.documentElement.dataset.theme === "dark";
+}
 
 // カーソル/選択がこの範囲に触れているか。フォーカスがなければ常に装飾。
 function cursorInside(view, from, to) {
@@ -238,6 +248,28 @@ class MathWidget extends WidgetType {
   }
   ignoreEvent() { return true; }
 }
+// Mermaid図(仕様書 第4.2節・第8.3節)。MathWidgetと同じ作法: まず「…」を表示し、
+// toDOM()が呼ばれた時点(=実際に画面へ出るとき)で初めてrenderMermaid()を呼んで非同期に
+// 差し替える。可視範囲外のブロックを先読みして描画することはしない。
+class MermaidWidget extends WidgetType {
+  constructor(code, dark) { super(); this.code = code; this.dark = dark; }
+  eq(o) { return o.code === this.code && o.dark === this.dark; }
+  toDOM() {
+    const wrap = document.createElement("div");
+    wrap.className = "cm-mermaid-block";
+    wrap.textContent = "…";
+    renderMermaid(this.code, { dark: this.dark }).then(({ svg, error, message }) => {
+      if (error) {
+        wrap.textContent = `Mermaidエラー: ${message}`;
+        wrap.classList.add("cm-mermaid-error");
+        return;
+      }
+      wrap.innerHTML = svg;
+    });
+    return wrap;
+  }
+  ignoreEvent() { return true; }
+}
 class TocWidget extends WidgetType {
   constructor(headings) { super(); this.headings = headings; this.key = JSON.stringify(headings.map((h) => [h.level, h.text, h.slug])); }
   eq(o) { return o.key === this.key; }
@@ -288,6 +320,84 @@ class CheckboxWidget extends WidgetType {
   }
   ignoreEvent() { return false; }
 }
+// インラインHTML(仕様書 第2.9節 M-27〜M-31)。開始タグ〜終了タグの範囲、または
+// <img>のような単体タグの範囲を、サニタイズ済みDOMに置き換えて表示するウィジェット。
+// video/iframe/aなど内部にクリック・再生操作を持つ要素を含みうるため、CodeMirrorに
+// クリック等を横取りさせずウィジェット自身のDOMに委ねる(TableWidget等と同じ扱い)。
+class HtmlInlineWidget extends WidgetType {
+  constructor(html) { super(); this.html = html; }
+  eq(o) { return o.html === this.html; }
+  ignoreEvent() { return true; }
+  toDOM() {
+    const span = document.createElement("span");
+    span.className = "cm-html-inline";
+    // sanitizeHtml()は安全なDOMノード(DocumentFragment)を返す。innerHTMLへ生文字列を
+    // 渡すことは一切しない(サニタイズ結果であっても、という意味ではなくそもそも文字列化
+    // した時点でエスケープの取り違え等の事故を招きうるため、DOM要素のまま扱う)。
+    span.appendChild(sanitizeHtml(this.html));
+    return span;
+  }
+}
+// ブロックHTML(<iframe>や<div>...</div>が段落として単独で置かれている場合。M-29〜M-31)。
+class HtmlBlockWidget extends WidgetType {
+  constructor(html) { super(); this.html = html; }
+  eq(o) { return o.html === this.html; }
+  ignoreEvent() { return true; }
+  toDOM() {
+    const div = document.createElement("div");
+    div.className = "cm-html-block";
+    div.appendChild(sanitizeHtml(this.html));
+    return div;
+  }
+}
+// 閉じタグを取らない要素(単体で完結するのでペア探索の対象にしない)
+const VOID_HTML_TAGS = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"]);
+// HTMLTagノードの生テキストからタグ名・開始/終了・自己終端かどうかを判定する
+function parseHtmlTagText(text) {
+  const closeMatch = text.match(/^<\/\s*([a-zA-Z][a-zA-Z0-9-]*)\s*>$/);
+  if (closeMatch) return { isClose: true, name: closeMatch[1].toLowerCase() };
+  const openMatch = text.match(/^<\s*([a-zA-Z][a-zA-Z0-9-]*)/);
+  if (!openMatch) return null; // 不正な形式(コメント等)は対象外。生テキストのまま表示される
+  return { isClose: false, name: openMatch[1].toLowerCase(), selfClose: /\/\s*>$/.test(text) };
+}
+// インラインHTML(M-27〜M-31)の開始タグ〜終了タグをペアリングする。
+// @lezer/markdownの構文木はHTMLTagノードを開始・終了の対にせず並列に並べるだけなので、
+// タグ名を見ながら自前でスタック照合する。同じ親ノード(同じParagraph/見出し/強調等)の
+// 中だけで対応付けることで、ブロックをまたいだ誤対応(離れた場所の同名タグ同士が
+// 誤って1つの範囲にまとまってしまう事故)を避ける。
+function pairInlineHtmlTags(state, tagNodes) {
+  const byParent = new Map();
+  for (const tn of tagNodes) {
+    const list = byParent.get(tn.parentFrom);
+    if (list) list.push(tn); else byParent.set(tn.parentFrom, [tn]);
+  }
+  const pairs = [];
+  const singles = [];
+  for (const list of byParent.values()) {
+    const stack = [];
+    for (const tn of list) {
+      const text = state.doc.sliceString(tn.from, tn.to);
+      const parsed = parseHtmlTagText(text);
+      if (!parsed) continue;
+      if (parsed.isClose) {
+        // 直近から同名の開始タグを探す。対応しない閉じタグは無視(生テキストのまま)。
+        for (let i = stack.length - 1; i >= 0; i--) {
+          if (stack[i].name === parsed.name) {
+            pairs.push({ from: stack[i].from, to: tn.to });
+            stack.length = i; // 対応が壊れていた内側の未閉じタグはあきらめて捨てる
+            break;
+          }
+        }
+      } else if (parsed.selfClose || VOID_HTML_TAGS.has(parsed.name)) {
+        singles.push({ from: tn.from, to: tn.to });
+      } else {
+        stack.push({ from: tn.from, to: tn.to, name: parsed.name });
+      }
+    }
+    // 閉じタグの無い開始タグ(stackに残った分)は対応する終了位置が無いため描画しない
+  }
+  return { pairs, singles };
+}
 
 const livePreview = ViewPlugin.fromClass(class {
   constructor(view) {
@@ -304,10 +414,15 @@ const livePreview = ViewPlugin.fromClass(class {
     const quotedLines = new Set();
     const seenFences = new Set();
     const seenTables = new Set();
+    const htmlTagNodes = []; // インラインHTML(M-27〜M-31)。ペアリングは木走査後にまとめて行う
     const toggles = state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
     const fm = state.field(frontmatterField, false);
     const mathBlocks = state.field(mathBlocksField, false) ?? [];
     const inMathBlock = (pos) => mathBlocks.some((b) => pos >= b.from && pos < b.to);
+    // ブロックHTML(htmlBlocksField、下記参照)の範囲内は行ベースの記法解釈(見出し・箇条書き等)を
+    // 行わない。数式ブロックと同じ理由(生のHTMLをMarkdown記法として誤爆させないため)。
+    const htmlBlocks = state.field(htmlBlocksField, false) ?? [];
+    const inHtmlBlock = (pos) => htmlBlocks.some((b) => pos >= b.from && pos < b.to);
     const { links: linkRefs, footnotes: footnoteDefs } = collectReferences(state);
     const tree = syntaxTree(state);
     for (const { from, to } of view.visibleRanges) {
@@ -483,7 +598,28 @@ const livePreview = ViewPlugin.fromClass(class {
           }
           return;
         }
+        if (name === "HTMLTag") {
+          // インラインHTML(M-27〜M-31)。木走査中はまだ開始/終了タグの対応が分からないため
+          // ここでは収集するだけにし、ペアリングは可視範囲の走査がすべて終わってからまとめて行う。
+          if (inHtmlBlock(nf)) return; // ブロックHTML(htmlBlockDecoFieldが描画を担当)の中は対象外
+          htmlTagNodes.push({ from: nf, to: nt, parentFrom: node.node.parent ? node.node.parent.from : -1 });
+          return;
+        }
       }});
+    }
+    if (htmlTagNodes.length) {
+      // インラインHTML(M-27〜M-31): 開始タグ〜終了タグ、または<img>等の単体タグをまとめて
+      // 安全なDOMに描画する。カーソル/選択が範囲に触れている時だけ生のタグ表示に戻す
+      // (既存の太字・斜体・リンクと同じ挙動。cursorInside()は既存ヘルパー)。
+      const { pairs, singles } = pairInlineHtmlTags(state, htmlTagNodes);
+      for (const p of pairs) {
+        if (cursorInside(view, p.from, p.to)) continue;
+        marks.push({ from: p.from, to: p.to, deco: Decoration.replace({ widget: new HtmlInlineWidget(state.sliceDoc(p.from, p.to)) }) });
+      }
+      for (const s of singles) {
+        if (cursorInside(view, s.from, s.to)) continue;
+        marks.push({ from: s.from, to: s.to, deco: Decoration.replace({ widget: new HtmlInlineWidget(state.sliceDoc(s.from, s.to)) }) });
+      }
     }
     for (const { from, to } of view.visibleRanges) {
       let pos = from;
@@ -499,6 +635,12 @@ const livePreview = ViewPlugin.fromClass(class {
         }
         if (inMathBlock(line.from)) {
           // 数式ブロック内(mathBlockDecoFieldが描画を担当)は他の記法解釈をしない
+          if (line.to + 1 > to) break;
+          pos = line.to + 1;
+          continue;
+        }
+        if (inHtmlBlock(line.from)) {
+          // ブロックHTML内(htmlBlockDecoFieldが描画を担当)は他の記法解釈をしない(M-29〜M-31)
           if (line.to + 1 > to) break;
           pos = line.to + 1;
           continue;
@@ -551,6 +693,52 @@ const livePreview = ViewPlugin.fromClass(class {
     return Decoration.set(ranges, true);
   }
 }, { decorations: v => v.decorations });
+
+// フォーカスモード(仕様書 V-06): カーソルのある段落以外の行を減光する。
+// 「段落」は構文木のParagraphノードではなく「空行で挟まれたブロック」として判定する
+// (構文木ベースだと見出し・リスト等が対象外になり、かえって不自然になるため。指示どおり)。
+function paragraphLineRangeAt(doc, pos) {
+  const cursorLine = doc.lineAt(pos);
+  let from = cursorLine.number;
+  while (from > 1 && doc.line(from - 1).text.trim() !== "") from--;
+  let to = cursorLine.number;
+  while (to < doc.lines && doc.line(to + 1).text.trim() !== "") to++;
+  return { from, to };
+}
+const focusMode = ViewPlugin.fromClass(class {
+  constructor(view) { this.decorations = this.build(view); }
+  update(u) {
+    if (u.docChanged || u.selectionSet || u.viewportChanged) this.decorations = this.build(u.view);
+  }
+  build(view) {
+    // livePreviewと同じ性能方針: 文書全体ではなくview.visibleRangesの中だけを走査する。
+    const { state } = view;
+    const { from: paraFrom, to: paraTo } = paragraphLineRangeAt(state.doc, state.selection.main.head);
+    const marks = [];
+    for (const { from, to } of view.visibleRanges) {
+      let pos = from;
+      while (pos <= to) {
+        const line = state.doc.lineAt(pos);
+        if (line.number < paraFrom || line.number > paraTo) {
+          marks.push(Decoration.line({ class: "cm-dimmed" }).range(line.from));
+        }
+        if (line.to + 1 > to) break;
+        pos = line.to + 1;
+      }
+    }
+    return Decoration.set(marks, true);
+  }
+}, { decorations: v => v.decorations });
+
+// ソフトブレーク(仕様書 第2.9節 M-01): 行末に半角スペース2つ+改行を挿入する。
+// ツールバー操作(applyMdAction の softBreak ケース)とShift+Enterキーの両方から呼ぶ
+// 共通処理として切り出し、処理内容が2箇所に重複しないようにする。
+function insertSoftBreak(view) {
+  const { state } = view;
+  const sel = state.selection.main;
+  view.dispatch({ changes: { from: sel.from, to: sel.to, insert: "  \n" }, selection: { anchor: sel.from + 3 } });
+  return true;
+}
 
 // Enter処理: リスト/チェックリスト/番号を自動継続、空項目なら継続を終了。それ以外はインデントなし改行。
 function handleEnter(view) {
@@ -676,9 +864,62 @@ function mutateTable(view, pos, fn) {
   fn(t);
   view.dispatch({ changes: { from: t.from, to: t.to, insert: formatTableText(t) } });
 }
+// ---- 列幅のドラッグ調整(仕様書 M-08) ----
+// Markdownの表記法には列幅の概念が無いため、ドキュメントのテキストには一切書き込まない。
+// 「表の識別子(ヘッダー内容から導く) → 列幅配列(px)」のMapをエディタインスタンス
+// (EditorView)ごとに保持し、ウィジェットが作り直されて(eq()がfalseになって)も
+// 同じ表なら復元できるようにする。ファイルを閉じれば(=EditorViewが破棄されれば)
+// WeakMapごと自然に消えてよく、永続化はしない。
+const tableColWidthsByView = new WeakMap();
+// 表の識別子: 行番号ではなくヘッダー行のセル内容から導く(行番号依存だと上に行を
+// 足しただけで幅が飛んでしまう)。
+function tableColKey(t) { return JSON.stringify(t.header); }
+function getColWidths(view, key) {
+  return tableColWidthsByView.get(view)?.get(key) ?? [];
+}
+function setColWidths(view, key, widths) {
+  let store = tableColWidthsByView.get(view);
+  if (!store) { store = new Map(); tableColWidthsByView.set(view, store); }
+  store.set(key, widths);
+}
+// 列境界のドラッグ処理本体。Pointer Eventsを使う(mousedown/mousemoveだと要素外に
+// 出た際に追従しない)。setPointerCaptureで捕捉するため、pointermove/pointerupは
+// マウスがリサイザ要素の外に出てもリサイザ自身に届く。
+const TABLE_COL_MIN_WIDTH = 48;
+function startColResize(e, view, colKey, colEls, headerCells, colIndex, tbl) {
+  // preventDefault/stopPropagationを呼ばないとCodeMirrorがこのpointerdownを
+  // カーソル移動として解釈し、表が編集モード(生テキスト表示)に切り替わって
+  // ドラッグが中断されてしまう。
+  e.preventDefault();
+  e.stopPropagation();
+  const resizer = e.currentTarget;
+  resizer.setPointerCapture(e.pointerId);
+  // 初回ドラッグ時は他の列の見た目が変わらないよう、現在の描画幅をそのまま各<col>に
+  // 固定してからtable-layout:fixedへ切り替える(そうしないと未設定の列がfixedレイアウト
+  // 下で均等割りされ、ドラッグしていない列の幅まで変わってしまう)。
+  colEls.forEach((col, i) => { if (!col.style.width) col.style.width = headerCells[i].getBoundingClientRect().width + "px"; });
+  tbl.style.tableLayout = "fixed";
+  const col = colEls[colIndex];
+  const startWidth = parseFloat(col.style.width);
+  const startX = e.clientX;
+  const onMove = (ev) => {
+    const w = Math.max(TABLE_COL_MIN_WIDTH, Math.round(startWidth + (ev.clientX - startX)));
+    col.style.width = w + "px";
+  };
+  const onUp = (ev) => {
+    resizer.removeEventListener("pointermove", onMove);
+    resizer.removeEventListener("pointerup", onUp);
+    resizer.removeEventListener("pointercancel", onUp);
+    try { resizer.releasePointerCapture(ev.pointerId); } catch { /* 既に解放済みなら無視 */ }
+    setColWidths(view, colKey, colEls.map((c) => (c.style.width ? parseFloat(c.style.width) : undefined)));
+  };
+  resizer.addEventListener("pointermove", onMove);
+  resizer.addEventListener("pointerup", onUp);
+  resizer.addEventListener("pointercancel", onUp);
+}
 // プレビュー描画(グリッド表 + ホバーで行/列操作)
 class TableWidget extends WidgetType {
-  constructor(t) { super(); this.t = t; this.key = JSON.stringify([t.header, t.aligns, t.body]); }
+  constructor(t) { super(); this.t = t; this.key = JSON.stringify([t.header, t.aligns, t.body]); this.colKey = tableColKey(t); }
   eq(o) { return o.key === this.key; }
   ignoreEvent() { return true; }
   toDOM(view) {
@@ -687,10 +928,24 @@ class TableWidget extends WidgetType {
     const wrap = document.createElement("div");
     wrap.className = "cm-table";
     const tbl = document.createElement("table");
+    // 列幅(過去にドラッグ済みならMapから復元)。1度もドラッグしていない表は全列
+    // 未設定のままにし、table-layoutもauto(既定)のままにして従来どおりの自動幅を保つ。
+    const savedWidths = getColWidths(view, this.colKey);
+    const colgroup = document.createElement("colgroup");
+    const colEls = [];
+    for (let c = 0; c < cols; c++) {
+      const col = document.createElement("col");
+      if (savedWidths[c] != null) col.style.width = savedWidths[c] + "px";
+      colgroup.appendChild(col);
+      colEls.push(col);
+    }
+    if (savedWidths.some((w) => w != null)) tbl.style.tableLayout = "fixed";
+    tbl.appendChild(colgroup);
     const mkBtn = (label, title, fn) => { const b = document.createElement("button"); b.type = "button"; b.className = "tbl-ctl"; b.innerHTML = label; b.title = title; b.addEventListener("mousedown", (e) => { e.preventDefault(); e.stopPropagation(); fn(); }); return b; };
     const pos = () => { try { return view.posAtDOM(wrap); } catch { return t.from; } };
     // ヘッダー行(列操作ボタン付き)
     const thead = document.createElement("thead"); const hr = document.createElement("tr");
+    const headerCells = [];
     for (let c = 0; c < cols; c++) {
       const th = document.createElement("th");
       th.style.textAlign = t.aligns[c] || "left";
@@ -702,7 +957,15 @@ class TableWidget extends WidgetType {
       if (cols > 1) ctl.appendChild(mkBtn("&#x2212;", "この列を削除", () => mutateTable(view, pos(), (x) => { x.header.splice(cc, 1); x.aligns.splice(cc, 1); for (const r of x.body) r.splice(cc, 1); })));
       if (cc < cols - 1) ctl.appendChild(mkBtn("&#x25B6;", "列を右へ移動", () => mutateTable(view, pos(), (x) => { for (const arr of [x.header, x.aligns, ...x.body]) arr.splice(cc + 1, 0, ...arr.splice(cc, 1)); })));
       th.appendChild(ctl);
-      th.addEventListener("mousedown", (e) => { if (e.target.closest(".tbl-ctl")) return; e.preventDefault(); selectCell(view, tableAt(view.state, pos()) || t, 0, cc); });
+      th.addEventListener("mousedown", (e) => { if (e.target.closest(".tbl-ctl,.cm-table-col-resizer")) return; e.preventDefault(); selectCell(view, tableAt(view.state, pos()) || t, 0, cc); });
+      // 列幅リサイザ(最終列の右端には出さない)
+      if (cc < cols - 1) {
+        const resizer = document.createElement("div");
+        resizer.className = "cm-table-col-resizer";
+        resizer.addEventListener("pointerdown", (e) => startColResize(e, view, this.colKey, colEls, headerCells, cc, tbl));
+        th.appendChild(resizer);
+      }
+      headerCells.push(th);
       hr.appendChild(th);
     }
     thead.appendChild(hr); tbl.appendChild(thead);
@@ -850,6 +1113,111 @@ const mathBlockDecoField = StateField.define({
   provide: (f) => EditorView.decorations.from(f),
 });
 
+// テーマ切替(main.jsのdocument.documentElement.dataset.theme切替→refreshTheme())をMermaidの
+// 再描画に伝えるためのStateEffect。mermaidBlockDecoFieldはウィジェットのeq()判定に使うdark
+// フラグをisDarkTheme()から都度読むだけなので、これをdocChanged/selection以外の「再構築の
+// きっかけ」として使う(setExtTogglesをmathBlockDecoFieldが使っているのと同じやり方)。
+const themeRefreshEffect = StateEffect.define();
+
+// ---- Mermaid図(仕様書 第4.2節「flowchart.js/js-sequence → Mermaidで代替する」・第8.3節) ----
+// ```mermaid フェンスコードブロックを図として描画する。フェンス自体は構文木上ただの
+// FencedCodeノードなので、htmlBlocksFieldと同じく構文木を辿るだけで検出できる(数式ブロックの
+// ような自前の行走査は不要)。ブロック装飾(block: true)はStateFieldからしか提供できない制約は
+// 数式ブロック・表と共通のため、同じ2段構成(生の範囲一覧のmermaidBlocksField/実際に置き換える
+// mermaidBlockDecoField)にする。
+function findMermaidBlocks(state) {
+  const blocks = [];
+  syntaxTree(state).iterate({
+    enter: (node) => {
+      if (node.name !== "FencedCode") return;
+      const fn = node.node;
+      if (fn.getChildren("CodeMark").length < 2) return false; // 未終端(閉じフェンス無し)は対象外
+      const info = fn.getChild("CodeInfo");
+      const lang = info ? state.doc.sliceString(info.from, info.to).trim().toLowerCase() : "";
+      if (lang !== "mermaid") return false; // 言語名がmermaidのフェンスだけを対象にする
+      const open = state.doc.lineAt(node.from);
+      const close = state.doc.lineAt(Math.max(node.from, node.to - 1));
+      // コード本文(開始・終了フェンス行を除いた部分)。閉じフェンスの無い1行だけのフェンス等の
+      // 端数ケースは、コピー用ウィジェットの抽出ロジック(上記CodeCopyWidget挿入箇所)と同じ考え方で扱う。
+      const bodyFromLine = Math.min(open.number + 1, close.number);
+      const bodyFrom = state.doc.line(bodyFromLine).from;
+      const bodyTo = close.number > open.number ? Math.max(bodyFrom, close.from - 1) : bodyFrom;
+      blocks.push({ from: open.from, to: close.to, code: state.sliceDoc(bodyFrom, bodyTo) });
+      return false; // 内側(CodeText等)へは降りない
+    },
+  });
+  return blocks;
+}
+const mermaidBlocksField = StateField.define({
+  create: (state) => findMermaidBlocks(state),
+  // HTMLBlockと同様、構文木は既にインクリメンタル解析されているため文書変更のたびに
+  // 辿り直すだけでよい(全文字列を毎回正規表現走査するわけではない)。
+  update: (v, tr) => (tr.docChanged ? findMermaidBlocks(tr.state) : v),
+});
+function buildMermaidBlockDeco(state, blocks) {
+  const focused = state.field(focusField, false) ?? false;
+  const sel = state.selection.main;
+  const dark = isDarkTheme();
+  const decos = [];
+  for (const b of blocks) {
+    if (focused && sel.from <= b.to && sel.to >= b.from) continue; // カーソル/選択がフェンス内→生のコードを表示
+    // 実際の描画(renderMermaid呼び出し)はここではなくMermaidWidget.toDOM()で行う。
+    // ここで先読みして描画してしまうと、可視範囲外のブロックまで全部レンダリングすることになり
+    // 仕様書第8.3節(可視範囲に入ったものだけ実行する)に反する。
+    decos.push(Decoration.replace({ widget: new MermaidWidget(b.code, dark), block: true }).range(b.from, b.to));
+  }
+  return Decoration.set(decos);
+}
+const mermaidBlockDecoField = StateField.define({
+  create: (state) => buildMermaidBlockDeco(state, state.field(mermaidBlocksField)),
+  update: (v, tr) => (tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect) || e.is(themeRefreshEffect)))
+    ? buildMermaidBlockDeco(tr.state, tr.state.field(mermaidBlocksField))
+    : v,
+  provide: (f) => EditorView.decorations.from(f),
+});
+
+// ---- ブロックHTML(仕様書 第2.9節 M-27〜M-31) ----
+// <iframe ...></iframe>や<div>...</div>が段落として単独で置かれている場合、@lezer/markdownの
+// 構文木は "HTMLBlock" ノードとして検出してくれる(インラインのHTMLTagと異なり、開始/終了を
+// 自前でペアリングする必要は無い)。ブロック装飾(block: true)はCodeMirrorの制約上
+// StateFieldからしか提供できずview.visibleRangesが使えないため、表(tableField)・
+// 数式ブロック(mathBlockDecoField)と同じ2段構成にする: 生の範囲一覧を持つ
+// htmlBlocksField(livePreviewのbuild()からも「この行はHTML内か」の判定に使う)と、
+// フォーカス/選択に応じて実際に置き換えるhtmlBlockDecoFieldに分ける。
+function findHtmlBlocks(state) {
+  const blocks = [];
+  syntaxTree(state).iterate({
+    enter: (node) => {
+      if (node.name === "HTMLBlock") { blocks.push({ from: node.from, to: node.to }); return false; }
+    },
+  });
+  return blocks;
+}
+const htmlBlocksField = StateField.define({
+  create: (state) => findHtmlBlocks(state),
+  // HTMLBlockは構文木のノードであり(数式ブロックのような自前の行走査ではなく)構文木が
+  // 既にインクリメンタル解析を行っているため、tableField/tocFieldと同様に文書変更のたびに
+  // 構文木を辿るだけでよい(全文字列を毎回正規表現走査するわけではない)。
+  update: (v, tr) => (tr.docChanged ? findHtmlBlocks(tr.state) : v),
+});
+function buildHtmlBlockDeco(state, blocks) {
+  const focused = state.field(focusField, false) ?? false;
+  const sel = state.selection.main;
+  const decos = [];
+  for (const b of blocks) {
+    if (focused && sel.from <= b.to && sel.to >= b.from) continue; // 編集モード(生テキスト)
+    decos.push(Decoration.replace({ widget: new HtmlBlockWidget(state.sliceDoc(b.from, b.to)), block: true }).range(b.from, b.to));
+  }
+  return Decoration.set(decos);
+}
+const htmlBlockDecoField = StateField.define({
+  create: (state) => buildHtmlBlockDeco(state, state.field(htmlBlocksField)),
+  update: (v, tr) => (tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect)))
+    ? buildHtmlBlockDeco(tr.state, tr.state.field(htmlBlocksField))
+    : v,
+  provide: (f) => EditorView.decorations.from(f),
+});
+
 // テーブルから離れたら自動整形(編集中は整形しない)
 const tableAutoFormat = EditorView.updateListener.of((u) => {
   if (!u.selectionSet && !u.focusChanged) return;
@@ -934,6 +1302,8 @@ const livePreviewExt = () => [
   livePreview, focusField, focusNotifier, tableField, tableAutoFormat,
   frontmatterField, tocField, extTogglesField, emojiCompletion,
   mathBlocksField, mathBlockDecoField,
+  mermaidBlocksField, mermaidBlockDecoField, // Mermaid図(仕様書 第4.2節・第8.3節)
+  htmlBlocksField, htmlBlockDecoField, // ブロックHTML(M-27〜M-31)
 ];
 
 // コードモード限定の拡張(仕様書 決定済み事項: 行番号・括弧の対応表示まで。
@@ -946,7 +1316,7 @@ export const DEFAULT_FONT_SIZE = 15;
 const MIN_FONT_SIZE = 8;
 const MAX_FONT_SIZE = 40;
 
-export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionChange, onRender, onPaste, onCopy } = {}) {
+export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionChange, onRender, onPaste, onCopy, onSelectionChange } = {}) {
   const editable = new Compartment();
   const themeComp = new Compartment();
   // ファイル種別ごとの編集モード切り替え(仕様書 第1章: markdown / code / plain)。
@@ -956,11 +1326,38 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
   const codeModeExtrasComp = new Compartment();
   // 折り返し表示のON/OFF(仕様書 N-05)。既定はON(従来どおり)。
   const wrapComp = new Compartment();
+  // 自動ペアリング(仕様書 第2.10節 C-05)のON/OFF。既定はON。
+  const autoPairComp = new Compartment();
+  // フォーカスモード(V-06)・タイプライターモード(V-07)のON/OFF。
+  const focusModeComp = new Compartment();
+  const typewriterComp = new Compartment();
   let composing = false;
   let currentMode = "markdown";
+  // 自動ペアリング(仕様書 第2.10節 C-05)。既定はON。
+  let autoPairingOn = true;
+  // ソースコードモード(仕様書 V-05): 記法マーカーを隠さない生表示。docModeComp(構文ハイライト)は
+  // 外さず、livePreviewComp(装飾・マーカー非表示)だけを空にすることで実現する。markdownモード
+  // かつsourceMode===falseの時だけライブプレビューを入れる、という条件はsetFileMode/setSourceMode
+  // 双方から参照する内部状態としてここに持つ。
+  let sourceMode = false;
+  let focusModeOn = false;
+  let typewriterOn = false;
   // 本文のフォントサイズ(Ctrl+マウスホイールで変更する。メニューバー・ステータスバーは
   // ページ全体のズームではなくここだけを変えるため影響を受けない)。
   let fontSize = DEFAULT_FONT_SIZE;
+  // タイプライターモード用のscrollIntoViewは自前でdispatchするため、それによって発生する
+  // updateListenerの再入(無限ループ)を防ぐフラグ。
+  let applyingTypewriterScroll = false;
+  const typewriterListener = EditorView.updateListener.of((u) => {
+    if (applyingTypewriterScroll) return; // 自分が起こしたスクロールには反応しない
+    if (!u.docChanged && !u.selectionSet) return;
+    applyingTypewriterScroll = true;
+    try {
+      u.view.dispatch({ effects: EditorView.scrollIntoView(u.state.selection.main.head, { y: "center" }) });
+    } finally {
+      applyingTypewriterScroll = false;
+    }
+  });
   const makeTheme = () => {
     const cs = getComputedStyle(document.documentElement);
     const ink = cs.getPropertyValue("--ink").trim() || "#1F2428";
@@ -972,6 +1369,23 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
       ".cm-cursor, .cm-cursor-primary": { borderLeftColor: ink, borderLeftWidth: "2px" },
       "&.cm-focused": { outline: "none" },
       ".cm-selectionBackground": { backgroundColor: accentSoft },
+      // ライブプレビューHTML(仕様書 M-27〜M-31)。描画結果がエディタ幅からはみ出さないよう
+      // 最低限max-widthだけ指定する(style.cssは別エージェントが編集中のため触らず、ここに書く)。
+      ".cm-html-inline": { display: "inline-block", maxWidth: "100%", verticalAlign: "middle" },
+      ".cm-html-block": { display: "block", maxWidth: "100%", overflowX: "auto" },
+      ".cm-html-inline img, .cm-html-inline video, .cm-html-inline iframe, .cm-html-inline table": { maxWidth: "100%" },
+      ".cm-html-block img, .cm-html-block video, .cm-html-block iframe, .cm-html-block table": { maxWidth: "100%" },
+      // Mermaid図(仕様書 第4.2節・第8.3節)。cm-math-block/cm-math-errorと同じ見せ方に揃える:
+      // 描画中は中央寄せの「…」プレースホルダ、SVGはエディタ幅からはみ出さないようmax-width指定、
+      // エラー時は数式エラーと同系統の目立つ表示にする。
+      ".cm-mermaid-block": { display: "block", textAlign: "center", padding: "10px 4px", overflowX: "auto", maxWidth: "100%" },
+      ".cm-mermaid-block svg": { maxWidth: "100%", height: "auto" },
+      ".cm-mermaid-error": { color: "var(--danger)", fontFamily: "var(--font-mono)", fontSize: ".85em", textAlign: "left" },
+      // 表の列幅ドラッグ調整用リサイザ(仕様書 M-08)。ヘッダーセルの右端に重ねる掴み代。
+      // 最終列には付けない(TableWidget側で生成しない)。style.cssは別エージェントが
+      // 編集中のため触らず、既存の.cm-table系スタイルに合わせてここに追記する。
+      ".cm-table-col-resizer": { position: "absolute", top: "0", bottom: "0", right: "-3px", width: "6px", cursor: "col-resize", zIndex: "3", touchAction: "none" },
+      ".cm-table-col-resizer:hover, .cm-table-col-resizer:active": { background: "var(--accent)", opacity: "0.5" },
     });
   };
 
@@ -982,22 +1396,41 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
       extensions: [
         history(),
         keymap.of([
+          // Shift+Enterのソフトブレーク(仕様書 M-01)はEnter(リスト継続のhandleEnter)より
+          // 先に評価する必要があるため先頭に置く(配列の先頭ほど優先。実際にはキー文字列が
+          // "Shift-Enter"と"Enter"で別物のため衝突はしないが、指示どおり優先順位を明示する)。
+          // IME変換中の確定Enterで誤発火しないよう、view.composingがtrueの間は既定動作に委ねる(falseを返す)。
+          { key: "Shift-Enter", run: (v) => (v.composing ? false : insertSoftBreak(v)) },
           { key: "Enter", run: handleEnter },
           indentWithTab,
+          // closeBrackets()の閉じ括弧削除(Backspaceで対の括弧をまとめて消す)は、
+          // defaultKeymapの素のBackspaceより先に評価されるようindentWithTabの直後・
+          // defaultKeymapより前に置く(Enter/Tabの優先順位には影響しない)。
+          ...closeBracketsKeymap,
           ...defaultKeymap.filter(k => k.key !== "Enter"),
           ...historyKeymap,
         ]),
         docModeComp.of(markdownLanguageExt()),
         syntaxHighlighting(codeHighlightStyle),
         wrapComp.of(EditorView.lineWrapping),
+        // 自動ペアリング(仕様書 第2.10節 C-05)。Compartmentで動的にON/OFFできるようにし、既定はON。
+        // closeBrackets()の既定ペア(丸括弧・角括弧・波括弧・引用符)のみを使う。Markdown固有の
+        // 記法文字(*_~`)まで自動ペアリングするとやりすぎで邪魔になりうるため、あえて追加しない
+        // (判断に迷う点であり、追加するかどうかは仕様確定後の判断に委ねる)。
+        autoPairComp.of(autoPairingOn ? closeBrackets() : []),
         livePreviewComp.of(livePreviewExt()),
         codeModeExtrasComp.of([]),
+        focusModeComp.of([]),
+        typewriterComp.of([]),
         editable.of(EditorView.editable.of(true)),
         search({ top: false }),
         EditorView.updateListener.of((u) => {
           if (u.docChanged && onChange) onChange(view.state.doc.toString());
           if (u.focusChanged) { (view.hasFocus ? onFocus : onBlur)?.(); }
           if ((u.docChanged || u.viewportChanged || u.selectionSet) && onRender) requestAnimationFrame(() => onRender());
+          // 行/列・文字数カウント(ステータスバー)用の軽量な通知。doc変化でもカーソル位置は
+          // ずれるため、docChangedとselectionSetの両方で呼ぶ(重い集計はここでは行わない)。
+          if ((u.docChanged || u.selectionSet) && onSelectionChange) onSelectionChange();
         }),
         EditorView.domEventHandlers({
           compositionstart: () => { composing = true; onCompositionChange?.(true); },
@@ -1050,7 +1483,8 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
         view.dispatch({
           effects: [
             docModeComp.reconfigure(markdownLanguageExt()),
-            livePreviewComp.reconfigure(livePreviewExt()),
+            // ソースコードモード(V-05)中は記法を隠さない生表示のままにする(sourceMode参照)。
+            livePreviewComp.reconfigure(sourceMode ? [] : livePreviewExt()),
             codeModeExtrasComp.reconfigure([]),
           ],
         });
@@ -1084,12 +1518,71 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
     },
     // 折り返し表示のON/OFF(仕様書 N-05)
     setWordWrap: (on) => view.dispatch({ effects: wrapComp.reconfigure(on ? EditorView.lineWrapping : []) }),
+    // 自動ペアリング(仕様書 第2.10節 C-05)のON/OFF。既定はON。C#設定画面から呼ばれる想定。
+    setAutoPairing: (on) => {
+      autoPairingOn = !!on;
+      view.dispatch({ effects: autoPairComp.reconfigure(autoPairingOn ? closeBrackets() : []) });
+    },
+    isAutoPairing: () => autoPairingOn,
+    // ソースコードモード(仕様書 V-05): 記法マーカーを隠さない生表示。Markdownの構文ハイライト
+    // (docModeComp)自体は外さない。markdownモード以外の時はlivePreviewComp自体が既に空なので
+    // 見た目には影響しないが、状態は保持しておき次にmarkdownモードへ戻った時に反映する。
+    setSourceMode: (on) => {
+      sourceMode = !!on;
+      if (currentMode === "markdown") {
+        view.dispatch({ effects: livePreviewComp.reconfigure(sourceMode ? [] : livePreviewExt()) });
+      }
+    },
+    isSourceMode: () => sourceMode,
+    // フォーカスモード(仕様書 V-06): カーソルのある段落以外の行を減光する。
+    setFocusMode: (on) => {
+      focusModeOn = !!on;
+      view.dispatch({ effects: focusModeComp.reconfigure(focusModeOn ? [focusMode] : []) });
+    },
+    isFocusMode: () => focusModeOn,
+    // タイプライターモード(仕様書 V-07): 現在行を画面中央に固定する。
+    setTypewriterMode: (on) => {
+      typewriterOn = !!on;
+      view.dispatch({ effects: typewriterComp.reconfigure(typewriterOn ? [typewriterListener] : []) });
+      if (typewriterOn) view.dispatch({ effects: EditorView.scrollIntoView(view.state.selection.main.head, { y: "center" }) });
+    },
+    isTypewriterMode: () => typewriterOn,
     // 指定行へジャンプ(仕様書 N-04)
     gotoLine: (n) => {
       const clamped = Math.max(1, Math.min(view.state.doc.lines, Math.floor(n) || 1));
       const line = view.state.doc.line(clamped);
       view.dispatch({ selection: { anchor: line.from }, effects: EditorView.scrollIntoView(line.from, { y: "center" }) });
       view.focus();
+    },
+    // サイドバーのアウトラインパネル(仕様書 第2.8節 S-01)から見出しへジャンプ。
+    // [toc]記法のTocWidget(本ファイル内)のクリック処理と同じ挙動。
+    jumpToHeading: (heading) => {
+      view.dispatch({ selection: { anchor: heading.from }, effects: EditorView.scrollIntoView(heading.from, { y: "center" }) });
+      view.focus();
+    },
+    // ---- 文字数カウント(仕様書 第2.7節 W-01〜W-03、第3章 N-03) ----
+    // 行/列(カーソル位置から直接取れる軽量な情報。入力・カーソル移動のたびに呼んでよい)。
+    getCursorInfo: () => {
+      const head = view.state.selection.main.head;
+      const line = view.state.doc.lineAt(head);
+      return { line: line.number, col: head - line.from + 1 };
+    },
+    // 選択範囲の文字数(こちらも軽量。sel.to - sel.fromを返すだけ)。
+    getSelectionLength: () => {
+      const sel = view.state.selection.main;
+      return sel.to - sel.from;
+    },
+    // ステータスバーの文字数表示用。doc.lengthを直接返す(getValue()のtoString()より軽い)。
+    getDocLength: () => view.state.doc.length,
+    // クリックで開く詳細ポップアップ用(W-02)。単語数・段落数の集計は文書全体の走査を伴う
+    // 重い処理のため、呼び出し側はポップアップを開いた瞬間にだけ呼ぶこと(入力のたびに呼ばない)。
+    // 選択範囲があればそちらの集計も併せて返す(W-03)。
+    getDetailedStats: () => {
+      const sel = view.state.selection.main;
+      return {
+        doc: computeTextStats(view.state.doc.toString()),
+        selection: sel.from === sel.to ? null : computeTextStats(view.state.sliceDoc(sel.from, sel.to)),
+      };
     },
     // ---- 検索・置換(仕様書 E-17〜E-19) ----
     setSearchQuery: (opts) => view.dispatch({ effects: setSearchQuery.of(new SearchQuery(opts)) }),
@@ -1115,7 +1608,10 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
     applyAction: (action, payload) => applyMdAction(view, action, payload),
     // 選択範囲をテキストで置き換える(プレーンテキスト貼り付け・スマートペースト用)
     pasteText: (text) => { view.dispatch(view.state.replaceSelection(text)); view.focus(); },
-    refreshTheme: () => view.dispatch({ effects: themeComp.reconfigure(makeTheme()) }),
+    // themeRefreshEffectも併せて発行し、Mermaid図(mermaidBlockDecoField)をdark/lightに
+    // 合わせて再描画させる(既存のMathWidgetはCSS変数のみで配色するため再描画不要だが、
+    // MermaidはSVG自体をtheme:"dark"/"default"で作り直す必要があるため)。
+    refreshTheme: () => view.dispatch({ effects: [themeComp.reconfigure(makeTheme()), themeRefreshEffect.of(null)] }),
     // 本文のフォントサイズ(Ctrl+マウスホイール)。範囲外の値は丸め、実際に適用した値を返す。
     getFontSize: () => fontSize,
     setFontSize: (size) => {
@@ -1131,15 +1627,7 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
 }
 
 // ---- 文字種境界での単語判定(仕様書 E-12注記: 日本語は形態素境界ではなく文字種境界で判定) ----
-function charClass(ch) {
-  if (!ch) return "other";
-  if (/\s/.test(ch)) return "space";
-  if (/[0-9a-zA-Z_]/.test(ch)) return "latin";
-  if (/[぀-ゟ]/.test(ch)) return "hiragana";
-  if (/[゠-ヿ]/.test(ch)) return "katakana";
-  if (/[一-鿿]/.test(ch)) return "kanji";
-  return "other"; // 記号・句読点等はそれぞれ1文字単位の境界として扱う
-}
+// charClass自体はtext-stats.js(文字数カウントの単語数集計と共用)からimportしている。
 function wordRangeAt(text, pos) {
   if (!text.length) return { from: pos, to: pos };
   const at = Math.min(pos, text.length - 1);
@@ -1285,7 +1773,7 @@ function applyMdAction(view, action, payload) {
       view.dispatch({ changes: { from: s, to: e, insert: cleaned }, selection: { anchor: s, head: s + cleaned.length } });
       break; // 仕様書 R-08
     }
-    case "softBreak": view.dispatch({ changes: { from: s, to: e, insert: "  \n" }, selection: { anchor: s + 3 } }); break; // 仕様書 E-02
+    case "softBreak": insertSoftBreak(view); break; // 仕様書 E-02・M-01(共通処理はinsertSoftBreak)
     case "selectWord": selectWordAtCursor(view); break; // 仕様書 E-12
     case "deleteWord": deleteWordAtCursor(view); break; // 仕様書 E-13
     case "selectLine": selectLineAtCursor(view); break; // 仕様書 E-09

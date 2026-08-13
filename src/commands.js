@@ -7,7 +7,9 @@
 //   {
 //     editor,                 // createEditor()の戻り値
 //     bridge,                 // window.chrome.webview または null
-//     getState(),             // { mode, isReadOnly, pandocAvailable, wordWrap } を返す
+//     getState(),              // { mode, isReadOnly, pandocAvailable, wordWrap, sourceMode, focusMode,
+//                              //   typewriterMode, fullscreen, alwaysOnTop, showWordCount,
+//                              //   keyBindings(コマンドID→ショートカット文字列。設定画面 C-10), ... } を返す
 //     actions: { ... },       // main.js側のファイル操作・ダイアログ等のオーケストレーション
 //   }
 
@@ -20,14 +22,14 @@ export function buildCommands(ctx) {
   const editor = () => ctx.editor;
   const app = (fn) => () => fn(ctx);
 
-  return [
+  const commands = [
     // ---- File(第2.1節) ----
     { id: "file.new", menu: "File", label: "新規作成", shortcut: `${MOD}+N`, run: app((c) => c.actions.newDocument()) },
     { id: "file.newWindow", menu: "File", label: "新しいウィンドウ", shortcut: `${MOD}+Shift+N`, run: app((c) => c.actions.newWindow()) },
     { id: "file.newTab", menu: "File", label: "新しいタブ", grayed: () => true, note: "準備中(Phase 8)" },
     { id: "file.open", menu: "File", label: "開く", shortcut: `${MOD}+O`, run: app((c) => c.actions.openFile()) },
-    { id: "file.openFolder", menu: "File", label: "フォルダを開く", grayed: () => true, note: "準備中(Phase 6)" },
-    { id: "file.quickOpen", menu: "File", label: "クイックオープン", shortcut: `${MOD}+P`, grayed: () => true, note: "準備中(Phase 6)" },
+    { id: "file.openFolder", menu: "File", label: "フォルダを開く", run: app((c) => c.actions.openFolder()) },
+    { id: "file.quickOpen", menu: "File", label: "クイックオープン", shortcut: `${MOD}+P`, run: app((c) => c.actions.openQuickOpen()), enabled: () => ctx.getState().folderLoaded },
     { id: "file.reopenClosed", menu: "File", label: "閉じたファイルを再度開く", shortcut: `${MOD}+Shift+T`, run: app((c) => c.actions.reopenClosed()), enabled: () => ctx.getState().hasClosedFile },
     {
       id: "file.recentFiles", menu: "File", label: "最近使ったファイル",
@@ -63,6 +65,7 @@ export function buildCommands(ctx) {
     { id: "edit.findNext", menu: "Edit", label: "次を検索", shortcut: "F3", run: () => editor().findNext() },
     { id: "edit.findPrev", menu: "Edit", label: "前を検索", shortcut: "Shift+F3", run: () => editor().findPrevious() },
     { id: "edit.replace", menu: "Edit", label: "置換", shortcut: `${MOD}+H`, run: app((c) => c.actions.openReplace()) },
+    { id: "edit.globalSearch", menu: "Edit", label: "フォルダ内を検索", shortcut: `${MOD}+Shift+F`, run: app((c) => c.actions.openGlobalSearch()) },
 
     // ---- Paragraph(第2.3節) ----
     { id: "para.h1", menu: "Paragraph", label: "見出し1", shortcut: `${MOD}+1`, run: () => editor().applyAction("h1") },
@@ -101,17 +104,84 @@ export function buildCommands(ctx) {
     { id: "format.eraseFormat", menu: "Format", label: "書式を消去", shortcut: `${MOD}+\\`, run: () => editor().applyAction("eraseFormat") },
 
     // ---- View(第2.5節) ----
-    { id: "view.sidebar", menu: "View", label: "サイドバーの表示切替", shortcut: `${MOD}+Shift+L`, grayed: () => true, note: "準備中(Phase 6)" },
-    { id: "view.outline", menu: "View", label: "アウトラインパネル", shortcut: `${MOD}+Shift+1`, grayed: () => true, note: "準備中(Phase 6)" },
-    { id: "view.articleList", menu: "View", label: "記事リスト", shortcut: `${MOD}+Shift+2`, grayed: () => true, note: "準備中(Phase 6)" },
-    { id: "view.fileTree", menu: "View", label: "ファイルツリー", shortcut: `${MOD}+Shift+3`, grayed: () => true, note: "準備中(Phase 6)", separatorAfter: true },
+    { id: "view.sidebar", menu: "View", label: "サイドバーの表示切替", shortcut: `${MOD}+Shift+L`, run: app((c) => c.actions.toggleSidebar()), checked: () => ctx.getState().sidebarOpen },
+    { id: "view.outline", menu: "View", label: "アウトラインパネル", shortcut: `${MOD}+Shift+1`, run: app((c) => c.actions.showSidebarPanel("outline")), checked: () => ctx.getState().sidebarOpen && ctx.getState().sidebarPanel === "outline" },
+    { id: "view.articleList", menu: "View", label: "記事リスト", shortcut: `${MOD}+Shift+2`, run: app((c) => c.actions.showSidebarPanel("files")), checked: () => ctx.getState().sidebarOpen && ctx.getState().sidebarPanel === "files" },
+    { id: "view.fileTree", menu: "View", label: "ファイルツリー", shortcut: `${MOD}+Shift+3`, run: app((c) => c.actions.showSidebarPanel("tree")), checked: () => ctx.getState().sidebarOpen && ctx.getState().sidebarPanel === "tree", separatorAfter: true },
     { id: "view.modeMarkdown", menu: "View", label: "Markdownモード", run: app((c) => c.actions.setMode("markdown")), checked: () => ctx.getState().mode === "markdown" },
     { id: "view.modePlain", menu: "View", label: "プレーンテキストモード", run: app((c) => c.actions.setMode("plain")), checked: () => ctx.getState().mode === "plain" },
     { id: "view.modeCode", menu: "View", label: "コードモード", run: app((c) => c.actions.setMode("code")), checked: () => ctx.getState().mode === "code", separatorAfter: true },
+    { id: "view.sourceMode", menu: "View", label: "ソースコードモード", shortcut: `${MOD}+/`, run: app((c) => c.actions.toggleSourceMode()), checked: () => ctx.getState().sourceMode },
+    { id: "view.focusMode", menu: "View", label: "フォーカスモード", shortcut: "F8", run: app((c) => c.actions.toggleFocusMode()), checked: () => ctx.getState().focusMode },
+    { id: "view.typewriterMode", menu: "View", label: "タイプライターモード", shortcut: "F9", run: app((c) => c.actions.toggleTypewriterMode()), checked: () => ctx.getState().typewriterMode, separatorAfter: true },
     { id: "view.wordWrap", menu: "View", label: "折り返し表示", run: app((c) => c.actions.toggleWordWrap()), checked: () => ctx.getState().wordWrap },
     { id: "view.gotoLine", menu: "View", label: "指定行へジャンプ", shortcut: `${MOD}+G`, run: app((c) => c.actions.gotoLineFlow()), separatorAfter: true },
+    { id: "view.fullscreen", menu: "View", label: "全画面表示", shortcut: "F11", run: app((c) => c.actions.toggleFullscreen()), checked: () => ctx.getState().fullscreen },
+    { id: "view.zoomReset", menu: "View", label: "実際のサイズ", shortcut: `${MOD}+Shift+0`, run: app((c) => c.actions.zoomReset()) },
+    { id: "view.zoomIn", menu: "View", label: "拡大", shortcut: `${MOD}+Shift+=`, run: app((c) => c.actions.zoomIn()) },
+    { id: "view.zoomOut", menu: "View", label: "縮小", shortcut: `${MOD}+Shift+-`, run: app((c) => c.actions.zoomOut()), separatorAfter: true },
+    { id: "view.switchDocument", menu: "View", label: "開いている文書を切り替え", shortcut: `${MOD}+Tab`, run: app((c) => c.actions.switchDocument()) },
+    { id: "view.alwaysOnTop", menu: "View", label: "常に手前に表示", run: app((c) => c.actions.toggleAlwaysOnTop()), checked: () => ctx.getState().alwaysOnTop, separatorAfter: true },
+    { id: "view.wordCount", menu: "View", label: "文字数カウントの表示", run: app((c) => c.actions.toggleWordCount()), checked: () => ctx.getState().showWordCount, separatorAfter: true },
     { id: "view.devtools", menu: "View", label: "開発者ツール", shortcut: "Shift+F12", run: app((c) => c.actions.openDevTools()), enabled: () => !!ctx.bridge },
   ];
+
+  // キーバインドのカスタマイズ(仕様書 第2.10節 C-10)。設定画面(settings.js)で
+  // 保存されたctx.getState().keyBindings(コマンドID→ショートカット文字列)があれば、
+  // ここでコマンド定義の既定shortcutを差し替える。
+  applyKeyBindings(commands, ctx.getState().keyBindings);
+  return commands;
+}
+
+// commands配列(buildCommandsの戻り値と同一のインスタンス)へ、保存済みキーバインドを
+// 適用する。各コマンドオブジェクトを直接書き換えるため、メニューバー・コマンドパレット・
+// ショートカット待受け(bindShortcuts)・設定画面はいずれも同じ配列を参照している限り、
+// 再生成なしに新しい値をすぐ参照できる(設定保存直後にmain.js側から呼び直す想定)。
+// defaultShortcutには最初に呼ばれた時点のshortcut(=コマンド定義に書かれた既定値)を
+// 保持しておき、設定画面の「既定に戻す」操作がkeyBindingsから該当エントリを削除するだけで
+// 済むようにする。
+export function applyKeyBindings(commands, keyBindings) {
+  for (const cmd of commands) {
+    if (cmd.defaultShortcut === undefined) cmd.defaultShortcut = cmd.shortcut;
+    const custom = keyBindings?.[cmd.id];
+    // 設定ファイルに直接書き込まれた(手動編集/旧バージョン保存分の)値は、settings.js側の
+    // 入力制限をすり抜けている可能性がある。ここでも同じ判定(isAssignableShortcut)を
+    // 通し、修飾キーなしの単独文字キーのような危険な割り当てを弾いて既定値へフォールバック
+    // させる。放置すると bindShortcuts が window の capture フェーズでそのキーを
+    // preventDefault してしまい、エディタ上でその文字が二度と入力できなくなる
+    // (設定画面からの再割り当てでしか復旧できない)事故につながるため。
+    if (custom && !isAssignableShortcut(custom)) {
+      console.warn(`[keybindings] "${custom}" は割り当て不可なショートカットのため無視し、既定値 "${cmd.defaultShortcut ?? "(なし)"}" にフォールバックしました (${cmd.id})`);
+      cmd.shortcut = cmd.defaultShortcut;
+      continue;
+    }
+    cmd.shortcut = custom || cmd.defaultShortcut;
+  }
+}
+
+// ---- ショートカット文字列の割り当て可否判定 ----
+// settings.js(キー捕捉時の入力制限)と本ファイルのapplyKeyBindings(保存済み設定の
+// サニタイズ)の双方から使う共通ロジック。判定基準(実害防止のため):
+//   ・Ctrl または Alt を含む組み合わせ → 許可(通常の文字入力と衝突しない)
+//   ・ファンクションキー(F1〜F12)単独、およびShiftとの併用 → 許可
+//   ・上記以外(修飾キーなしの文字/数字/記号キー、Shiftのみを伴う文字キーなど) → 拒否
+// 拒否対象を割り当ててしまうと、bindShortcutsがwindowのcaptureフェーズでそのキー入力を
+// preventDefaultするため、エディタでその文字が二度と入力できなくなる
+// (設定画面から割り当て直す以外に復旧手段がない)。
+const ASSIGNABLE_MODIFIER_TOKENS = new Set(["Ctrl", "Shift", "Alt"]);
+const FUNCTION_KEY_RE = /^F([1-9]|1[0-2])$/i;
+export function isAssignableShortcut(shortcutString) {
+  if (!shortcutString || typeof shortcutString !== "string") return false;
+  const parts = shortcutString.split("+").filter(Boolean);
+  if (parts.length === 0) return false;
+  const key = parts[parts.length - 1];
+  const mods = parts.slice(0, -1);
+  // "Ctrl+Shift"のように末尾まで修飾子しかない(=キー本体が無い)壊れた値は拒否。
+  if (!mods.every((m) => ASSIGNABLE_MODIFIER_TOKENS.has(m))) return false;
+  if (ASSIGNABLE_MODIFIER_TOKENS.has(key)) return false;
+  if (mods.includes("Ctrl") || mods.includes("Alt")) return true;
+  // Ctrl/Altを伴わない場合は、ファンクションキー単独(Shift併用可)のみ許可する。
+  return FUNCTION_KEY_RE.test(key);
 }
 
 // ---- メニューバー(仕様書 第10.1節・第10.4節) ----
@@ -119,7 +189,7 @@ export function buildCommands(ctx) {
 // 内部の分類キー(コマンド定義の menu プロパティ、File/Edit/Paragraph/Format/View)は
 // 既存コード全体の判定に使われているため英語のまま維持し、表示ラベルだけ日本語化する
 // (多言語対応は将来別途行う予定のため、ここでは決め打ちの日本語のみとする)。
-const MENU_LABELS = { File: "ファイル", Edit: "編集", Paragraph: "段落", Format: "書式", View: "表示" };
+export const MENU_LABELS = { File: "ファイル", Edit: "編集", Paragraph: "段落", Format: "書式", View: "表示" };
 export function initMenuBar(container, commands, ctx) {
   const menus = ["File", "Edit", "Paragraph", "Format", "View"];
   // コンテナ末尾には右端寄せ用のスペーサーとテーマ切替ボタンが静的HTML側で既に置かれているため、
@@ -346,10 +416,23 @@ function isShortcutEnabled(cmd, ctx) {
   return !grayed && (cmd.enabled ? cmd.enabled(ctx) : true);
 }
 export function bindShortcuts(commands, ctx) {
-  const scoped = commands.filter((c) => c.shortcut).map((c) => ({ cmd: c, combo: parseShortcut(c.shortcut) }));
+  // combo(修飾キーの分解結果)は毎回その場でparseShortcut()する。設定画面(C-10)で
+  // キーバインドを変更すると commands.js の applyKeyBindings() が同じ配列インスタンスの
+  // cmd.shortcut を書き換えるため、ここで事前にparseした結果をキャッシュしてしまうと
+  // アプリ再起動なしには新しい割り当てが効かなくなってしまう。コマンド数は高々百程度で
+  // parseShortcut自体も文字列split程度の軽さのため、キー入力のたびに毎回読み直しても
+  // 体感できるコストにはならない。
   window.addEventListener("keydown", (e) => {
-    for (const { cmd, combo } of scoped) {
-      if (!matchesShortcut(e, combo)) continue;
+    // 設定画面(settings.js)でキーバインドを再設定中(「キーを押してください」状態)は、
+    // ここで先に既存のショートカットを発火させてしまうと、割り当てたい組み合わせが
+    // 既に何かに割り当たっている場合に(まさにその確認をしたい場面で)意図せずコマンドが
+    // 実行されてしまう。ctx.shortcutsSuppressedはそのキャプチャ中だけsettings.js側が立てる
+    // フラグで、window(捕捉フェーズ)はdocument(同じく捕捉フェーズ)より必ず先に発火するため、
+    // ここで止めない限りsettings.js側のリスナーまでイベントが届かない。
+    if (ctx.shortcutsSuppressed) return;
+    for (const cmd of commands) {
+      if (!cmd.shortcut) continue;
+      if (!matchesShortcut(e, parseShortcut(cmd.shortcut))) continue;
       if (!isShortcutEnabled(cmd, ctx)) {
         console.log(`[shortcut] ${cmd.shortcut} は一致したが無効(grayed/enabled=false): ${cmd.id}`);
         continue;
@@ -374,7 +457,9 @@ function parseShortcut(s) {
 }
 // 記号キーはShift併用時にe.keyが別の文字になる(例: Shift+` → "~")ため、
 // 物理キー(e.code)で判定する。それ以外は論理キー(e.key)で判定する。
-const SYMBOL_CODE_MAP = { "`": "Backquote", "[": "BracketLeft", "]": "BracketRight", "\\": "Backslash", "-": "Minus", "=": "Equal" };
+// "0"はShift併用時にe.keyが")"になる(Ctrl+Shift+0、実際のサイズ)ため、他の記号キーと
+// 同様に物理キー(e.code)で判定する対象へ加える。
+const SYMBOL_CODE_MAP = { "`": "Backquote", "[": "BracketLeft", "]": "BracketRight", "\\": "Backslash", "-": "Minus", "=": "Equal", "0": "Digit0" };
 function matchesShortcut(e, combo) {
   if (SYMBOL_CODE_MAP[combo.key]) {
     if (e.code !== SYMBOL_CODE_MAP[combo.key]) return false;

@@ -215,6 +215,9 @@ html[data-theme="dark"] #theme-moon { display: none; }
 #palette-list li { padding: 9px 12px; border-radius: 8px; font-size: 13px; cursor: pointer; display: flex; justify-content: space-between; gap: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #palette-list li.sel { background: var(--accent-soft); color: var(--accent); }
 .palette-shortcut { color: var(--ink-sub); font-family: var(--font-mono); font-size: 11px; flex: none; }
+/* クイックオープン(quick-open.js)がフォルダ未読み込み時に出す案内行。コマンド側には無い状態。 */
+.palette-empty { color: var(--ink-sub); font-size: 12.5px; text-align: center; padding: 16px 12px; cursor: default; }
+#palette-list mark { background: var(--accent-soft); color: var(--accent); border-radius: 2px; }
 
 /* ===== メニューバー(仕様書 第10.1節・第10.4節) ===== */
 /* 既定で表示。高さ28px前後、罫線1本でタイトルバー・本文から区切る。Altキーで表示/非表示切替。 */
@@ -233,17 +236,130 @@ html[data-theme="dark"] #theme-moon { display: none; }
 .menu-theme-btn { border: none; background: transparent; color: var(--ink-mute); font: inherit; cursor: pointer; padding: 4px 8px; border-radius: 6px; display: inline-flex; align-items: center; }
 .menu-theme-btn:hover { color: var(--ink); background: var(--accent-soft); }
 
+/* ===== 文字数カウントの詳細ポップアップ(仕様書 W-02) =====
+   見た目は既存の.menu-dropdown(--surface背景・--line枠・--shadow-pop)と揃える。 */
+.wc-pop { min-width: 260px; padding: 6px 4px; gap: 0; }
+.wc-row { display: flex; align-items: baseline; gap: 14px; padding: 4px 10px; font-size: 12.5px; }
+.wc-row.wc-head { font-weight: 700; color: var(--ink-mute); border-bottom: 1px solid var(--line); margin-bottom: 4px; padding-bottom: 8px; }
+.wc-label { flex: 1; color: var(--ink-mute); white-space: nowrap; }
+.wc-val { min-width: 60px; text-align: right; font-family: var(--font-mono); }
+.wc-val.wc-sel { color: var(--accent); }
+
+/* ===== サイドバー(仕様書 第2.8節・第10.4節) =====
+   #main-area は #sidebar と #cm-host を横並びにする行。開閉は幅0⇔240pxの
+   トランジションで表現し、hidden属性ではなく.collapsedクラスで制御する
+   (hidden属性はdisplay:noneになり幅アニメーションができないため)。 */
+#status-sidebar { display: inline-flex; align-items: center; }
+#sidebar {
+  width: 240px; flex: none; display: flex; flex-direction: column; overflow: hidden;
+  background: var(--surface); border-right: 1px solid var(--rule);
+  transition: width 160ms ease;
+}
+#sidebar.collapsed { width: 0; border-right: none; }
+.sidebar-tabs { display: flex; align-items: center; gap: 2px; padding: 6px; border-bottom: 1px solid var(--rule); flex: none; }
+.sidebar-tab { border: none; background: transparent; color: var(--ink-sub); border-radius: 6px; width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; transition: background 160ms ease, color 160ms ease; }
+.sidebar-tab:hover { color: var(--ink); }
+.sidebar-tab.active { color: var(--accent); background: var(--accent-soft); }
+.sidebar-body { flex: 1; min-width: 0; overflow-y: auto; }
+
+/* アウトラインパネル(S-01): 見出し階層をクリックでジャンプ */
+.outline-item {
+  display: block; width: 100%; border: none; background: transparent; color: var(--ink);
+  text-align: left; font: inherit; font-size: 12.5px; padding: 6px 14px; cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.outline-item:hover { background: var(--accent-soft); }
+.outline-item.current { color: var(--accent); background: var(--accent-soft); }
+.outline-item[data-level="1"] { padding-left: 14px; font-weight: 600; }
+.outline-item[data-level="2"] { padding-left: 26px; }
+.outline-item[data-level="3"] { padding-left: 38px; }
+.outline-item[data-level="4"] { padding-left: 50px; color: var(--ink-mute); }
+.outline-item[data-level="5"] { padding-left: 62px; color: var(--ink-mute); }
+.outline-item[data-level="6"] { padding-left: 74px; color: var(--ink-mute); }
+
+/* 空状態(見出しなし・フォルダ未読み込み等) */
+.sidebar-empty { color: var(--ink-sub); font-size: 12.5px; text-align: center; padding: 24px 16px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+/* フォルダ未読み込み時の空状態に置く「フォルダを開く」ボタン(単なる文言だけで終わらせず、
+   フォルダ機能への入口をここからも辿れるようにする)。 */
+.sidebar-open-folder-btn { border: 1px solid var(--line); background: var(--surface); color: var(--ink); font: inherit; font-size: 12px; padding: 6px 14px; border-radius: 8px; cursor: pointer; }
+.sidebar-open-folder-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+/* prefers-reduced-motion時のtransition無効化は下方の共通ルール(* { transition: none !important })で
+   全要素まとめて処理されるため、ここでは個別に定義しない。 */
+
+/* truncated(10000件上限で打ち切り)・表示上限500件超過時の注意書き(files/tree共通) */
+.sidebar-notice { color: var(--ink-sub); font-size: 11px; padding: 8px 14px; line-height: 1.5; }
+
+/* ファイルリストパネル(S-02): ファイル名を主・親フォルダ部分を副として1行2段で表示する。
+   行の高さ・hover・現在ファイルのハイライトはアウトライン項目(.outline-item)と揃える。 */
+.file-item {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+  width: 100%; box-sizing: border-box; border: none; background: transparent; color: var(--ink);
+  text-align: left; font: inherit; padding: 6px 14px; cursor: pointer; min-width: 0;
+}
+.file-item:hover { background: var(--accent-soft); }
+.file-item.current { color: var(--accent); background: var(--accent-soft); }
+.file-item-name { font-size: 12.5px; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.file-item-dir { font-size: 10.5px; color: var(--ink-sub); max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.file-item.current .file-item-dir { color: var(--accent); } /* currentの副テキストも視認性を保つ */
+
+/* ファイルツリーパネル(S-03): relativePathの階層をそのままDOMの入れ子(.tree-children)で表現し、
+   折りたたみ(展開されたフォルダの中身だけDOM化)で巨大フォルダでも軽く保つ。
+   インデントは.tree-folder配下の.tree-childrenにだけpadding-leftを付け、入れ子の分だけ
+   自然に積み上がる(深さをJS側で数値管理しなくてよい)。 */
+.tree-root-label { font-size: 11px; font-weight: 600; color: var(--ink-mute); padding: 8px 14px; border-bottom: 1px solid var(--rule); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tree-children { display: flex; flex-direction: column; }
+.tree-folder > .tree-children { padding-left: 14px; }
+.tree-item {
+  display: flex; align-items: center; gap: 6px; width: 100%; box-sizing: border-box;
+  border: none; background: transparent; color: var(--ink); text-align: left; font: inherit;
+  font-size: 12.5px; padding: 6px 14px; cursor: pointer; min-width: 0;
+}
+.tree-item:hover { background: var(--accent-soft); }
+.tree-item.current { color: var(--accent); background: var(--accent-soft); }
+.tree-item-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tree-icon, .tree-spacer { flex: none; color: var(--ink-sub); }
+.tree-spacer { display: inline-block; width: 14px; height: 14px; }
+.tree-chevron { flex: none; color: var(--ink-sub); transition: transform 160ms ease; }
+.tree-item-folder.expanded .tree-chevron { transform: rotate(90deg); }
+
+/* グローバル検索欄(仕様書 S-04): タブ列(.sidebar-tabs)のすぐ下・本体領域(.sidebar-body)の
+   直前に常時表示する。トグル(.search-toggle)は検索・置換パネル(検索・置換パネルの節を参照)と
+   同じ見た目・クラスを再利用する。 */
+.sidebar-search { display: flex; align-items: center; gap: 4px; padding: 6px; border-bottom: 1px solid var(--rule); flex: none; }
+.sidebar-search-input { flex: 1; min-width: 0; box-sizing: border-box; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font: inherit; font-size: 12px; background: var(--paper); color: var(--ink); }
+.sidebar-search-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+/* グローバル検索結果(G-02): ファイルごとにグループ化して表示する。行の高さ・hover・
+   省略表示(text-overflow)はファイル一覧(.file-item)・ツリー(.tree-item)と揃える。
+   ヒット箇所の<mark>強調は下方の共通ルール(mark { ... })がtok-markと同系統の配色を
+   既に与えているため、ここでは追加のスタイルを持たない。 */
+.search-result-group { border-bottom: 1px solid var(--rule); }
+.search-result-group:last-child { border-bottom: none; }
+.search-result-file { display: flex; align-items: baseline; gap: 6px; padding: 8px 14px 2px; }
+.search-result-file-name { font-size: 12.5px; font-weight: 600; color: var(--ink); flex: none; max-width: 60%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.search-result-file-path { flex: 1; min-width: 0; font-size: 10.5px; color: var(--ink-sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.search-result-file-count { flex: none; font-size: 10.5px; color: var(--ink-sub); font-family: var(--font-mono); }
+.search-result-hit {
+  display: flex; align-items: baseline; gap: 8px; width: 100%; box-sizing: border-box;
+  border: none; background: transparent; color: var(--ink); text-align: left; font: inherit;
+  font-size: 12.5px; padding: 4px 14px 4px 22px; cursor: pointer; min-width: 0;
+}
+.search-result-hit:hover { background: var(--accent-soft); }
+.search-result-line { flex: none; min-width: 2em; font-family: var(--font-mono); font-size: 11px; color: var(--ink-sub); text-align: right; }
+.search-result-text { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
 /* ===== エクスポート・印刷時のレイアウト(PDF/PNG/印刷でメニューバー等を除外し、
    CodeMirrorの仮想化(visibleRangesのみDOM描画)を一時的に解除して全文書を描画する) ===== */
 body.export-layout #menubar,
 body.export-layout #statusbar,
+body.export-layout #sidebar,
 body.export-layout .search-panel { display: none !important; }
 body.export-layout, body.export-layout html { height: auto !important; overflow: visible !important; }
 body.export-layout #cm-host { flex: none !important; overflow: visible !important; position: static !important; }
 body.export-layout .cm-editor { height: auto !important; }
 body.export-layout .cm-scroller { overflow: visible !important; }
 @media print {
-  #menubar, #statusbar, .search-panel { display: none !important; }
+  #menubar, #statusbar, #sidebar, .search-panel { display: none !important; }
   html, body { height: auto !important; overflow: visible !important; }
   #cm-host { flex: none !important; overflow: visible !important; position: static !important; }
   .cm-editor { height: auto !important; }
@@ -412,6 +528,10 @@ html[data-theme="dark"] .cm-line.cm-codeblock-line { background: var(--code-bg);
 .cm-code-copy .ic-done { display: none; }
 .cm-code-copy.done .ic-copy { display: none; }
 .cm-code-copy.done .ic-done { display: inline; }
+/* フォーカスモード(仕様書 V-06): カーソルのある段落以外の行を減光する。
+   prefers-reduced-motion時のtransition無効化は下方の共通ルール(* { transition: none !important })
+   が既に効くため、ここでは指定しない。 */
+.cm-line.cm-dimmed { opacity: .35; transition: opacity 160ms; }
 .tok-table-sep { color: var(--ink-sub); font-family: var(--font-mono); }
 .cm-line.cm-table-row { background: var(--code-bg); font-family: var(--font-mono); font-size: .9em; padding-left: 8px !important; padding-right: 8px !important; }
 .cm-line.cm-table-header { font-weight: 700; border-bottom: 2px solid var(--line); }
@@ -536,3 +656,95 @@ html[data-theme="dark"] .cm-table th { background: rgba(61,193,181,.14); }
 .layout.readonly .memo-title { pointer-events: none; }
 .layout.readonly #btn-delete, .layout.readonly #btn-save-template, .layout.readonly .mobile-bar { display: none !important; }
 .layout.readonly .editor::before { content: "アーカイブ（閲覧のみ）"; display: block; font-size: 12px; color: var(--ink-sub); background: var(--accent-soft); border-radius: 6px; padding: 4px 10px; margin-bottom: 10px; align-self: flex-start; }
+
+/* ===== 設定画面(仕様書 第2.10節 C-01〜C-14、src/settings.js) =====
+   製品相当のサイドバー形式(左: カテゴリ一覧、右: 設定項目)のモーダル。
+   全画面オーバーレイの中央に大きめのパネル(900px前後・80vh)を出す。既存のオーバーレイ
+   (.palette-overlay)・ドロップダウン(.menu-dropdown)と同じ質感(--surface背景・--line枠・
+   --shadow-pop影)で揃え、配色はすべて既存のCSSカスタムプロパティのみを使う。 */
+.settings-modal-overlay { position: fixed; inset: 0; z-index: 80; background: rgba(10,14,16,.4); display: flex; justify-content: center; align-items: center; padding: 24px; }
+.settings-modal { width: min(900px, 100%); height: min(80vh, 720px); max-height: 100%; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow-pop); overflow: hidden; }
+.settings-modal-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--rule); flex: none; }
+.settings-modal-title { font-size: 15px; font-weight: 700; }
+.settings-modal-close { border: none; background: transparent; color: var(--ink-sub); padding: 5px; border-radius: 6px; display: inline-flex; }
+.settings-modal-close svg { display: block; }
+.settings-modal-body { flex: 1; min-height: 0; display: flex; }
+
+/* 左: カテゴリ一覧 */
+.settings-nav { width: 200px; flex: none; border-right: 1px solid var(--rule); background: var(--paper); padding: 10px; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; }
+.settings-nav-item { display: flex; align-items: center; gap: 10px; border: none; background: transparent; color: var(--ink-sub); font: inherit; font-size: 13px; text-align: left; padding: 9px 10px; border-radius: 8px; cursor: pointer; }
+.settings-nav-item svg { flex: none; }
+.settings-nav-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+
+/* 右: 設定項目(カテゴリ共通) */
+.settings-content { flex: 1; min-width: 0; overflow-y: auto; padding: 20px 24px; display: flex; flex-direction: column; gap: 18px; }
+.settings-loading { color: var(--ink-sub); font-size: 13px; padding: 40px 0; text-align: center; }
+.settings-intro { margin: 0; font-size: 12.5px; color: var(--ink-sub); line-height: 1.6; }
+.settings-group { display: flex; flex-direction: column; gap: 10px; }
+.settings-group-title { font-size: 12px; font-weight: 700; color: var(--ink-sub); }
+.settings-radio, .settings-checkbox-row { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; cursor: pointer; }
+.settings-radio input, .settings-checkbox-row input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; margin-top: 2px; flex: none; cursor: pointer; }
+.settings-radio-disabled { color: var(--ink-sub); cursor: default; }
+.settings-radio-disabled input { cursor: default; }
+.settings-badge { font-size: 10.5px; color: var(--ink-sub); background: var(--paper); border: 1px solid var(--rule); border-radius: 999px; padding: 1px 7px; margin-left: 6px; }
+.settings-checkbox-title { font-weight: 600; }
+.settings-field-desc { display: block; font-size: 11.5px; color: var(--ink-sub); font-weight: 400; margin-top: 2px; }
+.settings-field-desc code { font-family: var(--font-mono); background: var(--paper); border-radius: 4px; padding: 0 4px; }
+.settings-select-row, .settings-text-row { display: flex; flex-direction: column; gap: 4px; font-size: 13px; font-weight: 600; max-width: 380px; }
+.settings-select-row select, .settings-text-row input { font: inherit; font-size: 13px; font-weight: 400; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; background: var(--paper); color: var(--ink); }
+.settings-text-row input[type="number"] { max-width: 110px; }
+
+/* 下部: 保存・キャンセル */
+.settings-modal-foot { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 20px; border-top: 1px solid var(--rule); }
+.settings-modal-msg { font-size: 12px; color: var(--ink-sub); }
+.settings-modal-msg.error { color: var(--danger); font-weight: 700; }
+.settings-modal-actions { display: flex; gap: 8px; }
+
+/* ファイルの関連付け(C-13): カテゴリ→言語→拡張子の3階層チェックボックスツリー */
+.ft-quickrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ft-count { font-size: 11.5px; color: var(--ink-sub); margin-left: auto; }
+.ft-tree { border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; }
+.ft-category + .ft-category { border-top: 1px solid var(--rule); }
+.ft-row { display: flex; align-items: center; gap: 6px; padding: 7px 10px; }
+.ft-row-category { background: var(--paper); font-weight: 700; font-size: 12.5px; }
+.ft-row-lang { font-size: 12.5px; padding-left: 26px; }
+.ft-row-ext { padding: 5px 10px 5px 58px; font-size: 12px; }
+.ft-row-ext:hover, .ft-row-lang:hover { background: var(--accent-soft); }
+.ft-row-label { display: flex; align-items: center; gap: 6px; cursor: pointer; flex: 1; min-width: 0; }
+.ft-row input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px; flex: none; cursor: pointer; }
+.ft-ext-hint { color: var(--ink-sub); font-size: 11px; font-weight: 400; }
+.ft-chevron { border: none; background: transparent; color: var(--ink-sub); padding: 2px; display: inline-flex; cursor: pointer; transition: transform 160ms ease; flex: none; }
+.ft-chevron.expanded { transform: rotate(90deg); }
+.ft-ext-list { display: flex; flex-direction: column; background: var(--surface); }
+.ft-lang-list { display: flex; flex-direction: column; }
+
+/* キーボード(C-10): コマンド名・現在のショートカットの一覧 */
+.kb-table { display: flex; flex-direction: column; border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; }
+.kb-row { display: flex; align-items: center; gap: 10px; padding: 8px 12px; font: inherit; font-size: 12.5px; text-align: left; color: var(--ink); background: var(--surface); border: none; border-top: 1px solid var(--rule); cursor: pointer; width: 100%; }
+.kb-row:first-child { border-top: none; }
+.kb-row.capturing { background: var(--accent-soft); outline: 2px solid var(--accent); outline-offset: -2px; }
+.kb-row.conflict .kb-cell-shortcut kbd { color: var(--danger); border-color: var(--danger); }
+.kb-cell-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kb-cell-shortcut { flex: none; font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-sub); }
+.kb-cell-warn { flex: none; font-size: 11px; color: var(--danger); font-weight: 700; }
+
+/* ホバー装飾はホバー可能なデバイス限定(既存の方針、上のホバー専用ブロックを参照) */
+@media (hover: hover) {
+.settings-modal-close:hover { background: var(--paper); color: var(--ink); }
+.settings-nav-item:hover { background: var(--surface); color: var(--ink); }
+.kb-row:hover { background: var(--accent-soft); }
+}
+
+/* 拡張子ごとの編集モード上書き(fileModeOverrides、src/settings.js「編集」カテゴリ) */
+.fm-list { display: flex; flex-direction: column; gap: 6px; }
+.fm-row { display: flex; align-items: center; gap: 8px; }
+.fm-row .fm-ext { width: 100px; flex: none; font: inherit; font-size: 13px; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; background: var(--paper); color: var(--ink); }
+.fm-row .fm-mode { flex: none; font: inherit; font-size: 13px; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; background: var(--paper); color: var(--ink); }
+.fm-row .fm-remove { flex: none; border: 1px solid var(--line); background: var(--surface); color: var(--ink-sub); border-radius: 8px; width: 28px; height: 28px; padding: 0; }
+.fm-row .fm-remove svg { width: 14px; height: 14px; }
+.fm-row.fm-row-dup .fm-ext { border-color: var(--danger); color: var(--danger); }
+.fm-row .fm-warn { flex: 1; min-width: 0; }
+
+@media (hover: hover) {
+.fm-row .fm-remove:hover { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+}
