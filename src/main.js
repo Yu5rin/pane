@@ -152,6 +152,29 @@ function formatDateTimeStamp(d) {
   return `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+// フォント名をCSSカスタムプロパティへ設定する(仕様書 C-08)。
+// フォント名をそのまま素で入れると、Windowsの縦書き用フォント("@Yu Gothic"のように
+// 先頭が@)や記号を含む名前でCSSとして不正になり、font-family全体が無効になって
+// 何も反映されない。必ず引用符で囲み、中の " と \ をエスケープする。
+// generic-family(sans-serif等)だけは引用符で囲むと意味が変わるためそのまま渡す。
+const CSS_GENERIC_FONT_FAMILIES = new Set([
+  "serif", "sans-serif", "monospace", "cursive", "fantasy", "system-ui",
+  "ui-serif", "ui-sans-serif", "ui-monospace", "ui-rounded", "math", "emoji", "fangsong",
+]);
+function applyFontSetting(rootStyle, cssVar, rawName, label) {
+  const name = typeof rawName === "string" ? rawName.trim() : "";
+  if (!name) {
+    rootStyle.removeProperty(cssVar);
+    logToHost("info", `${label}: 未設定(テーマ既定に戻す)`);
+    return;
+  }
+  const value = CSS_GENERIC_FONT_FAMILIES.has(name.toLowerCase())
+    ? name
+    : `"${name.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  rootStyle.setProperty(cssVar, value);
+  logToHost("info", `${label}: ${value} を適用`);
+}
+
 function setDirty(v) {
   isDirty = v;
   // 未保存であることはタイトルバー(C#側のUpdateTitle)とステータスバーの両方で示す。
@@ -901,10 +924,8 @@ async function handleHostMessage(msg) {
       // 未設定なら変数自体を消して、style.cssの既定(--font-body / --font-mono)へ戻す。
       const rootStyle = document.documentElement.style;
       host.style.fontFamily = ""; // 旧実装のインラインスタイルが残っていたら外す
-      if (msg.editorFontFamily) rootStyle.setProperty("--editor-font-body", msg.editorFontFamily);
-      else rootStyle.removeProperty("--editor-font-body");
-      if (msg.editorMonospaceFontFamily) rootStyle.setProperty("--editor-font-mono", msg.editorMonospaceFontFamily);
-      else rootStyle.removeProperty("--editor-font-mono");
+      applyFontSetting(rootStyle, "--editor-font-body", msg.editorFontFamily, "本文フォント");
+      applyFontSetting(rootStyle, "--editor-font-mono", msg.editorMonospaceFontFamily, "等幅フォント");
       // カスタムCSS(仕様書 第2.10節 C-07)。C#側がファイル内容を読み込んで文字列として送ってくる
       // (file://は仮想ホスト配下から読めないため)。<head>内の専用<style>要素のtextContentへ
       // 反映する(innerHTMLは使わない)。要素が無ければここで生成する。
