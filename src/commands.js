@@ -119,7 +119,10 @@ export function buildCommands(ctx) {
 // 既定は表示。Altキーで表示・非表示をトグルする(表示中はショートカット一覧としても機能する)。
 export function initMenuBar(container, commands, ctx) {
   const menus = ["File", "Edit", "Paragraph", "Format", "View"];
-  container.innerHTML = "";
+  // コンテナ末尾には右端寄せ用のスペーサーとテーマ切替ボタンが静的HTML側で既に置かれているため、
+  // それらは残したまま、メニュー項目だけをその手前に挿入する。
+  const anchor = container.firstChild;
+  container.querySelectorAll(".menu-top").forEach((el) => el.remove());
   container.setAttribute("role", "menubar");
   let openMenu = null;
 
@@ -225,7 +228,7 @@ export function initMenuBar(container, commands, ctx) {
         document.addEventListener("keydown", onMenuKeydown, true);
       }
     });
-    container.appendChild(btn);
+    container.insertBefore(btn, anchor);
   }
 
   // Altキーでの表示・非表示トグル(仕様書 第10.1節・第10.4節)。

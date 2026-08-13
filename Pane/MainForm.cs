@@ -76,7 +76,19 @@ internal sealed class MainForm : Form
         DragDrop += OnDragDrop;
 
         _webView.Dock = DockStyle.Fill;
+        // WebView2はDock=Fillでクライアント領域全体を覆うため、実際のドラッグ&ドロップ通知は
+        // (Formではなく)このコントロール自身のHWNDが受け取る。WebView2.AllowDropは読み取り専用
+        // (AllowExternalDrop=false設定時にコントロール自身が自動でOLEドロップターゲット登録する)
+        // ため、こちらから明示的にAllowDrop=trueへは出来ないが、DragEnter/DragDropイベント自体は
+        // Formと同じハンドラをそのまま登録できる。
+        _webView.DragEnter += OnDragEnter;
+        _webView.DragDrop += OnDragDrop;
         Controls.Add(_webView);
+
+        // 起動直後・ウィンドウ切替後の初回キー入力がWebView2内のコンテンツへ届かない
+        // (フォーカスがネイティブのフォーム側に留まる)ことがあるため、明示的にフォーカスを移す。
+        Shown += (_, _) => _webView.Focus();
+        Activated += (_, _) => _webView.Focus();
 
         _autoSaveTimer = new System.Windows.Forms.Timer { Interval = AutoSaveIntervalMs };
         _autoSaveTimer.Tick += (_, _) => RequestAutoSaveSnapshot();
@@ -634,11 +646,16 @@ internal sealed class MainForm : Form
     }
 
     // ---- エクスポート(仕様書 F-XX)。PDF/画像はWebView2のネイティブ機能、HTMLは
-    // JS側で組み立て済みのHTML文字列をそのまま保存、Word/EPUBはPandocに委譲する。 ----
+    // JS側で組み立て済みのHTML文字列をそのまま保存、Word/EPUBはPandocに委譲する。
+    // PNGはJS側が"export"送信前にメニューバー等を隠し文書全体をレイアウトへ展開している
+    // (enterExportLayout)ため、このメソッドを抜ける経路(保存キャンセルを含む)すべてで
+    // 必ず"export-done"を返し、JS側の表示を元に戻せるようにする。 ----
     private async Task HandleExportRequestAsync(JsonElement message)
     {
         string format = message.TryGetProperty("format", out JsonElement fmtProp) ? fmtProp.GetString() ?? "" : "";
         string text = message.TryGetProperty("text", out JsonElement textProp) ? textProp.GetString() ?? "" : "";
+        int captureHeight = message.TryGetProperty("captureHeight", out JsonElement chProp) && chProp.ValueKind == JsonValueKind.Number
+            ? chProp.GetInt32() : 0;
         string baseName = _currentPath is null ? "無題" : Path.GetFileNameWithoutExtension(_currentPath);
 
         (string filter, string ext) = format switch
@@ -650,12 +667,12 @@ internal sealed class MainForm : Form
             "epub" => ("EPUB (*.epub)|*.epub", ".epub"),
             _ => ("すべてのファイル (*.*)|*.*", ""),
         };
-        using var dialog = new SaveFileDialog { Filter = filter, FileName = baseName + ext };
-        if (dialog.ShowDialog(this) != DialogResult.OK) return;
-        string targetPath = dialog.FileName;
-
         try
         {
+            using var dialog = new SaveFileDialog { Filter = filter, FileName = baseName + ext };
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            string targetPath = dialog.FileName;
+
             switch (format)
             {
                 case "pdf":
@@ -666,10 +683,7 @@ internal sealed class MainForm : Form
                     await File.WriteAllTextAsync(targetPath, text, new UTF8Encoding(false));
                     break;
                 case "png":
-                    await using (FileStream stream = File.Create(targetPath))
-                    {
-                        await _webView.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, stream);
-                    }
+                    await CapturePngAsync(targetPath, captureHeight);
                     break;
                 case "docx":
                 case "epub":
@@ -680,6 +694,37 @@ internal sealed class MainForm : Form
         catch (Exception ex)
         {
             MessageBox.Show(this, $"エクスポートに失敗しました。\n{ex.Message}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            PostToWeb(new { type = "export-done" });
+        }
+    }
+
+    /// <summary>
+    /// PNGエクスポート(仕様書 File項目「エクスポート: 画像(PNG)」)。CapturePreviewAsyncは
+    /// WebView2コントロールの現在の表示ピクセルしか撮れない(スクロール分は撮れない)ため、
+    /// 文書全体が収まるようウィンドウを一時的に(captureHeightが現在の高さを超える場合のみ)
+    /// 拡大してから撮影し、直後に元のサイズへ戻す。
+    /// </summary>
+    private async Task CapturePngAsync(string targetPath, int captureHeight)
+    {
+        Size? originalClientSize = null;
+        if (captureHeight > 0 && captureHeight > _webView.Height)
+        {
+            originalClientSize = ClientSize;
+            ClientSize = new Size(ClientSize.Width, captureHeight);
+            // WebView2側の再描画完了を待つ確実なAPIが無いため、ベストエフォートで少し待つ。
+            await Task.Delay(150);
+        }
+        try
+        {
+            await using FileStream stream = File.Create(targetPath);
+            await _webView.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, stream);
+        }
+        finally
+        {
+            if (originalClientSize is Size size) ClientSize = size;
         }
     }
 

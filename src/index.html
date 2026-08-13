@@ -13,16 +13,11 @@
 </script>
 <link rel="stylesheet" href="style.css">
 <style>
-  /* 第10.4節の画面構成: タイトルバー・メニューバー・本文・ステータスバーの四段。 */
+  /* 第10.4節の画面構成: メニューバー・本文・ステータスバーの三段
+     (タイトル・ダーティ表示・読み取り専用表示はOSネイティブのウィンドウタイトルが兼ねるため、
+     HTML側の専用タイトルバー行は持たない)。 */
   html, body { height: 100%; margin: 0; }
   body { display: flex; flex-direction: column; background: var(--paper); color: var(--ink); font-family: var(--font-body); position: relative; }
-  #titlebar { display: flex; align-items: center; gap: 10px; padding: 0 10px; height: 32px; border-bottom: 1px solid var(--rule); font-size: 13px; flex: none; }
-  #titlebar .filename { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #titlebar .dot { color: var(--accent); visibility: hidden; }
-  #titlebar.dirty .dot { visibility: visible; }
-  #titlebar.readonly .filename::after { content: "(読み取り専用)"; margin-left: 6px; color: var(--ink-mute); font-size: 11px; }
-  #titlebar button { border: none; background: transparent; color: var(--ink-mute); font: inherit; cursor: pointer; padding: 4px 6px; border-radius: 6px; display: inline-flex; align-items: center; }
-  #titlebar button:hover { color: var(--ink); background: var(--accent-soft); }
   #cm-host { flex: 1; min-height: 0; overflow: hidden; position: relative; }
   #statusbar { display: flex; gap: 16px; padding: 0 10px; height: 24px; align-items: center; border-top: 1px solid var(--rule); font-size: 11px; color: var(--ink-mute); flex: none; font-family: var(--font-mono); }
   #statusbar button { border: none; background: transparent; color: inherit; font: inherit; cursor: pointer; padding: 0 4px; }
@@ -30,15 +25,13 @@
 </style>
 </head>
 <body>
-  <div id="titlebar">
-    <span class="filename" id="filename">無題</span>
-    <span class="dot" id="dirty-dot">&#9679;</span>
-    <button id="btn-theme" type="button" title="テーマ切替" aria-label="テーマ切替">
+  <div id="menubar">
+    <span style="flex:1"></span>
+    <button id="btn-theme" class="menu-theme-btn" type="button" title="テーマ切替" aria-label="テーマ切替">
       <svg id="theme-icon-light" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2.5v2.5M12 19v2.5M4.2 4.2l1.8 1.8M18 18l1.8 1.8M2.5 12H5M19 12h2.5M4.2 19.8 6 18M18 6l1.8-1.8"/></svg>
       <svg id="theme-icon-dark" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" hidden><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/></svg>
     </button>
   </div>
-  <div id="menubar"></div>
   <div id="cm-host"></div>
   <div id="statusbar">
     <span id="status-mode">Markdown</span>
