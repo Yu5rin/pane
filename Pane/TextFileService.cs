@@ -46,9 +46,15 @@ internal static class TextFileService
     private static readonly byte[] Utf16LeBomBytes = { 0xFF, 0xFE };
     private static readonly byte[] Utf16BeBomBytes = { 0xFE, 0xFF };
 
-    public static LoadResult Load(string path)
+    public static LoadResult Load(string path) => LoadBytes(File.ReadAllBytes(path));
+
+    /// <summary>
+    /// バイト列から直接読み込む(仕様書外: WebView2の本文エリアへドラッグ&ドロップされた
+    /// ファイル用。WebView2は標準のDOM File APIでは実パスを公開しないため、JS側から
+    /// バイト列で受け取ったものをここで同じエンコーディング判定にかける)。
+    /// </summary>
+    public static LoadResult LoadBytes(byte[] bytes)
     {
-        byte[] bytes = File.ReadAllBytes(path);
         FileEncodingKind encoding = DetectEncoding(bytes, out int bomLength);
         string raw = DecodeBody(bytes, bomLength, encoding);
 
