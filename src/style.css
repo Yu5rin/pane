@@ -207,8 +207,9 @@ html[data-theme="dark"] #theme-moon { display: none; }
 /* チェックリスト: タップ領域を広げ、完了項目は淡色に */
 
 /* コマンドパレット(仕様書 第10.1節: Ctrl+Shift+P) */
-.palette-overlay { position: fixed; inset: 0; z-index: 60; background: rgba(10,14,16,.4); display: flex; justify-content: center; align-items: flex-start; padding-top: 14dvh; }
-.palette { width: min(560px, calc(100% - 32px)); background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow-pop); overflow: hidden; }
+/* ウィンドウが低いときにパレットが下へはみ出さないよう、上余白を縮めて高さも画面内に収める。 */
+.palette-overlay { position: fixed; inset: 0; z-index: 60; background: rgba(10,14,16,.4); display: flex; justify-content: center; align-items: flex-start; padding: min(14dvh, 40px) 16px 16px; }
+.palette { width: min(560px, calc(100% - 32px)); max-height: 100%; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow-pop); overflow: hidden; }
 #palette-input { width: 100%; border: none; border-bottom: 1px solid var(--line); background: transparent; padding: 14px 16px; font-size: 15px; box-sizing: border-box; }
 #palette-input:focus { outline: none; }
 #palette-list { list-style: none; margin: 0; padding: 6px; max-height: 46dvh; overflow-y: auto; }
@@ -225,7 +226,11 @@ html[data-theme="dark"] #theme-moon { display: none; }
 #menubar.hidden { display: none; }
 .menu-top { border: none; background: transparent; color: var(--ink); font: inherit; padding: 3px 10px; border-radius: 6px; cursor: pointer; }
 .menu-top:hover, .menu-top.open { background: var(--accent-soft); color: var(--accent); }
-.menu-dropdown { position: fixed; z-index: 70; min-width: 240px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow-pop); padding: 4px; display: flex; flex-direction: column; }
+/* max-height / overflow-y は、ウィンドウの高さが足りないときにメニューが画面外へ
+   はみ出して下の方の項目に永久に届かなくなるのを防ぐためのもの。
+   メニューバーの高さと下端の余白を差し引いた高さに収め、超える分はスクロールさせる
+   (「表示」メニューは項目が20個あり、小さいウィンドウでは確実にはみ出す)。 */
+.menu-dropdown { position: fixed; z-index: 70; min-width: 240px; max-height: calc(100vh - 46px); overflow-y: auto; overscroll-behavior: contain; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow-pop); padding: 4px; display: flex; flex-direction: column; }
 .menu-item { display: flex; align-items: center; gap: 8px; border: none; background: transparent; color: var(--ink); font: inherit; font-size: 12.5px; text-align: left; padding: 6px 10px; border-radius: 6px; cursor: pointer; }
 .menu-item:hover:not(.disabled) { background: var(--accent-soft); color: var(--accent); }
 .menu-item.disabled { color: var(--ink-sub); opacity: .5; cursor: default; }
@@ -667,7 +672,9 @@ html[data-theme="dark"] .cm-table th { background: rgba(61,193,181,.14); }
    全画面オーバーレイの中央に大きめのパネル(900px前後・80vh)を出す。既存のオーバーレイ
    (.palette-overlay)・ドロップダウン(.menu-dropdown)と同じ質感(--surface背景・--line枠・
    --shadow-pop影)で揃え、配色はすべて既存のCSSカスタムプロパティのみを使う。 */
-.settings-modal-overlay { position: fixed; inset: 0; z-index: 80; background: rgba(10,14,16,.4); display: flex; justify-content: center; align-items: center; padding: 24px; }
+/* 余白は画面サイズに応じて縮める。ウィンドウが小さいと24px固定では本体の表示領域が
+   潰れてしまい、設定画面が使えなくなるため。 */
+.settings-modal-overlay { position: fixed; inset: 0; z-index: 80; background: rgba(10,14,16,.4); display: flex; justify-content: center; align-items: center; padding: min(24px, 2vh) min(24px, 2vw); }
 .settings-modal { width: min(900px, 100%); height: min(80vh, 720px); max-height: 100%; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow-pop); overflow: hidden; }
 .settings-modal-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--rule); flex: none; }
 .settings-modal-title { font-size: 15px; font-weight: 700; }
