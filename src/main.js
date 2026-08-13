@@ -11,9 +11,13 @@ import { createQuickOpen } from "./quick-open.js";
 import { createWordCountPopup } from "./word-count.js";
 import { createSettings } from "./settings.js";
 import { htmlToMarkdown } from "./html-to-markdown.js";
-import { resolveFileMode } from "./languages.js";
+import { resolveFileMode, codeLanguages } from "./languages.js";
+import { FILE_TYPES } from "./file-types.js";
+import { detectContentMode } from "./detect-mode.js";
+import { setReadingSpeedWpm } from "./text-stats.js";
 
 const host = document.getElementById("cm-host");
+const statusbarEl = document.getElementById("statusbar");
 const menubarEl = document.getElementById("menubar");
 const statusSidebarBtn = document.getElementById("status-sidebar");
 const statusMode = document.getElementById("status-mode");
@@ -25,6 +29,16 @@ const statusLineEnding = document.getElementById("status-line-ending");
 const statusWrapBtn = document.getElementById("status-wrap");
 const fileInput = document.getElementById("file-input");
 const imageInput = document.getElementById("image-input");
+// 内容からの編集モード自動判定(仕様書 第1章の拡張)の通知バナー。モーダルにはしない
+// (常時ステータスバー付近に浮かべ、入力の邪魔をしない)。
+const adBanner = document.getElementById("ad-banner");
+const adBannerText = document.getElementById("ad-banner-text");
+const adBannerAction = document.getElementById("ad-banner-action");
+const adBannerClose = document.getElementById("ad-banner-close");
+
+// 言語ID(src/file-types.js の FILE_TYPES[].id)→表示ラベルの対応。ステータスバーの
+// 「コード (Python)」表示・言語ピッカーの両方で使う。
+const LANGUAGE_LABELS = Object.fromEntries(FILE_TYPES.map((t) => [t.id, t.label]));
 
 const bridge = window.chrome?.webview ?? null;
 
@@ -79,12 +93,63 @@ let keyBindings = {};
 // (優先順位1。同一セッション内での即時反映用にローカルにもキャッシュし、setMode()で都度更新する)。
 let fileModeOverrides = {};
 let perFileModes = {};
+// 内容からの編集モード自動判定(仕様書 第1章の拡張)。既定は"standard"。
+// off: 何もしない / suggest: 提案のみ(切り替えない) / standard: 無題の新規文書のみ即座に
+// 切り替え(取り消し可) / aggressive: standardに加え拡張子ファイルでも食い違えば提案する。
+let autoDetectMode = "standard";
+const AUTO_DETECT_MODES = new Set(["off", "suggest", "standard", "aggressive"]);
+// 現在の文書に対する自動判定の状態。ファイルを開く/新規作成のたびリセットする(仕様書の
+// 「文書ごと」の記憶)。
+//   locked:    trueなら以後この文書には一切自動判定を行わない。手動でモードを選んだ・
+//              「元に戻す」を押した・無題の文書が拡張子付きで保存された、のいずれかで立つ。
+//   suggested: 一度でも提案を出したらtrue(同じ文書に再提案しない)。
+let autoDetectState = { locked: false, suggested: false };
+function resetAutoDetectState() {
+  autoDetectState = { locked: false, suggested: false };
+  hideAdBanner();
+}
+// editor.setValue()をプログラムによる内容差し替え(ファイルを開く・新規作成等)として
+// 自動判定の対象から除外しつつ呼ぶ。setValue()が実質差分無し(例: 空文書→空文書)の場合は
+// CodeMirrorのdocChangedが発火せずonChange側でフラグを消費できないことがあるため、
+// 呼び出し後にも明示的にfalseへ戻して次の本物の変更に影響を残さないようにする。
+function setEditorValueQuiet(text) {
+  suppressNextAutoDetectChange = true;
+  editor.setValue(text);
+  suppressNextAutoDetectChange = false;
+}
+// ペースト直後(貼り付け文字数がAUTO_DETECT_PASTE_MIN_CHARS以上)と、入力が止まって
+// AUTO_DETECT_IDLE_MSたった時の2箇所だけで判定を走らせる(仕様: 入力のたびには走らせない)。
+let lastPasteLength = 0;
+let idleDetectTimer = null;
+// ファイルを開く等プログラムによる内容差し替え(editor.setValue())の直後のonChangeは、
+// ユーザーの入力ではないため自動判定の対象から除外する(ペースト/入力停止のみが対象)。
+let suppressNextAutoDetectChange = false;
+const AUTO_DETECT_PASTE_MIN_CHARS = 80;
+const AUTO_DETECT_IDLE_MS = 1500;
+const AUTO_DETECT_CONFIDENCE_MIN = 0.55;
 // 全画面表示・常に手前に表示(仕様書 V-08/V-12)の状態。実際のトグルはC#側(WinForms)が
 // 持っており、"window-state"で都度届く値をそのまま保持するだけ(第10.5節: JS側は表示専用)。
 let windowState = { fullscreen: false, alwaysOnTop: false };
 // 設定画面(仕様書 第2.10節)。ctx構築後(buildCommands()でctx.commandsが揃ってから)生成するため、
 // ctx.actions.openSettingsは変数越しに参照するだけにしておく(sidebar/quickOpenと同じ遅延生成の形)。
 let settingsUI = null;
+// Ctrl+マウスホイールでの文字サイズ変更(仕様書 zoomWithCtrlWheel、既定true)。
+let zoomWithCtrlWheelOn = true;
+// サイドバーのファイル一覧・ツリーからの切替時、未保存の変更を確認せず保存してから
+// 切り替えるか(仕様書 saveWithoutAskingOnSwitch、既定false)。
+let saveWithoutAskingOnSwitch = false;
+// 起動時アウトライン既定表示(仕様書 showOutlineByDefault)は最初のapply-settingsでのみ判定する。
+// ユーザーが手でサイドバーを閉じた後、以後apply-settingsが再送されても勝手に開かないようにする。
+let initialSidebarAutoOpenDone = false;
+// switchFileFromSidebar()がbridge経由の保存完了("save-result")を待つためのresolve関数群。
+let pendingSaveResolvers = [];
+
+// 日時の挿入(仕様書 第3章 N-14)・「.LOG」自動追記(N-15)で共通して使う書式。
+// Windowsのメモ帳(日本語環境)に合わせ YYYY/MM/DD HH:mm とする。
+function formatDateTimeStamp(d) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
 
 function setDirty(v) {
   isDirty = v;
@@ -133,11 +198,157 @@ function updateStatusMeta() {
   statusLineEnding.textContent = currentLineEnding ? `改行コード: ${currentLineEnding}` : "";
 }
 const MODE_LABELS = { markdown: "Markdown", code: "コード", plain: "プレーンテキスト" };
+// モード表示ラベル(仕様書 第1章の拡張): コードモードのときは言語名も添える(例: "コード (Python)")。
+function modeLabel(mode, language) {
+  if (mode === "code" && language) return `コード (${LANGUAGE_LABELS[language] ?? language})`;
+  return MODE_LABELS[mode] ?? mode;
+}
 function updateStatusMode() {
   const mode = editor.getMode();
-  statusMode.textContent = MODE_LABELS[mode] ?? mode;
+  statusMode.textContent = modeLabel(mode, editor.getCodeLanguage());
   host.classList.toggle("mode-code", mode === "code");
 }
+
+// ---- 自動判定の通知バナー(仕様書 第1章の拡張)。モーダルにせず、ステータスバー付近に
+// 浮かべるだけの非侵襲的な表示にする。「切り替えた」通知は8秒程度で自動的に消えるが、
+// 「提案」は(取りこぼさないよう)ユーザーが閉じる/選ぶまで残す。----
+let adBannerHideTimer = null;
+function hideAdBanner() {
+  if (adBannerHideTimer) { clearTimeout(adBannerHideTimer); adBannerHideTimer = null; }
+  adBanner.hidden = true;
+  adBannerAction.hidden = true;
+  adBannerAction.onclick = null;
+}
+function showAdBanner(text, { actionLabel, onAction, autoHideMs } = {}) {
+  hideAdBanner();
+  adBannerText.textContent = text;
+  if (actionLabel) {
+    adBannerAction.hidden = false;
+    adBannerAction.textContent = actionLabel;
+    adBannerAction.onclick = () => { hideAdBanner(); onAction?.(); };
+  }
+  adBanner.hidden = false;
+  if (autoHideMs) adBannerHideTimer = setTimeout(hideAdBanner, autoHideMs);
+}
+adBannerClose.addEventListener("click", hideAdBanner);
+
+// ---- 内容からの編集モード自動判定(仕様書 第1章の拡張)の適用ロジック ----
+// 実際にモード/言語を切り替える(自動切り替え・提案の「切り替える」どちらからも呼ばれる)。
+async function performAutoDetectSwitch(result) {
+  if (result.mode === "code") await editor.setCodeLanguage(result.language);
+  else await editor.setFileMode(currentPath ?? currentName, result.mode);
+  updateStatusMode();
+}
+// 切り替え前の状態(prevMode/prevLanguage)を覚えておき、「元に戻す」で復元する。
+function applyAutoDetectSwitch(result, prevMode, prevLanguage) {
+  performAutoDetectSwitch(result);
+  autoDetectState.suggested = true; // 直接切り替えた場合も、以後の重複提案は不要
+  showAdBanner(`自動判定: ${modeLabel(result.mode, result.language)} に切り替えました`, {
+    actionLabel: "元に戻す",
+    autoHideMs: 8000,
+    onAction: () => {
+      performAutoDetectSwitch({ mode: prevMode, language: prevLanguage });
+      // 「元に戻す」を押した文書には、以後この判定エンジンを一切働かせない(仕様書の指示)。
+      autoDetectState.locked = true;
+    },
+  });
+}
+// 提案のみ表示する(切り替えない)。同じ文書には1回だけ。
+function suggestAutoDetect(result) {
+  if (autoDetectState.suggested) return;
+  autoDetectState.suggested = true;
+  const prevMode = editor.getMode();
+  const prevLanguage = editor.getCodeLanguage();
+  showAdBanner(`${modeLabel(result.mode, result.language)} として表示しますか?`, {
+    actionLabel: "切り替える",
+    onAction: () => applyAutoDetectSwitch(result, prevMode, prevLanguage),
+  });
+}
+// 判定を実際に走らせて、autoDetectModeに応じて適用/提案/何もしないを振り分ける。
+// 呼び出しはペースト直後・入力停止1.5秒後の2箇所のみ(仕様: 入力のたびには走らせない)。
+function runAutoDetect() {
+  if (autoDetectMode === "off" || autoDetectState.locked) return;
+  const result = detectContentMode(editor.getValue());
+  if (result.confidence < AUTO_DETECT_CONFIDENCE_MIN) return;
+  if (result.mode === "plain") return; // plainへの自動遷移(切り替え・提案とも)は行わない
+  if (result.mode === "code" && !result.language) return; // 言語不明なコード判定は適用しない
+
+  const currentDocMode = editor.getMode();
+  const currentDocLanguage = editor.getCodeLanguage();
+  const alreadyApplied = result.mode === currentDocMode &&
+    (result.mode !== "code" || result.language === currentDocLanguage);
+  if (alreadyApplied) return; // 既に同じ表示なら切り替え・提案とも不要
+
+  const isUntitled = !currentPath;
+  if (isUntitled) {
+    if (autoDetectMode === "suggest") { suggestAutoDetect(result); return; }
+    applyAutoDetectSwitch(result, currentDocMode, currentDocLanguage); // standard / aggressive
+    return;
+  }
+  // 拡張子のある(名前が付いた)文書: standardは何もしない。suggest/aggressiveは提案のみ。
+  if (autoDetectMode === "standard") return;
+  suggestAutoDetect(result);
+}
+function scheduleAutoDetectIdle() {
+  if (idleDetectTimer) clearTimeout(idleDetectTimer);
+  idleDetectTimer = setTimeout(() => { idleDetectTimer = null; runAutoDetect(); }, AUTO_DETECT_IDLE_MS);
+}
+
+// ---- 言語ピッカー(仕様書 第1章の拡張): #status-mode クリックでコードモードの言語を
+// 選び直す。既存のコマンドパレット/クイックオープンと同じ.palette-overlayの仕組みを流用する。
+let langPickerOverlay = null;
+function closeLanguagePicker() { langPickerOverlay?.remove(); langPickerOverlay = null; }
+function openLanguagePicker() {
+  if (langPickerOverlay) { closeLanguagePicker(); return; } // 開いている状態での再呼び出しはトグルで閉じる
+  const items = codeLanguages
+    .map((d) => ({ id: d.name, label: LANGUAGE_LABELS[d.name] ?? d.name }))
+    .sort((a, b) => a.label.localeCompare(b.label, "ja"));
+
+  langPickerOverlay = document.createElement("div");
+  langPickerOverlay.className = "palette-overlay";
+  langPickerOverlay.innerHTML = '<div class="palette"><input id="palette-input" placeholder="言語を検索…" autocomplete="off"><ul id="palette-list"></ul></div>';
+  document.body.appendChild(langPickerOverlay);
+  const input = langPickerOverlay.querySelector("#palette-input");
+  const list = langPickerOverlay.querySelector("#palette-list");
+  langPickerOverlay.addEventListener("mousedown", (e) => { if (e.target === langPickerOverlay) closeLanguagePicker(); });
+
+  let filtered = items;
+  let sel = 0;
+  function choose(item) {
+    closeLanguagePicker();
+    editor.setCodeLanguage(item.id).then(updateStatusMode);
+    // 手動での言語選択(仕様書 第1章の拡張): 以後この文書には自動判定を行わない。
+    autoDetectState.locked = true;
+  }
+  function render() {
+    list.innerHTML = "";
+    filtered.forEach((item, i) => {
+      const li = document.createElement("li");
+      li.className = i === sel ? "sel" : "";
+      li.textContent = item.label;
+      li.addEventListener("mousedown", (e) => { e.preventDefault(); choose(item); });
+      list.appendChild(li);
+    });
+  }
+  function filter() {
+    const q = input.value.trim().toLowerCase();
+    filtered = !q ? items : items.filter((it) => it.label.toLowerCase().includes(q) || it.id.includes(q));
+    sel = 0;
+    render();
+  }
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { closeLanguagePicker(); return; }
+    if (e.key === "ArrowDown") { e.preventDefault(); sel = Math.min(filtered.length - 1, sel + 1); render(); return; }
+    if (e.key === "ArrowUp") { e.preventDefault(); sel = Math.max(0, sel - 1); render(); return; }
+    if (e.key === "Enter") { e.preventDefault(); const it = filtered[sel]; if (it) choose(it); return; }
+  });
+  input.addEventListener("input", filter);
+  filter();
+  input.focus();
+}
+statusMode.addEventListener("click", () => {
+  if (editor.getMode() === "code") openLanguagePicker();
+});
 function updateWrapButton() {
   statusWrapBtn.textContent = wordWrapOn ? "折り返し: あり" : "折り返し: なし";
 }
@@ -181,6 +392,18 @@ const editor = createEditor(host, {
     // サイドバー(アウトラインパネル)の更新はsidebar.js側で300msデバウンスし、
     // かつ閉じている間・アウトライン以外を見ている間は再計算しない(性能要件)。
     sidebar.refresh();
+    // 内容からの編集モード自動判定(仕様書 第1章の拡張)。ファイルを開く等プログラムによる
+    // 内容差し替えでは走らせない(suppressNextAutoDetectChange)。判定を走らせるのは
+    // ペースト直後(貼り付け文字数が閾値以上)と入力停止1.5秒後の2箇所だけ。
+    if (suppressNextAutoDetectChange) {
+      suppressNextAutoDetectChange = false;
+      lastPasteLength = 0;
+      return;
+    }
+    const pastedChars = lastPasteLength;
+    lastPasteLength = 0;
+    if (pastedChars >= AUTO_DETECT_PASTE_MIN_CHARS) runAutoDetect();
+    else scheduleAutoDetectIdle();
   },
   // 文字数・行列表示(仕様書 N-03、W-01)。doc変化・カーソル移動のどちらでも軽い集計だけ
   // 行う(重い単語数・段落数集計はW-02のポップアップを開いた時にだけ行う。性能要件)。
@@ -190,13 +413,20 @@ const editor = createEditor(host, {
   },
   // スマートペースト(仕様書 第2.9.3節): クリップボードにHTMLがあればMarkdownへ変換して挿入する。
   // プレーンテキストのみの場合は既定の貼り付け(CM6の処理)に任せる。
+  // 併せて貼り付け文字数を記録する(内容からの編集モード自動判定のトリガーに使う。上のonChange参照)。
   onPaste: (e) => {
     const html = e.clipboardData?.getData("text/html");
-    if (!html) return false;
-    const md = htmlToMarkdown(html).trim();
-    if (!md) return false;
-    editor.pasteText(md);
-    return true;
+    const plain = e.clipboardData?.getData("text/plain") || "";
+    if (html) {
+      const md = htmlToMarkdown(html).trim();
+      if (md) {
+        lastPasteLength = md.length;
+        editor.pasteText(md);
+        return true;
+      }
+    }
+    lastPasteLength = plain.length;
+    return false;
   },
   // 既定のコピー形式(仕様書 第2.9.3節、設定でHTML同時コピーに切替可能)
   onCopy: (e) => {
@@ -328,6 +558,8 @@ const ctx = {
     async setMode(mode) {
       await editor.setFileMode(currentPath ?? currentName, mode);
       updateStatusMode();
+      // 手動でモードを選んだ文書には、以後内容からの自動判定(仕様書 第1章の拡張)を行わない。
+      autoDetectState.locked = true;
       // 手動切替の記憶(仕様書 第1章)。無題(パス無し)の場合はブリッジへ送らず、その場の変更のみ行う。
       if (!currentPath) return;
       if (mode === autoFileMode(currentName)) {
@@ -387,8 +619,23 @@ const ctx = {
       pendingGotoLine = line != null ? { path, line } : null;
       bridge?.postMessage({ type: "open-path", path });
     },
+    // サイドバーのファイル一覧・ツリーからの切替専用(仕様書 saveWithoutAskingOnSwitch)。
+    // 有効時は未保存の変更があっても確認せず保存してから切り替える。無効時(既定)は
+    // 従来どおりopenFileByPathと同じ経路を通り、保存確認自体はC#側(ConfirmDiscardDirtyAsync)に
+    // 任せる。グローバル検索結果・クイックオープンからの遷移は対象外(仕様書の範囲外のため、
+    // 引き続きopenFileByPathを直接使う)。
+    async switchFileFromSidebar(path) {
+      if (saveWithoutAskingOnSwitch && isDirty) {
+        if (bridge) await saveFileAndWait(false);
+        else await saveFile(false); // bridgeが無い場合のsaveFileは同期的に完結する
+      }
+      ctx.actions.openFileByPath(path);
+    },
     // グローバル検索(仕様書 第2.6節 G-01)。Ctrl+Shift+Fから呼ばれる。
     openGlobalSearch() { sidebar.openSearch(); },
+    // 日時の挿入(仕様書 第3章 N-14、メモ帳のF5相当)。既存のpasteText(貼り付け相当の挿入)を
+    // そのまま使い、editor.jsは変更しない。
+    insertDateTime() { editor.pasteText(formatDateTimeStamp(new Date())); },
     // openQuickOpenはcreateQuickOpen(ctx)がctxを必要とする(sidebarと同じ循環依存)ため、
     // quickOpen生成後にctx.actionsへ追加する(下方参照)。
   },
@@ -455,7 +702,7 @@ function setFontSizeAndPersist(size) {
 // (IsZoomControlEnabled=falseで無効化済み)はメニューバー・ステータスバーまで
 // 拡大してしまうため使わず、CodeMirrorのフォントサイズだけを変える。
 window.addEventListener("wheel", (e) => {
-  if (!e.ctrlKey) return;
+  if (!e.ctrlKey || !zoomWithCtrlWheelOn) return; // 仕様書 zoomWithCtrlWheel: falseなら何もしない
   e.preventDefault();
   setFontSizeAndPersist(editor.getFontSize() + (e.deltaY < 0 ? 1 : -1));
 }, { passive: false });
@@ -485,20 +732,43 @@ function decideFileMode(path, fileName) {
   if (path && Object.prototype.hasOwnProperty.call(perFileModes, path)) {
     return perFileModes[path];
   }
+  // 保存先がまだ無い文書(新規作成、および異常終了からの復元で元ファイルのパスが無い場合)は、
+  // 無題の新規文書と同じ扱いでMarkdownにする。C#側は表示名として"無題"を送ってくるため、
+  // これをそのまま拡張子判定に掛けると「"無題"という拡張子」とみなされてプレーンテキストへ
+  // 落ちてしまう(復元したMarkdown文書がプレーンテキストで開く不具合の原因だった)。
+  if (!path) return autoFileMode(null);
   return autoFileMode(fileName);
 }
 
 async function applyFileOpened(msg) {
   pushClosedFile(currentPath);
+  resetAutoDetectState(); // 文書が変わるので内容からの自動判定の状態(仕様書 第1章の拡張)もリセット
   // 拡張子だけでなく、拡張子ごとの既定モード上書き・ファイル単位の手動記憶も考慮する(仕様書 第1章)。
   await editor.setFileMode(msg.fileName, decideFileMode(msg.path ?? null, msg.fileName));
-  editor.setValue(msg.text);
+  // 「.LOG」の自動追記(仕様書 第3章 N-15、メモ帳互換): 1行目が".LOG"だけのファイルを
+  // 開いた直後、末尾へ日時を追記してdirty状態にする。読み取り専用ファイルは対象外
+  // (保存できないものをdirty扱いにしても混乱を招くだけのため)。
+  const firstLine = (msg.text ?? "").split(/\r?\n/, 1)[0];
+  const isLogFile = firstLine === ".LOG" && !msg.readOnly;
+  setEditorValueQuiet(msg.text);
   setName(msg.fileName);
   currentPath = msg.path ?? null;
   currentEncoding = msg.encoding;
   currentLineEnding = msg.lineEnding;
   setReadOnly(msg.readOnly);
-  setDirty(false);
+  if (isLogFile) {
+    const stamp = formatDateTimeStamp(new Date());
+    const endPos = editor.view.state.doc.length;
+    const insertText = (endPos > 0 ? "\n" : "") + stamp;
+    // ファイルを開いた直後のプログラムによる変更のため、内容からの自動判定(仕様書 第1章の拡張)は
+    // 走らせない(setEditorValueQuietと同じ抑制の仕組みを使う)。
+    suppressNextAutoDetectChange = true;
+    editor.view.dispatch({ changes: { from: endPos, insert: insertText }, selection: { anchor: endPos + insertText.length } });
+    suppressNextAutoDetectChange = false;
+    setDirty(true); // 追記した時点で未保存状態にする(仕様書どおり)
+  } else {
+    setDirty(false);
+  }
   updateCount();
   updateStatusMeta();
   updateStatusMode();
@@ -512,9 +782,10 @@ async function applyFileOpened(msg) {
   }
 }
 async function applyNewDocumentLocal() {
+  resetAutoDetectState(); // 文書が変わるので内容からの自動判定の状態(仕様書 第1章の拡張)もリセット
   // 無題の新規文書はパス・ファイル名とも無いため、decideFileMode(null, null)は常にmarkdownを返す。
   await editor.setFileMode(null, decideFileMode(null, null));
-  editor.setValue("");
+  setEditorValueQuiet("");
   setName("無題");
   currentPath = null;
   currentEncoding = null;
@@ -542,8 +813,12 @@ async function handleHostMessage(msg) {
         // setName()するだけでeditor.setFileMode()を呼んでおらず、モードが古いままだった)。
         const prevExt = (currentName.split(".").pop() || "").toLowerCase();
         const nextExt = (msg.fileName.split(".").pop() || "").toLowerCase();
+        const wasUntitled = !currentPath;
         setName(msg.fileName);
         currentPath = msg.path ?? currentPath;
+        // 無題の新規文書が拡張子付きで保存された時点で、以後の内容からの自動判定
+        // (仕様書 第1章の拡張)は行わない(拡張子が優先されるべきため)。
+        if (wasUntitled && currentPath) autoDetectState.locked = true;
         currentEncoding = msg.encoding;
         currentLineEnding = msg.lineEnding;
         setReadOnly(false);
@@ -555,6 +830,13 @@ async function handleHostMessage(msg) {
         }
       }
       // キャンセル・失敗時はダーティ状態を維持する(msg.errorがあれば将来トースト表示等に使う)
+      // switchFileFromSidebar()がsaveFileAndWait()で待っている場合はここで解決する
+      // (成功・失敗いずれの場合も、待機側を永久に止めないよう解決する)。
+      if (pendingSaveResolvers.length) {
+        const resolvers = pendingSaveResolvers;
+        pendingSaveResolvers = [];
+        for (const resolve of resolvers) resolve();
+      }
       break;
     case "request-text":
       // 自動保存(仕様書 N-06): C#側は本文を持たないため、要求されたら都度返す。
@@ -616,6 +898,28 @@ async function handleHostMessage(msg) {
       // ブラウザ単体動作ではapply-settings自体が届かないため、その場合は既定の空のままになる。
       fileModeOverrides = msg.fileModeOverrides ?? {};
       perFileModes = msg.perFileModes ?? {};
+      // 内容からの編集モード自動判定(仕様書 第1章の拡張)。未指定・不明値は"standard"として扱う。
+      autoDetectMode = AUTO_DETECT_MODES.has(msg.autoDetectMode) ? msg.autoDetectMode : "standard";
+      // ステータスバー表示(仕様書 showStatusBar、既定true)。非表示時は#main-areaがflex:1で
+      // 自動的に本文エリアの高さを吸収する(index.html側のレイアウトはそのまま)。
+      statusbarEl.style.display = msg.showStatusBar === false ? "none" : "";
+      // Ctrl+マウスホイールでの文字サイズ変更(仕様書 zoomWithCtrlWheel、既定true)。
+      zoomWithCtrlWheelOn = msg.zoomWithCtrlWheel !== false;
+      // サイドバーからのファイル切替時の保存確認スキップ(仕様書 saveWithoutAskingOnSwitch、既定false)。
+      saveWithoutAskingOnSwitch = !!msg.saveWithoutAskingOnSwitch;
+      // 読了時間の計算に使う語/分(仕様書 readingSpeedWpm、0=自動)。text-stats.js側のモジュール
+      // 状態を更新するだけで、word-count.jsの詳細ポップアップにも(editor.getDetailedStats()経由で)
+      // 自動的に反映される。
+      setReadingSpeedWpm(msg.readingSpeedWpm ?? 0);
+      // アウトラインパネルの折りたたみ可否(仕様書 collapsibleOutline、既定true)。
+      if (typeof msg.collapsibleOutline === "boolean") sidebar.setCollapsibleOutline(msg.collapsibleOutline);
+      // 起動時にアウトラインを既定表示するか(仕様書 showOutlineByDefault、既定false)。
+      // 「起動時1回だけ」のため、以後のapply-settings再送では判定自体を行わない
+      // (ユーザーが手で閉じた後に勝手に再度開かないようにするため)。
+      if (!initialSidebarAutoOpenDone) {
+        initialSidebarAutoOpenDone = true;
+        if (msg.showOutlineByDefault) sidebar.open("outline");
+      }
       break;
     case "image-inserted":
       // 画像挿入(仕様書 R-07)。C#側でファイルコピー・相対パス解決を終えたものが届く。
@@ -677,8 +981,9 @@ async function openFile() {
     }
     const [handle] = handles;
     const file = await handle.getFile();
+    resetAutoDetectState();
     await editor.setFileMode(file.name);
-    editor.setValue(await file.text());
+    setEditorValueQuiet(await file.text());
     currentHandle = handle;
     setName(file.name);
     setDirty(false);
@@ -692,8 +997,9 @@ async function openFile() {
 fileInput.addEventListener("change", async () => {
   const file = fileInput.files[0];
   if (!file) return;
+  resetAutoDetectState();
   await editor.setFileMode(file.name);
-  editor.setValue(await file.text());
+  setEditorValueQuiet(await file.text());
   currentHandle = null;
   setName(file.name);
   setDirty(false);
@@ -761,8 +1067,9 @@ window.addEventListener("drop", async (e) => {
   }
   // ブラウザ単体時は新規ウィンドウを作れないため、確認のうえこのウィンドウで開く。
   if (!isEmptyDocument && !window.confirm("現在の内容を閉じて、ドロップしたファイルを開きますか?")) return;
+  resetAutoDetectState();
   await editor.setFileMode(file.name);
-  editor.setValue(await file.text());
+  setEditorValueQuiet(await file.text());
   currentHandle = null;
   currentPath = null;
   setName(file.name);
@@ -770,6 +1077,16 @@ window.addEventListener("drop", async (e) => {
   updateCount();
   updateStatusMode();
 }, true);
+
+// switchFileFromSidebar()専用: saveFile()を呼び出し、対応する"save-result"が届くまで待つ。
+// saveFile()自体はpostMessageを送るだけで完了を待たない(結果は非同期にhandleHostMessageへ
+// 届く)ため、ここでPromise化して待機できるようにする。
+function saveFileAndWait(forcePicker) {
+  return new Promise((resolve) => {
+    pendingSaveResolvers.push(resolve);
+    saveFile(forcePicker);
+  });
+}
 
 async function saveFile(forcePicker) {
   const text = editor.getValue();
