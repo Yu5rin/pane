@@ -35,4 +35,14 @@
     </Content>
   </ItemGroup>
 
+  <!-- リリースビルド(dotnet publish)は実行ファイルと同階層のdist/を探す(MainForm.ResolveDistPath参照)。
+       PublishSingleFileはContent項目を単一exeへ埋め込むためdist/(npm run buildの成果物)は対象外になるので、
+       publish完了後に手動でリポジトリ直下のdist/をpublish出力へコピーする(先に `npm run build` 済みであること)。 -->
+  <Target Name="CopyDistToPublishDir" AfterTargets="Publish" Condition="Exists('$(MSBuildProjectDirectory)\..\dist')">
+    <ItemGroup>
+      <DistFiles Include="$(MSBuildProjectDirectory)\..\dist\**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(DistFiles)" DestinationFiles="@(DistFiles->'$(PublishDir)dist\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
+  </Target>
+
 </Project>
