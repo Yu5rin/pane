@@ -9,8 +9,6 @@ import { createSearchUI } from "./search-ui.js";
 import { htmlToMarkdown } from "./html-to-markdown.js";
 
 const host = document.getElementById("cm-host");
-const titlebar = document.getElementById("titlebar");
-const filenameEl = document.getElementById("filename");
 const menubarEl = document.getElementById("menubar");
 const statusMode = document.getElementById("status-mode");
 const statusCount = document.getElementById("status-count");
@@ -31,23 +29,26 @@ let wordWrapOn = true;
 let defaultCopyFormat = "markdown"; // "markdown" | "html"(仕様書 第2.9.3節、設定で切替)
 let pandocAvailable = false;
 let recentFiles = [];
+// ダーティ・読み取り専用の表示はOSネイティブのウィンドウタイトルが兼ねる(C#側UpdateTitle)ため、
+// HTML側は確認ダイアログの判定等に使う内部状態としてのみ保持する。
+let isDirty = false;
+let isReadOnly = false;
 const closedFiles = []; // 閉じたファイルを再度開く(このウィンドウ内での置き換え履歴、ブリッジ利用時のみ)
 const CLOSED_FILES_CAP = 20;
 
 function setDirty(v) {
-  titlebar.classList.toggle("dirty", v);
+  isDirty = v;
   bridge?.postMessage({ type: "dirty", value: v });
 }
 function setName(name) {
   currentName = name;
-  filenameEl.textContent = name;
 }
 function updateCount() {
   statusCount.textContent = `${editor.getValue().length}文字`;
 }
 function updateStatusMeta() {
-  statusEncoding.textContent = currentEncoding ?? "";
-  statusLineEnding.textContent = currentLineEnding ?? "";
+  statusEncoding.textContent = currentEncoding ? `文字コード: ${currentEncoding}` : "";
+  statusLineEnding.textContent = currentLineEnding ? `改行コード: ${currentLineEnding}` : "";
 }
 const MODE_LABELS = { markdown: "Markdown", code: "コード", plain: "プレーンテキスト" };
 function updateStatusMode() {
@@ -65,8 +66,32 @@ function pushClosedFile(path) {
 }
 function setReadOnly(readOnly) {
   editor.setEditable(!readOnly);
-  titlebar.classList.toggle("readonly", !!readOnly);
+  isReadOnly = !!readOnly;
 }
+
+// PDF/PNG/印刷では、メニューバー等のUI chromeを除外し、CodeMirrorの仮想化
+// (画面内のvisibleRangesしかDOMに描画しない最適化)を一時的に解除して文書全体を
+// レイアウトへ展開する(仕様書 File項目「エクスポート」「印刷」: 現在の画面だけでなく
+// 文書全体が出力対象になるようにする)。CodeMirrorはスクロール領域の実測サイズを基に
+// 描画範囲を決めるため、#cm-hostの高さを文書全体の高さまで広げるとCM側が自動的に
+// 全行を描画する。
+function enterExportLayout() {
+  document.body.classList.add("export-layout");
+  const h = Math.ceil(editor.view.contentHeight) + 40;
+  host.style.height = h + "px";
+  editor.view.requestMeasure();
+  return h;
+}
+function exitExportLayout() {
+  document.body.classList.remove("export-layout");
+  host.style.height = "";
+  editor.view.requestMeasure();
+}
+// 印刷ダイアログ(Ctrl+Alt+P)・PDFエクスポートはいずれもWebView2の印刷パイプラインを
+// 経由するため、標準のbeforeprint/afterprintイベントで展開・復元のタイミングを取れる
+// (C#側からの完了通知を待つ必要が無い)。
+window.addEventListener("beforeprint", enterExportLayout);
+window.addEventListener("afterprint", exitExportLayout);
 
 // ショートカットはcommands.js側(createShortcutHandler)が担うが、そのコマンド一覧の
 // 構築にはeditorの生成が必要な循環があるため、実体は後で差し替える前提の間接参照にする。
@@ -110,7 +135,7 @@ const searchUI = createSearchUI(editor, host);
 function getState() {
   return {
     mode: editor.getMode(),
-    isReadOnly: titlebar.classList.contains("readonly"),
+    isReadOnly,
     pandocAvailable,
     wordWrap: wordWrapOn,
     hasClosedFile: closedFiles.length > 0,
@@ -125,7 +150,7 @@ const ctx = {
   actions: {
     async newDocument() {
       if (bridge) { bridge.postMessage({ type: "new" }); return; }
-      if (titlebar.classList.contains("dirty") && !window.confirm("保存されていない変更があります。新規文書を開くと失われますが、よろしいですか?")) return;
+      if (isDirty && !window.confirm("保存されていない変更があります。新規文書を開くと失われますが、よろしいですか?")) return;
       pushClosedFile(currentPath);
       await applyNewDocumentLocal();
     },
@@ -150,7 +175,14 @@ const ctx = {
       if (format === "html") text = editor.getStandaloneHtml(currentName, true);
       else if (format === "html-plain") text = editor.getStandaloneHtml(currentName, false);
       else text = editor.getValue(); // pdf/pngは本文を使わない。docx/epubはMarkdown原文をPandocへ渡す。
-      bridge.postMessage({ type: "export", format, text });
+      let captureHeight;
+      if (format === "png") {
+        // PDF/印刷はbeforeprint/afterprintで自動的に展開・復元されるが、PNGは印刷パイプラインを
+        // 経由しないため、ここで明示的に展開し、C#側からの"export-done"到着時に復元する。
+        captureHeight = enterExportLayout();
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      }
+      bridge.postMessage({ type: "export", format, text, captureHeight });
     },
     print() {
       if (bridge) bridge.postMessage({ type: "print" });
@@ -158,7 +190,7 @@ const ctx = {
     },
     openSettings() { bridge?.postMessage({ type: "open-settings" }); },
     async closeWindow() {
-      if (titlebar.classList.contains("dirty") && !window.confirm("保存されていない変更があります。閉じてもよろしいですか?")) return;
+      if (isDirty && !window.confirm("保存されていない変更があります。閉じてもよろしいですか?")) return;
       if (bridge) bridge.postMessage({ type: "close" });
       else window.close();
     },
@@ -318,6 +350,10 @@ async function handleHostMessage(msg) {
       // 画像挿入(仕様書 R-07)。C#側でファイルコピー・相対パス解決を終えたものが届く。
       editor.applyAction("image", { alt: msg.alt ?? "", path: msg.path ?? "" });
       break;
+    case "export-done":
+      // PNGエクスポート完了(成功・失敗いずれでも届く)。enterExportLayout()での展開を復元する。
+      exitExportLayout();
+      break;
   }
 }
 
@@ -423,7 +459,7 @@ if (btnSettings) {
 }
 
 window.addEventListener("beforeunload", (e) => {
-  if (titlebar.classList.contains("dirty")) {
+  if (isDirty) {
     e.preventDefault();
     e.returnValue = "";
   }

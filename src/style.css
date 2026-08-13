@@ -230,6 +230,25 @@ html[data-theme="dark"] #theme-moon { display: none; }
 .menu-item-label { flex: 1; white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
 .menu-item-shortcut { color: var(--ink-sub); font-family: var(--font-mono); font-size: 10.5px; flex: none; }
 .menu-separator { height: 1px; background: var(--rule); margin: 4px 6px; }
+.menu-theme-btn { border: none; background: transparent; color: var(--ink-mute); font: inherit; cursor: pointer; padding: 4px 8px; border-radius: 6px; display: inline-flex; align-items: center; }
+.menu-theme-btn:hover { color: var(--ink); background: var(--accent-soft); }
+
+/* ===== エクスポート・印刷時のレイアウト(PDF/PNG/印刷でメニューバー等を除外し、
+   CodeMirrorの仮想化(visibleRangesのみDOM描画)を一時的に解除して全文書を描画する) ===== */
+body.export-layout #menubar,
+body.export-layout #statusbar,
+body.export-layout .search-panel { display: none !important; }
+body.export-layout, body.export-layout html { height: auto !important; overflow: visible !important; }
+body.export-layout #cm-host { flex: none !important; overflow: visible !important; position: static !important; }
+body.export-layout .cm-editor { height: auto !important; }
+body.export-layout .cm-scroller { overflow: visible !important; }
+@media print {
+  #menubar, #statusbar, .search-panel { display: none !important; }
+  html, body { height: auto !important; overflow: visible !important; }
+  #cm-host { flex: none !important; overflow: visible !important; position: static !important; }
+  .cm-editor { height: auto !important; }
+  .cm-scroller { overflow: visible !important; }
+}
 
 /* ===== 検索・置換パネル(仕様書 E-17〜E-19) ===== */
 .search-panel { position: absolute; top: 8px; right: 16px; z-index: 30; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow-pop); padding: 6px; display: flex; flex-direction: column; gap: 4px; }
