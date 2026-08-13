@@ -16,6 +16,11 @@ internal sealed class PaneApplicationContext : ApplicationContext
     private readonly List<MainForm> _windows = new();
     private readonly AppSettings _settings;
 
+    /// <summary>設定画面(独立ウィンドウ)。同時に1つしか開かないため単一の参照で持つ。
+    /// <see cref="_windows"/>には含めない(ウィンドウ数の勘定・終了判定の対象外にするため。
+    /// 詳細は<see cref="OpenSettingsWindow"/>と<see cref="OnWindowClosed"/>を参照)。</summary>
+    private SettingsWindow? _settingsWindow;
+
     /// <summary>--preloadで起動されたプロセスかどうか(B-1)。trueの間は、最後のウィンドウが
     /// 閉じられてもプロセスを終了させず、ウィンドウ0枚の常駐状態へ戻す(OnWindowClosed参照)。
     /// 一度trueになったらプロセスの生存期間中ずっとtrueのまま(常駐プロセスとしての性質)。</summary>
@@ -152,6 +157,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
             requestNewWindowWithContent: content => OpenWindow(null, null, content),
             requestSwitchDocument: SwitchToNextWindow,
             requestBroadcastSettings: BroadcastSettingsChanged,
+            requestOpenSettingsWindow: OpenSettingsWindow,
             droppedFile: droppedFile,
             initialFolderPath: initialFolderPath);
 
@@ -233,17 +239,42 @@ internal sealed class PaneApplicationContext : ApplicationContext
     }
 
     /// <summary>
-    /// 設定画面(WinForms版・HTML製ブリッジのどちらでも)で設定が保存された後に呼ばれる。
-    /// 設定はアプリ全体で共有されるため、保存した本人のウィンドウだけでなく、開いている
-    /// すべてのウィンドウへ apply-settings を再送して反映させる(requestSwitchDocumentと同じ、
-    /// MainFormからのコールバックとして受け取る流儀)。
+    /// 設定画面(WinForms版・HTML製ブリッジのどちらでも、本体ウィンドウ内モーダル・独立した
+    /// <see cref="SettingsWindow"/>のどちらからでも)で設定が保存された後に呼ばれる。
+    /// 設定はアプリ全体で共有されるため、開いているすべての本体ウィンドウへ apply-settings を
+    /// 再送して反映させる(requestSwitchDocumentと同じ、コールバックとして受け取る流儀)。
+    /// 呼び出し元(保存した本人のウィンドウ)を区別する必要が無いため引数は取らない。
     /// </summary>
-    private void BroadcastSettingsChanged(MainForm origin)
+    private void BroadcastSettingsChanged()
     {
         foreach (MainForm window in _windows)
         {
             window.PostCapabilities();
         }
+    }
+
+    /// <summary>
+    /// 設定画面(独立ウィンドウ)を開く。<paramref name="owner"/>(呼び出し元のウィンドウ)の
+    /// 中央に表示する。既に開いていれば新しく作らず前面に出してフォーカスするだけにする
+    /// (同時に1つしか開かない)。
+    /// </summary>
+    public void OpenSettingsWindow(Form owner)
+    {
+        if (_settingsWindow is { IsDisposed: false })
+        {
+            if (_settingsWindow.WindowState == FormWindowState.Minimized)
+            {
+                _settingsWindow.WindowState = FormWindowState.Normal;
+            }
+            _settingsWindow.Activate();
+            Logger.Write("OpenSettingsWindow: 既に開いているため前面へ");
+            return;
+        }
+
+        _settingsWindow = new SettingsWindow(owner, BroadcastSettingsChanged);
+        _settingsWindow.FormClosed += (_, _) => _settingsWindow = null;
+        _settingsWindow.Show();
+        Logger.Write("OpenSettingsWindow: 新規に開いた");
     }
 
     private void OnWindowClosed(MainForm form)
@@ -285,10 +316,15 @@ internal sealed class PaneApplicationContext : ApplicationContext
             if (_preload || !latest.QuitOnLastWindowClosed)
             {
                 string reason = _preload ? "preload起動" : "quitOnLastWindowClosed=false";
-                Logger.Write($"最後のウィンドウが閉じられた({reason})。ExitThreadは呼ばず常駐状態へ戻る");
+                Logger.Write($"最後のウィンドウが閉じられた({reason})。ExitThreadは呼ばず常駐状態へ戻る" +
+                    "(設定画面が開いていればそのまま開いた状態を維持する)");
             }
             else
             {
+                // アプリ全体を終了する。設定画面はウィンドウ数の勘定に含めていないため
+                // (_windowsに含まれない)、開いたままExitThreadすると取り残されてしまう。
+                // 明示的に閉じてからスレッドを終了する。
+                _settingsWindow?.Close();
                 ExitThread();
             }
         }

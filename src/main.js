@@ -520,10 +520,15 @@ const ctx = {
       if (bridge) bridge.postMessage({ type: "print" });
       else window.print();
     },
-    // 設定画面(仕様書 第2.10節 C-01〜C-14)。HTML製の設定画面(settings.js)を開く。
-    // ブリッジが無いブラウザ単体動作でも画面自体は開けるが、保存はできない
-    // (settings.js側で保存操作時にその旨を案内する)。
-    openSettings(category) { settingsUI?.open(category); },
+    // 設定画面(仕様書 第2.10節 C-01〜C-14)。本体ウィンドウより大きく表示できるよう、
+    // 独立した専用ウィンドウ(Pane/SettingsWindow.cs、src/settings-entry.js)をC#側に
+    // 開かせる(同時に1つしか開かない。既に開いていればC#側が前面に出す)。
+    // ブリッジが無いブラウザ単体動作(開発確認用)では専用ウィンドウを開かせようが無いため、
+    // 従来どおりHTML製のモーダル(settings.js)を出すフォールバックを残す。
+    openSettings(category) {
+      if (bridge) { bridge.postMessage({ type: "open-settings-window" }); return; }
+      settingsUI?.open(category);
+    },
     async closeWindow() {
       // 未保存の変更がある場合の保存確認はC#側(FormClosing)が一元的に行う
       // (ネイティブのXボタン・Alt+F4で閉じた場合と挙動を揃えるため)。

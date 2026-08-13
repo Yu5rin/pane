@@ -20,7 +20,13 @@
 //                        commands.js側の全域ショートカット発火を止めてもらう(bindShortcuts参照)。
 import { FILE_TYPES, CATEGORIES } from "./file-types.js";
 import { MENU_LABELS, isAssignableShortcut } from "./commands.js";
-import { DEFAULT_FONT_SIZE } from "./editor.js";
+
+// 本文フォントサイズの既定値(src/editor.js の DEFAULT_FONT_SIZE と同じ値)。
+// editor.jsから直接importしないのは、設定画面専用ウィンドウ(settings-entry.js)の
+// バンドルにCodeMirror本体を巻き込まないため(この定数1つのためだけにeditor.jsの
+// バンドルへ依存すると、settings-entry.js側のチャンクが不必要に肥大化する)。
+// editor.js側の値を変える場合はこちらも合わせて変更すること。
+const DEFAULT_FONT_SIZE = 15;
 
 // ---- アイコン(仕様書の絵文字禁止・アイコン規約: viewBox 0 0 24 24, stroke=currentColor) ----
 const ICON_ATTRS = 'viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"';
@@ -336,7 +342,11 @@ function fieldPath(ctx, key, kind, label, placeholder, desc) {
 
 const REPLACEMENT_TOKENS_DESC = "使える置換文字列: <code>{title}</code> <code>{page}</code> <code>{pages}</code> <code>{date}</code> <code>{time}</code> <code>{path}</code>";
 
-export function createSettings(ctx) {
+// mode: "modal"(既定、本文と同じウィンドウの中にオーバーレイで出す) | "page"
+// (専用ウィンドウの中身としてウィンドウ全体に広がる形で出す。設定専用ウィンドウ
+// (settings-entry.js)から使う。オーバーレイの黒背景・角丸・影を出さない点だけが違い、
+// DOM構造・データの流れ・保存/検証ロジックはすべて共通)。
+export function createSettings(ctx, { mode = "modal" } = {}) {
   let overlay = null;
   let navEl = null;
   let contentEl = null;
@@ -450,10 +460,14 @@ export function createSettings(ctx) {
 
   // ---- 開閉 ----
   function buildShell() {
+    const isPage = mode === "page";
     overlay = document.createElement("div");
-    overlay.className = "settings-modal-overlay";
+    overlay.className = isPage ? "settings-modal-overlay settings-modal-overlay-page" : "settings-modal-overlay";
+    // pageモード(専用ウィンドウ)はオーバーレイの背景の上に浮かぶモーダルダイアログではなく、
+    // ウィンドウの中身そのものなので、role="dialog"/aria-modalは付けない。
+    const dialogAttrs = isPage ? "" : ' role="dialog" aria-modal="true" aria-label="設定"';
     overlay.innerHTML = `
-      <div class="settings-modal" role="dialog" aria-modal="true" aria-label="設定">
+      <div class="settings-modal${isPage ? " settings-modal-page" : ""}"${dialogAttrs}>
         <div class="settings-modal-head">
           <div class="settings-modal-title">設定</div>
           <button type="button" class="settings-modal-close" aria-label="閉じる">${ICON_CLOSE}</button>
@@ -499,6 +513,10 @@ export function createSettings(ctx) {
     dirty = false;
     searchQuery = "";
     blockedExtensions = [];
+    // pageモード(専用ウィンドウ)では「閉じる」= ウィンドウそのものを閉じる。
+    // オーバーレイをDOMから外すだけのmodalモードと違い、C#側(SettingsWindow)へ
+    // 明示的に閉じるよう頼む必要がある。
+    if (mode === "page") ctx.bridge?.postMessage({ type: "close-settings-window" });
   }
 
   // Escapeで閉じる(仕様書)。キーバインド捕捉中はそちらを優先させ(行側のリスナーが処理する)、
@@ -1168,10 +1186,17 @@ export function createSettings(ctx) {
         </div>`;
     }).join("");
 
+    // Windowsは、アプリが自分で既定のアプリを書き換えることを禁止している(UserChoiceキーが
+    // ハッシュで保護されている)。そのため拡張子ごとに、Windows標準の「開く方法を選ぶ」
+    // ダイアログを直接開くボタンを出して、そこでPaneを選んでもらう形にする。
+    // 押すたびにその拡張子のダイアログが出るので、警告を読んで自分で設定を探す必要がない。
     const blockedBanner = blockedExtensions.length ? `
       <div class="ft-blocked-warn">
-        <p>次の拡張子はWindowsの「既定のアプリ」で他のアプリが選ばれているため、Paneのアイコン・ダブルクリック時の起動先は変わりません: ${blockedExtensions.map((e) => "." + e).join(" ")}</p>
-        <button type="button" class="btn tiny" data-action="open-default-apps-settings">Windowsの設定を開く</button>
+        <p>次の拡張子は、Windowsの「既定のアプリ」で他のアプリが選ばれています。Windowsの仕組み上アプリ側からは変更できないため、下のボタンから選び直してください(押すとWindowsの「開く方法を選ぶ」画面が出るので、Paneを選んでください)。</p>
+        <div class="ft-blocked-list">
+          ${blockedExtensions.map((e) => `<button type="button" class="btn tiny" data-open-with="${e}">.${e} を選び直す</button>`).join("")}
+        </div>
+        <button type="button" class="btn tiny" data-action="open-default-apps-settings">Windowsの設定画面を開く</button>
       </div>` : "";
 
     el.innerHTML = `
@@ -1192,6 +1217,13 @@ export function createSettings(ctx) {
 
     const openApps = el.querySelector('[data-action="open-default-apps-settings"]');
     if (openApps) openApps.addEventListener("click", () => ctx.bridge?.postMessage({ type: "open-default-apps-settings" }));
+
+    // 拡張子ごとの「開く方法を選ぶ」ダイアログ(C#側 DefaultAppsHelper.OpenWithDialog)。
+    for (const btn of el.querySelectorAll("[data-open-with]")) {
+      btn.addEventListener("click", () => {
+        ctx.bridge?.postMessage({ type: "open-with-dialog", extension: btn.dataset.openWith });
+      });
+    }
 
     extInputs = new Map(Array.from(el.querySelectorAll("input[data-ext]")).map((inp) => [inp.dataset.ext, inp]));
     langInputs = new Map(Array.from(el.querySelectorAll("input[data-lang]")).map((inp) => [inp.dataset.lang, inp]));

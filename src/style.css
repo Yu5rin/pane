@@ -676,6 +676,11 @@ html[data-theme="dark"] .cm-table th { background: rgba(61,193,181,.14); }
    潰れてしまい、設定画面が使えなくなるため。 */
 .settings-modal-overlay { position: fixed; inset: 0; z-index: 80; background: rgba(10,14,16,.4); display: flex; justify-content: center; align-items: center; padding: min(24px, 2vh) min(24px, 2vw); }
 .settings-modal { width: min(900px, 100%); height: min(80vh, 720px); max-height: 100%; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow-pop); overflow: hidden; }
+
+/* pageモード(設定専用ウィンドウ、settings-entry.js): 本体ウィンドウのオーバーレイモーダルと
+   同じDOM・スタイルを流用しつつ、黒背景・余白・角丸・影だけを外してウィンドウ全体に広げる。 */
+.settings-modal-overlay-page { position: static; inset: auto; background: transparent; padding: 0; width: 100%; height: 100%; }
+.settings-modal-page { width: 100%; height: 100%; max-height: none; border: none; border-radius: 0; box-shadow: none; }
 .settings-modal-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--rule); flex: none; }
 .settings-modal-title { font-size: 15px; font-weight: 700; }
 .settings-modal-close { border: none; background: transparent; color: var(--ink-sub); padding: 5px; border-radius: 6px; display: inline-flex; }
@@ -849,3 +854,6 @@ html[data-theme="dark"] .cm-table th { background: rgba(61,193,181,.14); }
    さらにスクロールが必要になっていた)。子は自然な高さのままにし、
    はみ出す分は .settings-content 自体のスクロールで見せる。 */
 .settings-content > * { flex: 0 0 auto; }
+
+/* 既定のアプリが他アプリになっている拡張子ごとの「選び直す」ボタンの並び。 */
+.ft-blocked-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }

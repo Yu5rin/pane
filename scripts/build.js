@@ -9,7 +9,7 @@ const esbuild = require("esbuild");
 const serve = process.argv.includes("--serve");
 const watch = process.argv.includes("--watch") || serve;
 
-const staticFiles = ["index.html", "style.css", "themes.css", "icon.svg"];
+const staticFiles = ["index.html", "settings-window.html", "style.css", "themes.css", "icon.svg"];
 
 function copyStaticFiles() {
   fs.mkdirSync("dist", { recursive: true });
@@ -187,7 +187,10 @@ const patchLezerMarkdownTable = {
 };
 
 const buildOptions = {
-  entryPoints: ["src/main.js"],
+  // main.js: 本体ウィンドウ(index.html)。settings-entry.js: 設定専用ウィンドウ
+  // (settings-window.html、Pane/SettingsWindow.cs)。splitting: trueのため、
+  // settings.js/commands.js/file-types.js等の共通コードはチャンクとして自動的に共有される。
+  entryPoints: ["src/main.js", "src/settings-entry.js"],
   bundle: true,
   format: "esm",
   splitting: true,
