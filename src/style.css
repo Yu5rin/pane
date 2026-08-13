@@ -72,6 +72,20 @@ html[data-theme="dark"] {
   --accent: #6FB3A8;
   --accent-soft: #1E2C2B;
 }
+
+/* ===== コードのハイライト配色(仕様書 第5章・第10.2節) =====
+   単独の色を決め打ちせず、上の6トークン(--ink / --ink-mute / --accent)から
+   color-mix()で派生させる。ライト/ダークとも再定義不要(--accent等が
+   テーマごとに切り替わるため自動的に追従する)。 */
+:root {
+  --code-kw: var(--accent);
+  --code-str: color-mix(in srgb, var(--accent) 70%, var(--ink) 30%);
+  --code-cmt: var(--ink-mute);
+  --code-num: color-mix(in srgb, var(--accent) 55%, var(--ink) 45%);
+  --code-fn: color-mix(in srgb, var(--ink) 75%, var(--accent) 25%);
+  --code-type: color-mix(in srgb, var(--accent) 40%, var(--ink) 60%);
+  --code-op: var(--ink-mute);
+}
 * { box-sizing: border-box; }
 [hidden] { display: none !important; } /* hidden属性はどのdisplay指定よりも優先する */
 html, body { margin: 0; height: 100%; overflow: hidden; } /* スクロールはサイドバー/エディタ内のみ */
