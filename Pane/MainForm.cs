@@ -27,6 +27,10 @@ internal sealed record DroppedFileContent(string Name, byte[] Bytes);
 internal sealed class MainForm : Form
 {
     private const string VirtualHostName = "pane.local";
+    /// <summary>ローカル画像配信専用の仮想ホスト名(不具合修正、OnLoadAsync/OnLocalFileResourceRequested参照)。
+    /// <see cref="VirtualHostName"/>(dist/固定割り当て)とは別に、都度リクエストされた実ファイルを
+    /// 検証のうえ返す。src/editor.js resolveImageSrcが生成するURLと対応させる。</summary>
+    private const string LocalFileHostName = "pane-file.local";
     private const int AutoSaveIntervalMs = 30_000;
     private const int ExternalChangeDebounceMs = 300;
 
@@ -357,6 +361,17 @@ internal sealed class MainForm : Form
         _webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
         _webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
 
+        // ローカル画像配信用の専用ホスト(不具合修正: 本文はhttps://pane.local/index.htmlとして
+        // 表示されており、そこ(pane.local、下でdist/へマッピング)には編集中の.mdと同じフォルダの
+        // 画像は存在しないため、"![](image-1.png)"のような相対パスが必ず404していた)。
+        // SetVirtualHostNameToFolderMapping(固定フォルダへの割り当て)ではなく
+        // AddWebResourceRequestedFilter + WebResourceRequestedで都度応答する方式にするのは、
+        // "../images/x.png"のように文書フォルダの外を指す相対パスや、"C:\..."のような絶対パスも
+        // 扱う必要があり、固定フォルダ割り当てだとそのフォルダの外を一切見せられないため。
+        // 範囲外アクセスの遮断はOnLocalFileResourceRequested/ResolveAllowedLocalFilePath参照。
+        _webView.CoreWebView2.AddWebResourceRequestedFilter($"https://{LocalFileHostName}/*", CoreWebView2WebResourceContext.All);
+        _webView.CoreWebView2.WebResourceRequested += OnLocalFileResourceRequested;
+
         string distPath = ResolveDistPath();
         Logger.Write($"distPath={distPath} (存在={Directory.Exists(distPath)}, index.html存在={File.Exists(Path.Combine(distPath, "index.html"))})");
         _webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
@@ -422,6 +437,245 @@ internal sealed class MainForm : Form
         string? exeDir = Path.GetDirectoryName(Environment.ProcessPath);
         return Path.Combine(exeDir ?? AppContext.BaseDirectory, "dist");
 #endif
+    }
+
+    /// <summary>
+    /// <see cref="LocalFileHostName"/>(ローカル画像配信用ホスト、OnLoadAsync参照)への
+    /// リクエストへ、実ファイルを都度読んで応答する。src/editor.js resolveImageSrcが
+    /// "https://pane-file.local/?path=&lt;実パスをencodeURIComponentしたもの&gt;" の形で
+    /// 相対パス・絶対パス双方をここへ投げてくる(クエリ文字列にした理由は同関数のコメント参照)。
+    ///
+    /// セキュリティ(必須): 読める範囲は<see cref="ResolveAllowedLocalFilePath"/>が判定する
+    /// 「編集中の全タブのフォルダ」と「サイドバーで開いているフォルダ」配下だけに限定する。
+    /// 範囲外・存在しないファイルはエラー応答を返しログに残す(悪意ある文書が
+    /// ![](C:\Users\...\秘密.txt) のように任意のローカルファイルを読ませようとする可能性を
+    /// 考慮したもの。任意のローカルファイルが読めるようになってはいけない)。
+    /// </summary>
+    private void OnLocalFileResourceRequested(object? sender, CoreWebView2WebResourceRequestedEventArgs e)
+    {
+        string requestedRaw = "(不明)";
+        try
+        {
+            var uri = new Uri(e.Request.Uri);
+            string? rawPath = ExtractPathQueryParam(uri);
+            if (rawPath is null)
+            {
+                e.Response = MakeLocalFileErrorResponse(400, "Bad Request");
+                return;
+            }
+            requestedRaw = rawPath;
+
+            string? resolved = ResolveAllowedLocalFilePath(rawPath);
+            if (resolved is null)
+            {
+                Logger.Write($"pane-file.local: 範囲外または不正なパスへのアクセスを拒否: {rawPath}");
+                e.Response = MakeLocalFileErrorResponse(403, "Forbidden");
+                return;
+            }
+            if (!File.Exists(resolved))
+            {
+                e.Response = MakeLocalFileErrorResponse(404, "Not Found");
+                return;
+            }
+
+            byte[] bytes = File.ReadAllBytes(resolved);
+            string contentType = ImageContentTypeFromExtension(Path.GetExtension(resolved));
+            e.Response = _webView.CoreWebView2.Environment.CreateWebResourceResponse(
+                new MemoryStream(bytes), 200, "OK", $"Content-Type: {contentType}\r\nCache-Control: no-store");
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException($"pane-file.localリクエストの処理に失敗: {requestedRaw}", ex);
+            try { e.Response = MakeLocalFileErrorResponse(500, "Internal Server Error"); }
+            catch { /* 応答生成自体の失敗はこれ以上どうしようもないため無視する */ }
+        }
+    }
+
+    private CoreWebView2WebResourceResponse MakeLocalFileErrorResponse(int statusCode, string reasonPhrase) =>
+        _webView.CoreWebView2.Environment.CreateWebResourceResponse(null, statusCode, reasonPhrase, "");
+
+    /// <summary>URIのクエリ文字列から"path"パラメータを取り出し、URLデコードして返す。無ければnull。</summary>
+    private static string? ExtractPathQueryParam(Uri uri)
+    {
+        string query = uri.Query; // 例: "?path=..."(先頭に"?"を含む)。無ければ""。
+        if (query.Length < 2 || query[0] != '?') return null;
+        foreach (string part in query[1..].Split('&'))
+        {
+            int eq = part.IndexOf('=');
+            string key = eq >= 0 ? part[..eq] : part;
+            if (key != "path") continue;
+            return Uri.UnescapeDataString(eq >= 0 ? part[(eq + 1)..] : "");
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// 要求されたパスが「現在編集中の全タブのフォルダ」または「サイドバーで開いているフォルダ」
+    /// 配下にあるかを検証し、あれば正規化した絶対パスを、範囲外またはパス自体が不正なら
+    /// nullを返す。Path.GetFullPathで".."等を解決してから判定するため、
+    /// "許可フォルダ\..\..\外部"のような脱出パスも正しく拒否できる
+    /// (<see cref="OnLocalFileResourceRequested"/>・<see cref="HandleReadLocalImageRequest"/>共用)。
+    ///
+    /// シンボリックリンク対策: Path.GetFullPathはリンクを解決せず文字列上のパスを正規化する
+    /// だけなので、「表面上は許可フォルダ配下に見えるが実体は外を指すリンク」を見逃してしまう
+    /// (実際のファイル読み込みはOSがリンクをそのまま辿るため)。File.ResolveLinkTargetで
+    /// リンクの実体まで解決し、その実体も許可フォルダ配下であることを別途確認する
+    /// (対象パス自体がリンクである場合のみ。リンクでなければ何もしない)。
+    /// </summary>
+    private string? ResolveAllowedLocalFilePath(string requestedPath)
+    {
+        if (string.IsNullOrEmpty(requestedPath)) return null;
+        string fullPath;
+        try
+        {
+            fullPath = Path.GetFullPath(requestedPath);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return null;
+        }
+
+        List<string> roots = GetAllowedLocalFileRoots().ToList();
+        if (!roots.Any(root => IsWithinRoot(fullPath, root))) return null;
+
+        try
+        {
+            // File.ResolveLinkTargetは対象が存在しないとFileNotFoundExceptionを投げるため、
+            // 実在するときだけ呼ぶ(存在しないファイルの404判定は呼び出し元
+            // [OnLocalFileResourceRequested/HandleReadLocalImageRequest]がFile.Existsで
+            // 別途行う責務であり、ここで「存在しない」を理由に範囲判定自体を拒否してはいけない)。
+            if (File.Exists(fullPath) || Directory.Exists(fullPath))
+            {
+                FileSystemInfo? finalTarget = File.ResolveLinkTarget(fullPath, returnFinalTarget: true);
+                if (finalTarget is not null)
+                {
+                    string resolvedFullPath = Path.GetFullPath(finalTarget.FullName);
+                    if (!roots.Any(root => IsWithinRoot(resolvedFullPath, root)))
+                    {
+                        Logger.Write($"pane-file.local: シンボリックリンクの実体が範囲外のため拒否: {fullPath} -> {resolvedFullPath}");
+                        return null;
+                    }
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // リンク解決自体に失敗した場合は安全側に倒して拒否する。
+            return null;
+        }
+
+        return fullPath;
+    }
+
+    /// <summary>許可フォルダの一覧: 現在編集中のファイルのフォルダ(タブ形式なら開いている
+    /// 全タブぶん)と、サイドバーで開いているフォルダ。パスとして不正なタブは無視する。</summary>
+    private IEnumerable<string> GetAllowedLocalFileRoots()
+    {
+        var roots = new List<string>();
+        void AddDirOf(string? filePath)
+        {
+            if (filePath is null) return;
+            try
+            {
+                string? dir = Path.GetDirectoryName(Path.GetFullPath(filePath));
+                if (dir is not null) roots.Add(dir);
+            }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+            {
+                // 不正なパスは許可対象に加えない(単に無視する)。
+            }
+        }
+
+        AddDirOf(_currentPath);
+        foreach (TabInfo tab in _tabInfos) AddDirOf(tab.Path);
+        if (_loadedFolderRootPath is not null)
+        {
+            try { roots.Add(Path.GetFullPath(_loadedFolderRootPath)); }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { }
+        }
+        return roots;
+    }
+
+    /// <summary>fullPathがroot配下(root自身を含む)かどうか。Windowsのファイルシステムは
+    /// 既定で大文字小文字を区別しないため、比較もOrdinalIgnoreCaseで行う
+    /// (別ドライブの大文字小文字違いだけの別フォルダを誤って許可することはない。
+    /// ドライブレターを含むフルパス同士の比較のため)。</summary>
+    private static bool IsWithinRoot(string fullPath, string root)
+    {
+        string normalizedRoot = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        string normalizedTarget = fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        return normalizedTarget.StartsWith(normalizedRoot, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>拡張子からContent-Typeを決める。未知の拡張子はoctet-streamにする
+    /// (直接&lt;img&gt;のsrcにできず壊れたアイコン表示になるだけで、任意のファイルが
+    /// 「画像として」実行される等の実害は無い。読める範囲自体はResolveAllowedLocalFilePathで
+    /// 別途制限済み)。</summary>
+    private static string ImageContentTypeFromExtension(string ext) => ext.ToLowerInvariant() switch
+    {
+        ".png" => "image/png",
+        ".jpg" or ".jpeg" => "image/jpeg",
+        ".gif" => "image/gif",
+        ".webp" => "image/webp",
+        ".svg" => "image/svg+xml",
+        ".bmp" => "image/bmp",
+        ".avif" => "image/avif",
+        ".ico" => "image/x-icon",
+        _ => "application/octet-stream",
+    };
+
+    /// <summary>
+    /// HTMLエクスポート(仕様書 X-02/X-03)でローカル画像をdata:として埋め込むための読み取り要求
+    /// (src/main.js requestLocalImageDataUri参照)。エクスポート後のHTMLは単体のファイルとして
+    /// 開かれ、pane-file.localホストは実行中のPaneアプリ内でしか使えないため、エクスポート時点で
+    /// base64化して埋め込む。範囲判定は<see cref="OnLocalFileResourceRequested"/>と全く同じ
+    /// <see cref="ResolveAllowedLocalFilePath"/>を使う(任意のローカルファイルを読めてはいけない、
+    /// という制約はエクスポート経由でも変わらないため)。
+    /// </summary>
+    private void HandleReadLocalImageRequest(JsonElement root)
+    {
+        TryGetInt(root, "requestId", out int requestId);
+        TryGetString(root, "path", out string path);
+
+        // 埋め込み画像1枚あたりの上限(base64化するとサイズが約1.33倍になるうえ、
+        // エクスポート結果のHTML自体に丸ごと同梱されるため、際限なく巨大なファイルを
+        // 埋め込んでしまわないよう上限を設ける。超えた場合はdata:埋め込みを諦め、
+        // JS側(md-to-html.js substituteImagePlaceholders)が元のパスへフォールバックする)。
+        const long maxEmbedBytes = 25 * 1024 * 1024;
+
+        string? resolved = ResolveAllowedLocalFilePath(path);
+        if (resolved is null)
+        {
+            Logger.Write($"read-local-image: 範囲外または不正なパスへのアクセスを拒否: {path}");
+            PostToWeb(new { type = "read-local-image-result", requestId, dataUri = (string?)null });
+            return;
+        }
+
+        try
+        {
+            var info = new FileInfo(resolved);
+            if (!info.Exists)
+            {
+                PostToWeb(new { type = "read-local-image-result", requestId, dataUri = (string?)null });
+                return;
+            }
+            if (info.Length > maxEmbedBytes)
+            {
+                Logger.Write($"read-local-image: サイズが大きいため埋め込みを省略({info.Length}バイト): {resolved}");
+                PostToWeb(new { type = "read-local-image-result", requestId, dataUri = (string?)null });
+                return;
+            }
+
+            byte[] bytes = File.ReadAllBytes(resolved);
+            string contentType = ImageContentTypeFromExtension(Path.GetExtension(resolved));
+            string base64 = Convert.ToBase64String(bytes);
+            PostToWeb(new { type = "read-local-image-result", requestId, dataUri = $"data:{contentType};base64,{base64}" });
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException($"read-local-image: 読み込みに失敗: {resolved}", ex);
+            PostToWeb(new { type = "read-local-image-result", requestId, dataUri = (string?)null });
+        }
     }
 
     private void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
@@ -546,6 +800,11 @@ internal sealed class MainForm : Form
                 break;
             case "insert-image":
                 HandleInsertImageRequest(root);
+                break;
+            case "read-local-image":
+                // HTMLエクスポートでのローカル画像data:埋め込み(仕様: エクスポート後のHTMLは
+                // pane-file.localホストが存在しない環境で単体のファイルとして開かれるため)。
+                HandleReadLocalImageRequest(root);
                 break;
             case "open-dropped-file":
                 HandleOpenDroppedFile(root);
