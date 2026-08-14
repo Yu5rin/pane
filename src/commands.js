@@ -13,6 +13,12 @@
 //     actions: { ... },       // main.js側のファイル操作・ダイアログ等のオーケストレーション
 //   }
 
+// Tabキーでのフォーカス閉じ込め・開閉時のフォーカス退避復帰は、独自ダイアログ(dialog.js)や
+// 設定画面(settings.js)と全く同じロジックのため、共通モジュール(focus-trap.js)を使う
+// (role="dialog" aria-modal="true"を付けているのにTabで背後のメニューバーへ抜けてしまう、
+// という不整合を無くすため)。
+import { trapTabKey, focusModal } from "./focus-trap.js";
+
 // Paneは仕様書上Windows専用(WinForms + WebView2)のため、修飾キーはCtrl固定でよい。
 const MOD = "Ctrl";
 
@@ -508,17 +514,24 @@ export function initMenuBar(container, commands, ctx) {
 // ---- コマンドパレット(Ctrl+Shift+P、仕様書 第10.1節) ----
 export function initCommandPalette(root, commands, ctx) {
   let overlay = null;
+  let restoreFocus = null; // focusModal()の戻り値。閉じたときに開く前の要素へフォーカスを戻す。
   function close() {
     overlay?.remove();
     overlay = null;
+    // 開く前にフォーカスがあった要素(メニューバーのボタン等)へ戻す(focus-trap.js)。
+    restoreFocus?.();
+    restoreFocus = null;
   }
   function open() {
     if (overlay) { close(); return; }
     const available = commands.filter((c) => !c.contextOnly && !(c.grayed?.(ctx) ?? false) && (c.enabled ? c.enabled(ctx) : true));
     overlay = document.createElement("div");
     overlay.className = "palette-overlay";
-    overlay.innerHTML = `<div class="palette"><input id="palette-input" placeholder="コマンドを検索…" autocomplete="off"><ul id="palette-list"></ul></div>`;
+    // role="dialog" aria-modal="true"は設定画面(settings.js)・独自ダイアログ(dialog.js)と
+    // 揃え、支援技術に「これはモーダルである」ことを伝える。
+    overlay.innerHTML = `<div class="palette" role="dialog" aria-modal="true" aria-label="コマンドパレット"><input id="palette-input" placeholder="コマンドを検索…" autocomplete="off"><ul id="palette-list"></ul></div>`;
     root.appendChild(overlay);
+    const paletteEl = overlay.querySelector(".palette");
     const input = overlay.querySelector("#palette-input");
     const list = overlay.querySelector("#palette-list");
     let sel = 0;
@@ -546,10 +559,16 @@ export function initCommandPalette(root, commands, ctx) {
       if (e.key === "ArrowDown") { e.preventDefault(); sel = Math.min(filtered.length - 1, sel + 1); render(); return; }
       if (e.key === "ArrowUp") { e.preventDefault(); sel = Math.max(0, sel - 1); render(); return; }
       if (e.key === "Enter") { e.preventDefault(); const cmd = filtered[sel]; if (cmd) { close(); cmd.run(); } return; }
+      // 一覧(li)側はTabで移動できる要素を持たない(結果はクリック/Enterで選ぶ設計のため)。
+      // フォーカス可能なのは検索欄(input)のみなので、trapTabKeyを通すと自身にとどまり続け、
+      // 結果的に背後のメニューバーへ抜けなくなる(focus-trap.js)。
+      trapTabKey(e, paletteEl);
     });
     overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
     filter();
-    input.focus();
+    // 開く前にフォーカスがあった要素を覚えつつ検索欄へ初期フォーカスする(focus-trap.js)。
+    // 閉じたときにこの記憶した要素へ戻す(close()参照)。
+    restoreFocus = focusModal(input);
   }
   return { open, close };
 }

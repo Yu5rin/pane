@@ -21,6 +21,11 @@
 import { FILE_TYPES, CATEGORIES } from "./file-types.js";
 import { MENU_LABELS, isAssignableShortcut } from "./commands.js";
 import { paneConfirm, paneAlert } from "./dialog.js";
+// Tabキーでのフォーカス閉じ込め・開閉時のフォーカス退避復帰は、独自ダイアログ(dialog.js)や
+// コマンドパレット(commands.js)と全く同じロジックのため、共通モジュール(focus-trap.js)を使う
+// (role="dialog" aria-modal="true"を付けているのにTabで背後のメニューバーへ抜けてしまう、
+// という不整合を無くすため。詳細はfocus-trap.js側のコメント参照)。
+import { trapTabKey, focusModal } from "./focus-trap.js";
 
 // 本文フォントサイズの既定値(src/editor.js の DEFAULT_FONT_SIZE と同じ値)。
 // editor.jsから直接importしないのは、設定画面専用ウィンドウ(settings-entry.js)の
@@ -196,7 +201,7 @@ const FIELD_DEFS = {
   // ---- 外観 ----
   theme: { kind: "enum", values: ["light", "dark", "system"], def: "system" },
   lightTheme: { kind: "enum", values: ["default", "sepia", "github", "solarized-light"], def: "default" },
-  darkTheme: { kind: "enum", values: ["default", "nord", "dracula", "solarized-dark"], def: "default" },
+  darkTheme: { kind: "enum", values: ["default", "nord", "dracula", "solarized-dark", "typora-night"], def: "default" },
   useSeparateThemeInDarkMode: { kind: "bool", def: true },
   customCssPath: { kind: "nullableString", def: "" },
   editorFontFamily: { kind: "nullableString", def: "" },
@@ -384,6 +389,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
   let msgEl = null;
   let saveBtn = null;
   let searchInput = null;
+  let restoreFocus = null; // focusModal()の戻り値。閉じたときに開く前の要素へフォーカスを戻す。
 
   let draft = null; // 編集中の値。get-settingsの応答(またはDEFAULTS)から作る作業コピー
   let dirty = false; // 未保存の変更があるか(閉じる際の確認に使う)
@@ -545,6 +551,9 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     dirty = false;
     searchQuery = "";
     blockedExtensions = [];
+    // 開く前にフォーカスがあった要素(設定ボタン等)へ戻す(focus-trap.js)。
+    restoreFocus?.();
+    restoreFocus = null;
     // pageモード(専用ウィンドウ)では「閉じる」= ウィンドウそのものを閉じる。
     // オーバーレイをDOMから外すだけのmodalモードと違い、C#側(SettingsWindow)へ
     // 明示的に閉じるよう頼む必要がある。
@@ -554,9 +563,15 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
   // Escapeで閉じる(仕様書)。キーバインド捕捉中はそちらを優先させ(行側のリスナーが処理する)、
   // ここでは何もしない。捕捉中かどうかはonKeydown側がcapturingCommandIdより先にリスナー登録
   // されているとは限らないため、ここで明示的に判定する。
+  // Tabキーはtrapatabkey(focus-trap.js)で.settings-modal配下に閉じ込める
+  // (role="dialog" aria-modal="true"を付けているのに背後のメニューバーへ抜けてしまう、
+  // という不整合を解消するため)。pageモード(専用ウィンドウ)には背後のメニューバーは
+  // 無いが、ウィンドウ内でTabがループする挙動自体は同じく自然なので区別しない。
   function onDocumentKeydown(e) {
     if (capturingCommandId) return;
-    if (e.key === "Escape") { e.preventDefault(); requestClose(); }
+    if (e.key === "Escape") { e.preventDefault(); requestClose(); return; }
+    const modalEl = overlay?.querySelector(".settings-modal");
+    if (modalEl) trapTabKey(e, modalEl);
   }
 
   async function requestClose() {
@@ -574,6 +589,9 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     dirty = false;
     buildShell();
     renderNav(); // カテゴリ一覧自体はdraft(get-settingsの応答)を待たずに出せる
+    // 開く前にフォーカスがあった要素(設定ボタン等)を覚えつつ、検索欄へ初期フォーカスする
+    // (focus-trap.js)。閉じたときにこの記憶した要素へ戻す(destroy()参照)。
+    restoreFocus = focusModal(searchInput);
     if (ctx.bridge) {
       // 開いたときは常に最新を取りに行く(先読みキャッシュが古い可能性・他ウィンドウでの
       // 変更に備えるため)。ただし応答を待たずに済むよう、キャッシュがあれば先にそれで
@@ -1203,6 +1221,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
             <option value="nord">Nord</option>
             <option value="dracula">Dracula</option>
             <option value="solarized-dark">Solarized Dark</option>
+            <option value="typora-night">Typora Night</option>
           </select>
         </label>
       </div>

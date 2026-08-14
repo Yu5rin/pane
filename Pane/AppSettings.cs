@@ -610,7 +610,7 @@ internal sealed class AppSettings
     public string DarkTheme
     {
         get => _darkTheme;
-        set => _darkTheme = ValidateEnum(value, "default", "default", "nord", "dracula", "solarized-dark");
+        set => _darkTheme = ValidateEnum(value, "default", "default", "nord", "dracula", "solarized-dark", "typora-night");
     }
 
     /// <summary>ダークモード時に(ライトモードとは)別のテーマを使うか。既定true。</summary>

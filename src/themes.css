@@ -1,7 +1,12 @@
 /* ===== テーマプリセット(仕様書 第2.10節 C-06) =====
    style.css側で定義済みのCSS変数(--paper/--surface/--ink/--ink-sub/--ink-mute/
-   --line/--rule/--accent/--accent-hover/--accent-soft/--code-bg)を上書きするだけで、
-   新しい変数は増やさない。
+   --line/--rule/--accent/--accent-hover/--accent-soft/--code-bg、および画面の各部を
+   個別に塗り分けるための--chrome-bg/--sidebar-bg/--titlebar-bg/--titlebar-fg)を
+   上書きするだけで、それ以外の新しい変数は増やさない。
+   --chrome-bg/--sidebar-bg/--titlebar-bg/--titlebar-fgは、指定しなければstyle.css側の
+   既定(それぞれ--paper/--surface、および「タイトルバーは本文の実描画色を送る」動作)へ
+   自動的に倒れるため、各プリセットは「他と違う色にしたい部位だけ」を書けばよい
+   (typora-nightプリセット参照)。 */
 
    適用の仕組み: main.jsがapply-settings受信時にdocument.documentElement(=html)へ
    data-light-theme="<id>" / data-dark-theme="<id>" を付与する(既定値は"default")。
@@ -111,4 +116,47 @@ html[data-theme="dark"][data-dark-theme="solarized-dark"] {
   --accent-hover: #4CA6E0;
   --accent-soft: #0E4B5E;
   --code-bg: #073642;
+}
+
+/* typora-night: Typoraの「Night」テーマ移植(ユーザー要望)。本文・サイドバー・
+   メニューバー/ステータスバー・タイトルバーをそれぞれ別の色にする、という要望の
+   実例として最初に用意したプリセット(このプリセットのために--chrome-bg/--sidebar-bg/
+   --titlebar-bg/--titlebar-fgを導入した)。
+   色の対応づけ:
+     --paper/--ink            … Typora Night本体の本文背景・文字色をそのまま。
+     --surface/--sidebar-bg/
+     --chrome-bg/--titlebar-bg … Typora Nightのサイドバー背景色(#2E3033)を、
+                                  浮遊UI(ドロップダウン等)・サイドバー・
+                                  メニューバー/ステータスバー・タイトルバーの
+                                  全部に揃え、Typora同様の統一感を出す。
+     --ink-sub                 … Typora Nightの--meta-content-color(#838A92、
+                                  フロントマター等のメタ情報色)。既存のink-subが
+                                  ink-muteよりわずかに明るい、という関係と揃う。
+     --ink-mute                … Typora Nightの--md-char-color(#6A7280、
+                                  #や*等のMarkdown記号の色。控えめな用途)。
+     --accent                  … Typora Nightの--primary-color(#a5b4cb)。
+     --accent-hover            … accentよりわずかに明るくしたバリエーション
+                                  (Typora Night側に対応する2色目が無いため、
+                                  他プリセットの傾向に倣い独自に決めた値)。
+     --accent-soft             … Typora Nightのホバー・アクティブ色(#43464B)。
+     --line/--rule             … Typora Nightの枠線色(#555555)。
+     --code-bg                 … コードブロック背景。Typora Night側に指定が無いため、
+                                  他プリセット同様、本文よりわずかに明るいグレーを
+                                  独自に決めた(--paper #363B40 → #3B4247)。 */
+html[data-theme="dark"][data-dark-theme="typora-night"] {
+  --paper: #363B40;
+  --surface: #2E3033;
+  --sidebar-bg: #2E3033;
+  --chrome-bg: #2E3033;
+  --titlebar-bg: #2E3033;
+  --titlebar-fg: #b8bfc6;
+  --ink: #b8bfc6;
+  --ink-sub: #838A92;
+  --ink-mute: #6A7280;
+  --line: #555555;
+  --rule: #555555;
+  --accent: #a5b4cb;
+  --accent-hover: #b7c3d9;
+  --accent-soft: #43464B;
+  --code-bg: #3B4247;
 }

@@ -267,25 +267,107 @@ function setDirty(v) {
 function setName(name) {
   currentName = name;
 }
+// ---- ステータスバーの幅対応(実機で確認された不具合の修正) ----
+// ウィンドウ幅を狭めると各項目が縮んでテキストが1〜2文字ずつ折り返し、height:24pxを
+// 超えて縦に伸び、本文エリアに被ってしまう。index.html側でnowrap+flex:noneにして
+// 「折り返んで縦に伸びる」こと自体は止めたが、それだけだと合計幅がstatusbarをはみ出す
+// だけなので、収まりきらない分はVSCode/Typoraに倣い優先度の低い項目から順に
+// 「ラベルを落とした短縮表示」→「非表示」の2段階で畳んでいく。サイドバー切替・編集モード・
+// 未保存表示・設定ボタンはこの対象に含めない(狭くても「いま何が起きているか」と
+// 「操作の入口」を失わせたくないため常に残す)。
+const STATUS_FIT_ORDER = ["zoom", "encoding", "lineEnding", "wrap", "count", "position"]; // 隠す優先度: 低い→高い
+const STATUS_FIT_ELS = {
+  zoom: statusZoom,
+  encoding: statusEncoding,
+  lineEnding: statusLineEnding,
+  wrap: statusWrapBtn,
+  count: statusCount,
+  position: statusPosition,
+};
+// 各項目のコンパクト表示(ラベルを落とした短い形)を、フルの文字列(既存のupdateXXX関数が
+// これまで通り組み立てる)から作る関数。
+const STATUS_FIT_COMPACT = {
+  zoom: (full) => full, // 元々「100%」のように短いので、コンパクト段階でもそのまま
+  encoding: (full) => full.replace(/^文字コード: /, ""), // 「文字コード: UTF-8」→「UTF-8」
+  lineEnding: (full) => full.replace(/^改行コード: /, ""), // 「改行コード: LF」→「LF」
+  // 折り返し用のアイコンをSVGで新規に用意するとこのタスクのスコープを超えるため、
+  // 既存のテキストのみの構成に合わせ、折り返し中のときだけ記号1文字(⏎)を残す形で
+  // 代用する(アイコン相当の最小表示、という独自判断)。
+  wrap: (full) => (full.includes("あり") ? "⏎" : ""),
+  count: (full) => full.replace(/文字/g, ""), // 「123文字」→「123」、「123文字(選択4文字)」→「123(選択4)」
+  position: (full) => full.replace(/^行 (\d+), 列 (\d+)$/, "$1:$2"), // 「行 1, 列 1」→「1:1」
+};
+// STATUS_FIT_ORDERの項目ごとに「コンパクト→非表示」の2段階があるため、フル(レベル0)から
+// STATUS_FIT_ORDER.length*2まで段階的に畳んでいく列。
+const STATUS_FIT_STAGES = STATUS_FIT_ORDER.flatMap((key) => [{ key, mode: "compact" }, { key, mode: "hidden" }]);
+let statusFitLevel = 0;
+const statusFitFullText = {};
+
+function statusFitModeAt(key, level) {
+  let mode = "full";
+  for (let i = 0; i < level && i < STATUS_FIT_STAGES.length; i++) {
+    if (STATUS_FIT_STAGES[i].key === key) mode = STATUS_FIT_STAGES[i].mode;
+  }
+  return mode;
+}
+function renderStatusFitItem(key) {
+  const el = STATUS_FIT_ELS[key];
+  const full = statusFitFullText[key] ?? "";
+  // 文字数(count)は「表示するかどうか」自体を設定(showWordCount)が別に持っている。
+  // fit機構のhidden判定と衝突しないよう、まずそちらを優先する。
+  if (key === "count" && !showWordCount) { el.hidden = true; return; }
+  const mode = statusFitModeAt(key, statusFitLevel);
+  if (mode === "hidden") { el.hidden = true; return; }
+  el.hidden = false;
+  el.textContent = mode === "compact" ? STATUS_FIT_COMPACT[key](full) : full;
+}
+function applyStatusFitLevel(level) {
+  statusFitLevel = level;
+  for (const key of STATUS_FIT_ORDER) renderStatusFitItem(key);
+}
+// 現在のstatusbarの幅に収まるレベルを探して適用する。子要素はすべてwhite-space:nowrap+
+// flex:noneのため、収まらないぶんは折り返さずscrollWidthへそのまま反映される
+// (clientWidthとの比較だけで「はみ出しているか」を判定できる)。
+function fitStatusBar() {
+  let level = 0;
+  applyStatusFitLevel(level);
+  while (level < STATUS_FIT_STAGES.length && statusbarEl.scrollWidth > statusbarEl.clientWidth) {
+    level++;
+    applyStatusFitLevel(level);
+  }
+}
+// keyの項目に「本来表示したいフルの文字列」を渡す。既存の各updateXXX関数の最後から呼ぶ
+// ことで、値自体はこれまで通り計算しつつ、実際にDOMへ書き込む内容は現在の幅に収まる
+// レベルに応じて出し分ける。
+function setStatusFitText(key, fullText) {
+  statusFitFullText[key] = fullText;
+  fitStatusBar();
+}
+// 幅の変化(ウィンドウリサイズ・サイドバー開閉等、statusbar自身が使える幅が変わりうる
+// あらゆる操作)を監視し、その都度収まるレベルへ再計算する。
+new ResizeObserver(() => fitStatusBar()).observe(statusbarEl);
+
 // 文字数(仕様書 W-01/W-03)。ステータスバーは軽い集計に留める(doc.lengthと選択範囲の
 // from/to差だけ、いずれもO(1))。単語数・段落数等の重い集計はポップアップを開いた時にだけ行う。
 function updateCount() {
-  if (!showWordCount) { statusCount.textContent = ""; return; }
+  if (!showWordCount) { setStatusFitText("count", ""); return; }
   const total = editor.getDocLength();
   const selLen = editor.getSelectionLength();
-  statusCount.textContent = selLen > 0 ? `${total}文字(選択 ${selLen}文字)` : `${total}文字`;
+  setStatusFitText("count", selLen > 0 ? `${total}文字(選択 ${selLen}文字)` : `${total}文字`);
 }
 // 行/列(仕様書 N-03)。カーソル位置から直接取れる軽量な情報なので、選択変更のたびに呼んでよい。
 function updatePosition() {
   const { line, col } = editor.getCursorInfo();
-  statusPosition.textContent = `行 ${line}, 列 ${col}`;
+  setStatusFitText("position", `行 ${line}, 列 ${col}`);
 }
 // ズーム率(仕様書 N-03)。既定サイズに対する本文フォントサイズの比率を表示する。
 function updateZoom() {
-  statusZoom.textContent = `${Math.round((editor.getFontSize() / DEFAULT_FONT_SIZE) * 100)}%`;
+  setStatusFitText("zoom", `${Math.round((editor.getFontSize() / DEFAULT_FONT_SIZE) * 100)}%`);
 }
 function updateWordCountVisibility() {
-  statusCount.hidden = !showWordCount;
+  // showWordCountの新しい値を見てhidden状態を更新し、表示/非表示の切り替えで空いた
+  // (または埋まった)幅ぶんを再計算する。
+  fitStatusBar();
   if (!showWordCount) wordCountPopup.close();
 }
 // カスタムCSS(仕様書 第2.10節 C-07)。<head>内に専用<style id="custom-css">を用意し、
@@ -328,6 +410,16 @@ function readPaintedColor(selectors, prop) {
   }
   return null;
 }
+// テーマプリセット(themes.css)が--titlebar-bg/--titlebar-fgを明示的に定義していれば、
+// それを読む(ユーザー要望: タイトルバーだけ本文と別の色にしたい)。style.css側では
+// この2つを定義しておらず、未指定のCSS変数のgetPropertyValueは空文字列を返すため、
+// 「定義されているかどうか」をそのまま判定に使える。値がrgb()形式でもHEX直書きでも
+// 両方送れるよう、rgb()ならHEXへ正規化し、それ以外(#RRGGBB等)はそのまま使う。
+function readTitleBarOverride(varName) {
+  const raw = getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+  if (!raw) return null;
+  return rgbToHex(raw) ?? raw;
+}
 let titleBarSyncTimer = null;
 function syncTitleBarColor() {
   if (!bridge) return;
@@ -340,17 +432,20 @@ function syncTitleBarColor() {
   const durations = getComputedStyle(document.body).transitionDuration || "0s";
   const maxSeconds = durations.split(",").reduce((max, s) => Math.max(max, parseFloat(s) || 0), 0);
   titleBarSyncTimer = setTimeout(() => {
-    const background = readPaintedColor([".cm-editor", "#cm-host", "body"], "backgroundColor");
-    const foreground = readPaintedColor([".cm-content", ".cm-editor", "body"], "color");
+    // --titlebar-bg/--titlebar-fgが定義されていれば最優先で使う。未定義なら従来どおり
+    // 本文エリアの実描画色を送る(テーマ切替・プリセット・カスタムCSSのどの経路の
+    // 変更にも同じ仕組みで追従できるようにするため)。
+    const background = readTitleBarOverride("--titlebar-bg") ?? readPaintedColor([".cm-editor", "#cm-host", "body"], "backgroundColor");
+    const foreground = readTitleBarOverride("--titlebar-fg") ?? readPaintedColor([".cm-content", ".cm-editor", "body"], "color");
     if (!background && !foreground) return;
-    console.log(`[titlebar] 本文エリアの実描画色をタイトルバーへ反映: background=${background}, foreground=${foreground}`);
+    console.log(`[titlebar] タイトルバーへ反映: background=${background}, foreground=${foreground}`);
     bridge.postMessage({ type: "titlebar-color", background, foreground });
   }, Math.round(maxSeconds * 1000) + 60);
 }
 
 function updateStatusMeta() {
-  statusEncoding.textContent = currentEncoding ? `文字コード: ${currentEncoding}` : "";
-  statusLineEnding.textContent = currentLineEnding ? `改行コード: ${currentLineEnding}` : "";
+  setStatusFitText("encoding", currentEncoding ? `文字コード: ${currentEncoding}` : "");
+  setStatusFitText("lineEnding", currentLineEnding ? `改行コード: ${currentLineEnding}` : "");
 }
 // 文字コード・改行コードの選択肢(仕様書 第6.1/6.2節)。Pane/TextFileService.csの
 // EncodingLabel/LineEndingLabelが返すラベル文字列とそのまま揃える(ParseEncodingLabel/
@@ -556,7 +651,7 @@ statusMode.addEventListener("click", () => {
   if (editor.getMode() === "code") openLanguagePicker();
 });
 function updateWrapButton() {
-  statusWrapBtn.textContent = wordWrapOn ? "折り返し: あり" : "折り返し: なし";
+  setStatusFitText("wrap", wordWrapOn ? "折り返し: あり" : "折り返し: なし");
 }
 function pushClosedFile(path) {
   if (!path) return;
