@@ -894,9 +894,23 @@ function buildEditorContextMenuTree(c, e) {
   if (!info) return null;
   const hasSelection = info.hasSelection;
 
+  // カラープレビュー(docs/カラープレビュー仕様.md 第4章): 色リテラルの上で右クリックした
+  // ときだけ、どのモード・どの文脈よりも先に「色を変更…」を出す。
+  // ラベルには色番号そのものを添える。ネイティブメニュー(Pane/NativeMenu.cs)は項目の左に
+  // 任意の色見本を描く仕組みを持たないため、代わりに文字で「どの色を編集するのか」が
+  // 分かるようにしている(例: 色を変更… (#14599F))。
+  const colorHead = info.color
+    ? [{
+        label: `色を変更… (${info.color.text})`,
+        run: () => editor.openColorPicker(info.color.from, info.color.to, info.color.text),
+        separatorAfter: true,
+      }]
+    : [];
+
   // ---- コード/プレーンテキストモード(第3章): マークダウン固有の項目は一切出さない ----
   if (mode !== "markdown") {
     const tree = [
+      ...colorHead,
       { label: "切り取り", enabled: hasSelection, run: () => document.execCommand("cut") },
       { label: "コピー", enabled: hasSelection, run: () => document.execCommand("copy") },
       { label: "貼り付け", run: () => pasteRichFromContextMenu() },
@@ -911,7 +925,7 @@ function buildEditorContextMenuTree(c, e) {
   }
 
   // ---- Markdownモード(第2章) ----
-  const tree = [];
+  const tree = [...colorHead];
 
   // 2.3〜2.9: 文脈固有セクション(該当する場合のみ)
   if (info.kind === "link") {
@@ -1286,6 +1300,9 @@ async function handleHostMessage(msg) {
       // スペルチェック(仕様書 spellCheckEnabled)。.cm-contentのspellcheck属性を切り替える。
       // spellCheckAutoCorrect(自動修正)はWebView2側の機能でJSからは制御できないため未実装。
       editor.setSpellCheck(!!msg.spellCheckEnabled);
+      // コード中のカラープレビュー(docs/カラープレビュー仕様.md、既定true)。
+      // C#側が未対応の版ではundefinedで届くため、その場合は既定のONを保つ。
+      editor.setColorPreviewInCode(msg.colorPreviewInCode !== false);
       // アウトラインに出す見出しの最大レベル(仕様書 chapterLevelInOutline、既定6)。
       // sidebar.jsは編集不可のため、共有の既定値(markdown-extras.jsのoutlineMaxLevel)を
       // ここで更新することでアウトライン・[toc]記法双方の絞り込みに反映させる。

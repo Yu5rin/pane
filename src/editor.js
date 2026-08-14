@@ -2,7 +2,7 @@
 // index.html から createEditor() で生成し、返り値のAPIで操作する。
 // 依存はすべてesbuildでビルド成果物(dist/)に同梱する。実行時に外部CDNへは一切到達しない。
 import { EditorView, keymap, Decoration, ViewPlugin, WidgetType, lineNumbers } from "@codemirror/view";
-import { EditorState, Compartment, StateEffect, StateField, Prec } from "@codemirror/state";
+import { EditorState, Compartment, StateEffect, StateField, Prec, Transaction } from "@codemirror/state";
 import { markdown } from "@codemirror/lang-markdown";
 import { Strikethrough, Table, Superscript, Subscript, Emoji, Autolink } from "@lezer/markdown";
 import { defaultKeymap, history, historyKeymap, indentWithTab, insertNewline, undo, redo, moveLineUp, moveLineDown, copyLineDown, deleteLine, indentLess, indentSelection, selectAll } from "@codemirror/commands";
@@ -17,6 +17,10 @@ import { renderMermaid } from "./mermaid-render.js";
 import { renderMarkdownToHtml, renderStandaloneHtml } from "./md-to-html.js";
 import { charClass, computeTextStats } from "./text-stats.js";
 import { sanitizeHtml } from "./html-sanitize.js";
+import {
+  CSS_COLOR_LANGS, findColorMatches, parseColorLiteral, formatColorLiteral,
+  readableTextColor, openColorPickerPanel,
+} from "./color-picker.js";
 
 // コードのハイライト配色(仕様書 第5章・第10.2節)。色は単独で決め打ちせず、
 // style.cssで定義した--code-*トークン(--ink/--ink-mute/--accentから派生)を参照する。
@@ -1532,6 +1536,183 @@ const codeMathBlockDecoField = StateField.define({
   provide: (f) => EditorView.decorations.from(f),
 });
 
+// ---- コード中のカラープレビュー・カラーピッカー(docs/カラープレビュー仕様.md) ----
+// 色の認識・パース・整形・パレット生成・コントラスト計算は src/color-picker.js に
+// まとめてある(自前実装、外部ライブラリ不使用)。ここでは「どこが色を出してよい文脈か」の
+// 判定(コードモード全体 / Markdownのコードフェンス内だけ)と、装飾(ViewPlugin)・
+// カラーピッカーの開閉だけを扱う。
+//
+// 現在の編集モード(markdown/code/plain)とコード言語は、docModeComp/livePreviewComp等の
+// Compartmentがモード切替のたびに丸ごと入れ替わってしまう(=そこに載せたStateFieldは
+// モード間で消えてしまう)ため、それらとは独立の常設フィールドとして持つ。
+// setFileMode/setCodeLanguageから、既存のCompartment再構成と一緒にこの効果も発行する。
+const setDocContext = StateEffect.define();
+const docContextField = StateField.define({
+  create: () => ({ mode: "markdown", language: null }),
+  update: (v, tr) => { for (const e of tr.effects) if (e.is(setDocContext)) v = e.value; return v; },
+});
+// colorPreviewInCode設定(既定true)。extTogglesFieldはMarkdownモードでしか存在しない
+// (livePreviewComp経由のため)ので、コードモードでも読めるようこちらも常設フィールドにする。
+const setColorPreviewEnabled = StateEffect.define();
+const colorPreviewEnabledField = StateField.define({
+  create: () => true,
+  update: (v, tr) => { for (const e of tr.effects) if (e.is(setColorPreviewEnabled)) v = e.value; return v; },
+});
+// カラーピッカーを開いている間、対象リテラルに枠線ハイライトを付ける(仕様書 4.4)。
+// ドキュメント変更(ライブ反映中の書き換え)にも範囲を追従させる。
+const setColorPickerHighlight = StateEffect.define();
+const colorPickerHighlightField = StateField.define({
+  create: () => null,
+  update(v, tr) {
+    for (const e of tr.effects) if (e.is(setColorPickerHighlight)) v = e.value;
+    if (v && tr.docChanged) v = { from: tr.changes.mapPos(v.from), to: tr.changes.mapPos(v.to, 1) };
+    return v;
+  },
+  provide: (f) => EditorView.decorations.from(f, (v) => (v ? Decoration.set([Decoration.mark({ class: "cm-color-picker-target" }).range(v.from, v.to)]) : Decoration.none)),
+});
+
+// スウォッチ(仕様書 3.1)。クリックできる要素にはしない(色の変更は右クリック経由、第4章)。
+class ColorSwatchWidget extends WidgetType {
+  constructor(rgba) { super(); this.rgba = rgba; }
+  eq(o) { return o.rgba.r === this.rgba.r && o.rgba.g === this.rgba.g && o.rgba.b === this.rgba.b && o.rgba.a === this.rgba.a; }
+  toDOM() {
+    const span = document.createElement("span");
+    span.className = "cm-color-swatch" + (this.rgba.a < 1 ? " cm-color-swatch-alpha" : "");
+    span.style.setProperty("--cm-color-swatch", `rgba(${this.rgba.r},${this.rgba.g},${this.rgba.b},${this.rgba.a})`);
+    return span;
+  }
+  ignoreEvent() { return false; }
+}
+
+// 現在のCSS変数(--paper/--ink)をRGBとして読む(コントラスト補正の基準色、仕様書 3.2)。
+function cssVarRgb(name, fallbackHex) {
+  const raw = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const parsed = parseColorLiteral(raw) || parseColorLiteral(fallbackHex);
+  return parsed ? { r: parsed.r, g: parsed.g, b: parsed.b } : { r: 0, g: 0, b: 0 };
+}
+
+// テキスト中の色リテラルを絶対位置つきで集める(呼び出し側が可視範囲だけに絞って呼ぶ)。
+function scanColorsInRange(state, from, to, allowNames, out) {
+  let pos = from;
+  while (pos <= to) {
+    const line = state.doc.lineAt(pos);
+    const chunkFrom = Math.max(line.from, from);
+    const chunkTo = Math.min(line.to, to);
+    if (chunkFrom < chunkTo) {
+      const text = state.sliceDoc(chunkFrom, chunkTo);
+      for (const m of findColorMatches(text, allowNames)) out.push({ from: chunkFrom + m.from, to: chunkFrom + m.to, raw: m.raw });
+    }
+    if (line.to >= to) break;
+    pos = line.to + 1;
+  }
+}
+// FencedCodeノード1個ぶんの「中身(フェンス記号を除いた部分)」の範囲。閉じフェンスの無い
+// 未終端コードブロックは対象外(livePreviewのFencedCode処理・codeBlockAtと同じ条件)。
+function fencedCodeContentRange(state, node) {
+  const marks = node.getChildren("CodeMark");
+  if (marks.length < 2) return null;
+  const openLine = state.doc.lineAt(node.from);
+  const closeLine = state.doc.lineAt(Math.max(node.from, node.to - 1));
+  const contentFrom = Math.min(openLine.to + 1, state.doc.length);
+  const contentTo = closeLine.number > openLine.number ? Math.max(contentFrom, closeLine.from - 1) : contentFrom;
+  const infoNode = node.getChild("CodeInfo");
+  const lang = infoNode ? state.doc.sliceString(infoNode.from, infoNode.to).trim().toLowerCase() : "";
+  return { from: contentFrom, to: contentTo, lang };
+}
+// 可視範囲(view.visibleRanges)だけを走査して色リテラルの一覧を返す(性能要件。
+// 全文書を毎回正規表現で舐めない)。適用先は仕様書第1章のとおり: コードモード全体、
+// Markdownモードはコードフェンスの中だけ。plainモードとMarkdown本文には適用しない。
+function collectVisibleColorLiterals(view) {
+  const { state } = view;
+  const ctxInfo = state.field(docContextField, false) ?? { mode: "markdown", language: null };
+  if (ctxInfo.mode === "plain") return [];
+  const out = [];
+  for (const { from, to } of view.visibleRanges) {
+    if (ctxInfo.mode === "code") {
+      scanColorsInRange(state, from, to, CSS_COLOR_LANGS.has(ctxInfo.language || ""), out);
+    } else {
+      syntaxTree(state).iterate({
+        from, to,
+        enter: (node) => {
+          if (node.name !== "FencedCode") return;
+          const range = fencedCodeContentRange(state, node.node);
+          if (!range) return false;
+          const scanFrom = Math.max(range.from, from), scanTo = Math.min(range.to, to);
+          if (scanFrom < scanTo) scanColorsInRange(state, scanFrom, scanTo, CSS_COLOR_LANGS.has(range.lang), out);
+          return false; // CodeText等の子ノードへは降りない(scanColorsInRangeで直接テキストを見るため)
+        },
+      });
+    }
+  }
+  return out;
+}
+// 指定位置(pos)を含む色リテラルを1つ返す(右クリックメニュー・editor.getColorLiteralAtの共通実装)。
+// collectVisibleColorLiteralsと違い可視範囲に縛られない(右クリック位置は常にDOM上=可視のため
+// 実用上は問題ないが、意味的にも「そのpos周辺の1行/1フェンス範囲だけ」を見るので軽量)。
+function colorLiteralAt(view, pos) {
+  const { state } = view;
+  const ctxInfo = state.field(docContextField, false) ?? { mode: "markdown", language: null };
+  if (ctxInfo.mode === "plain") return null;
+  if ((state.field(colorPreviewEnabledField, false) ?? true) === false) return null;
+  let scanFrom, scanTo, allowNames;
+  if (ctxInfo.mode === "code") {
+    const line = state.doc.lineAt(pos);
+    scanFrom = line.from; scanTo = line.to;
+    allowNames = CSS_COLOR_LANGS.has(ctxInfo.language || "");
+  } else {
+    const fn = findAncestorNode(state, pos, "FencedCode");
+    if (!fn) return null;
+    const range = fencedCodeContentRange(state, fn);
+    if (!range || pos < range.from || pos > range.to) return null; // フェンス記号・言語名の行は対象外
+    const line = state.doc.lineAt(pos);
+    scanFrom = Math.max(line.from, range.from);
+    scanTo = Math.min(line.to, range.to);
+    allowNames = CSS_COLOR_LANGS.has(range.lang);
+  }
+  if (scanFrom >= scanTo) return null;
+  const text = state.sliceDoc(scanFrom, scanTo);
+  for (const m of findColorMatches(text, allowNames)) {
+    const from = scanFrom + m.from, to = scanFrom + m.to;
+    if (pos < from || pos > to) continue;
+    const color = parseColorLiteral(m.raw);
+    if (!color) continue;
+    return { from, to, text: m.raw, color };
+  }
+  return null;
+}
+
+const colorPreviewPlugin = ViewPlugin.fromClass(class {
+  constructor(view) { this.decorations = this.build(view); }
+  update(u) {
+    if (u.docChanged || u.viewportChanged
+      || u.transactions.some((tr) => tr.effects.some((e) => e.is(setDocContext) || e.is(setColorPreviewEnabled) || e.is(themeRefreshEffect))))
+      this.decorations = this.build(u.view);
+  }
+  build(view) {
+    if ((view.state.field(colorPreviewEnabledField, false) ?? true) === false) return Decoration.none;
+    const literals = collectVisibleColorLiterals(view);
+    if (!literals.length) return Decoration.none;
+    const bgRgb = cssVarRgb("--paper", "#ffffff");
+    const inkRgb = cssVarRgb("--ink", "#000000");
+    // 色文字列をキーにしたコントラスト計算のキャッシュ(仕様書 3.2)。build()の呼び出しごとに
+    // 新しく作るだけで、テーマ切り替え(updateがthemeRefreshEffectで再構築)・カスタムCSS適用後の
+    // 最初の再構築時には自然に古い値を持ち越さない。
+    const cache = new Map();
+    const marks = [];
+    for (const lit of literals) {
+      const parsed = parseColorLiteral(lit.raw);
+      if (!parsed) continue;
+      let readable = cache.get(lit.raw);
+      if (!readable) { readable = readableTextColor(parsed, bgRgb, inkRgb); cache.set(lit.raw, readable); }
+      const style = `color:rgb(${Math.round(readable.r)},${Math.round(readable.g)},${Math.round(readable.b)})`;
+      marks.push({ from: lit.from, to: lit.to, deco: Decoration.mark({ attributes: { style } }) });
+      marks.push({ from: lit.from, to: lit.from, deco: Decoration.widget({ widget: new ColorSwatchWidget(parsed), side: -1 }) });
+    }
+    const ranges = marks.filter((m) => m.from < m.to || m.deco.spec.widget).map((m) => m.deco.range(m.from, m.to));
+    return Decoration.set(ranges, true);
+  }
+}, { decorations: (v) => v.decorations });
+
 // ---- 空白と改行(仕様書 whitespaceWhenWriting) ----
 // "ignore"のとき、段落内の単独改行(ソフトブレーク)を表示上だけ空白1つとして描画する
 // (ドキュメントのテキストは変えない)。ViewPluginが提供する装飾は改行をまたいで置換できない
@@ -2025,6 +2206,10 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
         spellCheckComp.of(EditorView.contentAttributes.of({ spellcheck: "false" })),
         livePreviewComp.of(livePreviewExt()),
         codeModeExtrasComp.of([]),
+        // コード中のカラープレビュー(docs/カラープレビュー仕様.md)。docModeComp/livePreviewComp
+        // のようにモードで丸ごと入れ替わるCompartmentには載せない(常設。モード判定自体は
+        // colorPreviewPlugin内でdocContextFieldを見て行う)。
+        docContextField, colorPreviewEnabledField, colorPickerHighlightField, colorPreviewPlugin,
         focusModeComp.of([]),
         typewriterComp.of([]),
         editable.of(EditorView.editable.of(true)),
@@ -2107,6 +2292,7 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
             // ソースコードモード(V-05)中は記法を隠さない生表示のままにする(sourceMode参照)。
             livePreviewComp.reconfigure(sourceMode ? [] : livePreviewExt()),
             codeModeExtrasComp.reconfigure([]),
+            setDocContext.of({ mode: "markdown", language: null }), // カラープレビュー(docs/カラープレビュー仕様.md)用
           ],
         });
         return;
@@ -2125,6 +2311,7 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
             docModeComp.reconfigure(support ? [support] : []),
             livePreviewComp.reconfigure([]),
             codeModeExtrasComp.reconfigure(codeModeExtras()),
+            setDocContext.of({ mode: "code", language: currentCodeLanguage }), // カラープレビュー用
           ],
         });
         return;
@@ -2136,6 +2323,7 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
           docModeComp.reconfigure([]),
           livePreviewComp.reconfigure([]),
           codeModeExtrasComp.reconfigure([]),
+          setDocContext.of({ mode: "plain", language: null }), // カラープレビュー用(plainには適用しない)
         ],
       });
     },
@@ -2159,12 +2347,76 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
           docModeComp.reconfigure(support ? [support] : []),
           livePreviewComp.reconfigure([]),
           codeModeExtrasComp.reconfigure(codeModeExtras()),
+          setDocContext.of({ mode: "code", language: currentCodeLanguage }), // カラープレビュー用
         ],
       });
     },
     // 現在コードモードで適用している言語ID。markdown/plainモード時、またはハイライトの
     // ロードに失敗しプレーン表示へフォールバックした場合はnull。
     getCodeLanguage: () => currentCodeLanguage,
+    // ---- コード中のカラープレビュー・カラーピッカー(docs/カラープレビュー仕様.md) ----
+    // colorPreviewInCode設定(既定true)。main.js側のapply-settings配線から呼ばれる想定
+    // (現状は本APIを公開するところまでで、main.jsへの実配線は別エージェントが行う。
+    // 報告の「main.jsに必要な変更」参照)。
+    setColorPreviewInCode: (on) => view.dispatch({ effects: setColorPreviewEnabled.of(on !== false) }),
+    isColorPreviewInCode: () => view.state.field(colorPreviewEnabledField, false) ?? true,
+    // 指定位置(ドキュメント座標)を含む色リテラルを返す(無ければnull)。
+    // { from, to, text, color: {r,g,b,a,notation} }。右クリックメニューの文脈判定
+    // (「色を変更…」の表示条件)・検証スクリプトの両方から使う共通の入口。
+    getColorLiteralAt: (pos) => colorLiteralAt(view, pos),
+    // 右クリックメニュー「色を変更…」から呼ぶ想定のカラーピッカー起動(仕様書 第4章)。
+    // from/to/colorTextはgetColorLiteralAt(pos)が返したものをそのまま渡す。
+    openColorPicker: (from, to, colorText) => {
+      const parsed = parseColorLiteral(colorText);
+      if (!parsed) return false;
+      const rFrom = view.coordsAtPos(from);
+      const rTo = view.coordsAtPos(Math.max(from, to - 1), -1);
+      if (!rFrom || !rTo) return false;
+      const anchorRect = {
+        left: Math.min(rFrom.left, rTo.left), right: Math.max(rFrom.right, rTo.right),
+        top: Math.min(rFrom.top, rTo.top), bottom: Math.max(rFrom.bottom, rTo.bottom),
+      };
+      const hasAlpha = (parsed.notation.kind === "hex" && (parsed.notation.hexLen === 4 || parsed.notation.hexLen === 8))
+        || (parsed.notation.kind !== "hex" && parsed.notation.kind !== "name" && !!parsed.notation.hasAlpha);
+      let curFrom = from, curTo = to;
+      view.dispatch({ effects: setColorPickerHighlight.of({ from, to }) });
+      const writeLive = (text) => {
+        view.dispatch({
+          changes: { from: curFrom, to: curTo, insert: text },
+          annotations: Transaction.addToHistory.of(false), // 仕様書 4.3: 中間状態はアンドゥ履歴に積まない
+        });
+        curTo = curFrom + text.length;
+      };
+      // ドラッグ中の中間状態はいずれもaddToHistory:falseで書き換えるだけ(履歴に一切残らない)。
+      // そのため確定時、そのまま閉じただけでは「開いた時の色→最終的な色」の変更が履歴のどこにも
+      // 記録されない(pressing undoが無関係な直前の編集を巻き戻してしまう)。これを避けるため、
+      // 確定の瞬間だけ (1)一旦「開いた時の色」へ無履歴で戻す → (2)そこから最終色への変更を
+      // 通常の(履歴に残る)1回のトランザクションとして発行する、という2段階にする。
+      // (2)の時点でのtr.startState.docは(1)により既に「開いた時の色」に戻っているため、
+      // その差分だけが正しく1回分のアンドゥ対象になる。
+      const finish = (finalText) => {
+        writeLive(colorText); // (1) 無履歴でいったん元へ戻す
+        if (finalText !== colorText) {
+          // (2) 履歴に残る1回の変更。userEventは既定の"input.type"系の結合対象外にする
+          // (直前の無関係な入力と同じグループへ自動結合され、アンドゥが1色ぶんを超えて
+          // 巻き戻ってしまうのを防ぐ。CodeMirrorの履歴結合はuserEvent未指定/"input.type"系だと
+          // 位置が隣接していれば直前のイベントへ自動的に結合されるため)。
+          view.dispatch({ changes: { from, to: from + colorText.length, insert: finalText }, userEvent: "input.colorPicker" });
+        }
+        view.dispatch({ effects: setColorPickerHighlight.of(null) });
+        view.focus();
+      };
+      openColorPickerPanel({
+        anchorRect,
+        initialColor: parsed,
+        hasAlpha,
+        formatColor: (rgba) => formatColorLiteral(rgba, parsed.notation),
+        onChange: (rgba) => writeLive(formatColorLiteral(rgba, parsed.notation)),
+        onCommit: (rgba) => finish(formatColorLiteral(rgba, parsed.notation)),
+        onCancel: () => finish(colorText), // 開いた時の色に戻す。履歴には何も残らない
+      });
+      return true;
+    },
     // 折り返し表示のON/OFF(仕様書 N-05)
     setWordWrap: (on) => view.dispatch({ effects: wrapComp.reconfigure(on ? EditorView.lineWrapping : []) }),
     // 自動ペアリング(仕様書 第2.10節 C-05)のON/OFF。既定はON。C#設定画面から呼ばれる想定。
@@ -2622,38 +2874,46 @@ export function resolveClickContext(view, x, y, targetEl) {
   const sel = state.selection.main;
   const hasSelection = !sel.empty;
 
-  if (domContext) return { ...domContext, hasSelection };
+  // カラープレビュー(docs/カラープレビュー仕様.md 第4章): 色リテラルの上での右クリックは
+  // 他のkind判定(表・コードブロック・見出し等)と独立に「色を変更…」を先頭に出す対象になる。
+  // どのkindが返るかに関わらず一律で info.color に載せる(main.js側でtree配列の先頭へ
+  // 追加できるようにするための情報。main.jsは本エディタが公開するgetColorLiteralAt/
+  // openColorPickerを呼ぶだけで済む)。
+  const colorLit = colorLiteralAt(view, pos);
+  const withColor = (obj) => (colorLit ? { ...obj, color: colorLit } : obj);
+
+  if (domContext) return withColor({ ...domContext, hasSelection });
 
   // ---- ここから先は生テキスト(構文木・行テキスト)からの判定 ----
   const t = tableAt(state, pos);
-  if (t) return { kind: "table", ...tableInfoFromPos(state, t, pos), hasSelection };
+  if (t) return withColor({ kind: "table", ...tableInfoFromPos(state, t, pos), hasSelection });
 
   const cb = codeBlockAt(view, pos);
-  if (cb) return { kind: "codeblock", ...cb, hasSelection };
+  if (cb) return withColor({ kind: "codeblock", ...cb, hasSelection });
 
   const m = mathAt(view, pos);
-  if (m) return { kind: "math", ...m, hasSelection };
+  if (m) return withColor({ kind: "math", ...m, hasSelection });
 
   const imgNode = findAncestorNode(state, pos, "Image");
   if (imgNode) {
     const info = imageInfoFromNode(state, imgNode);
-    if (info) return { kind: "image", ...info, hasSelection };
+    if (info) return withColor({ kind: "image", ...info, hasSelection });
   }
   const linkNode = findAncestorNode(state, pos, "Link");
   if (linkNode) {
     const info = linkInfoFromNode(state, linkNode);
-    if (info) return { kind: "link", ...info, hasSelection };
+    if (info) return withColor({ kind: "link", ...info, hasSelection });
   }
 
   const line = state.doc.lineAt(pos);
   const atx = line.text.match(/^ {0,3}(#{1,6})\s/);
-  if (atx) return { kind: "heading", level: atx[1].length, hasSelection };
+  if (atx) return withColor({ kind: "heading", level: atx[1].length, hasSelection });
 
   if (/^\s*(?:[-*+]\s+(?:\[[ xX]\]\s*)?|\d+\.\s+)/.test(line.text)) {
-    return { kind: "list", listType: detectListType(line.text), hasSelection };
+    return withColor({ kind: "list", listType: detectListType(line.text), hasSelection });
   }
 
-  return { kind: "paragraph", hasSelection };
+  return withColor({ kind: "paragraph", hasSelection });
 }
 
 // ツールバーの記法挿入(CodeMirror版)

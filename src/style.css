@@ -908,3 +908,230 @@ html[data-theme="dark"] .cm-table th { background: rgba(61,193,181,.14); }
 #cm-host .cm-scroller { line-height: var(--editor-line-height, 1.85); }
 /* コードモードは行番号の余白があるので、本文ほど左を空けない。 */
 #cm-host.mode-code .cm-content { padding-left: 12px !important; padding-right: 12px !important; max-width: none; }
+
+/* ===== コード中のカラープレビュー・カラーピッカー(docs/カラープレビュー仕様.md) =====
+   スウォッチ・カラーピッカーパネルとも、色は--paper/--ink/--accent等の既存トークンから
+   派生させる(CLAUDE.md: ここにない色を新たに導入しない)。市松模様(半透明の可視化)だけは
+   固有の値が必要なので、--ink由来のcolor-mix()でテーマに自動追従する形にする。 */
+:root {
+  --cp-checker: color-mix(in srgb, var(--ink) 16%, transparent);
+}
+
+/* ---- インラインスウォッチ(仕様書 3.1) ---- クリックできる要素にはしない(非インタラクティブ)。 */
+.cm-color-swatch {
+  display: inline-block;
+  box-sizing: border-box;
+  width: .85em;
+  height: .85em;
+  margin-right: .25em;
+  border-radius: 2px;
+  vertical-align: -0.1em;
+  border: 1px solid color-mix(in srgb, var(--ink) 35%, transparent);
+  background-color: var(--cm-color-swatch);
+}
+/* 半透明の色(仕様書 3.1): 市松模様の上に色を重ねて透明度を一目で分かるようにする。
+   先頭のグラデーション層(単色2色指定=ベタ塗り)がARGB色そのまま、その下が市松模様。 */
+.cm-color-swatch-alpha {
+  background-color: var(--paper);
+  background-image:
+    linear-gradient(var(--cm-color-swatch), var(--cm-color-swatch)),
+    linear-gradient(45deg, var(--cp-checker) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--cp-checker) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--cp-checker) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--cp-checker) 75%);
+  background-size: 100% 100%, 6px 6px, 6px 6px, 6px 6px, 6px 6px;
+  background-position: 0 0, 0 0, 0 3px, 3px -3px, -3px 0;
+}
+/* カラーピッカーを開いている間、対象の色リテラルに付ける枠線ハイライト(仕様書 4.4)。 */
+.cm-color-picker-target {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+
+/* ---- カラーピッカーパネル(仕様書 第4章) ---- position:fixedで編集領域の上に重ねる。 */
+.color-picker-panel {
+  position: fixed;
+  z-index: 80; /* .menu-dropdown(70)より上に出す */
+  width: 264px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  box-sizing: border-box;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: var(--shadow-pop);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--ink);
+  font-family: var(--font-body);
+}
+.color-picker-panel:focus { outline: none; }
+
+.cp-preview { display: flex; align-items: center; gap: 10px; }
+.cp-preview-swatch-wrap {
+  flex: none;
+  width: 36px; height: 36px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background-image:
+    linear-gradient(45deg, var(--cp-checker) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--cp-checker) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--cp-checker) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--cp-checker) 75%);
+  background-size: 8px 8px;
+  background-position: 0 0, 0 4px, 4px -4px, -4px 0;
+}
+.cp-preview-swatch { display: block; width: 100%; height: 100%; background: var(--cp-color); }
+.cp-preview-text { min-width: 0; }
+.cp-primary { font-family: var(--font-mono); font-size: 13.5px; font-weight: 600; word-break: break-all; }
+.cp-secondary { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-sub); margin-top: 2px; word-break: break-all; }
+
+/* 彩度×明度の四角形。ドラッグ操作の実際のs/lはJS側で正しいHSL式から計算するが、
+   背景の見た目は一般的なCSSグラデーション近似(黒〜透明・白〜透明を色相ベースに重ねる)を使う。 */
+.cp-sl-box {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1.7 / 1;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  overflow: hidden;
+  cursor: crosshair;
+  touch-action: none;
+}
+.cp-sl-gradient {
+  position: absolute; inset: 0;
+  background:
+    linear-gradient(to top, #000, rgba(0, 0, 0, 0)),
+    linear-gradient(to right, #fff, rgba(255, 255, 255, 0)),
+    hsl(var(--cp-hue, 0), 100%, 50%);
+}
+.cp-sl-handle {
+  position: absolute;
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .45), 0 1px 3px rgba(0, 0, 0, .3);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.cp-hue-slider {
+  position: relative;
+  width: 100%; height: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  cursor: pointer;
+  touch-action: none;
+  background: linear-gradient(to right, red 0%, #ff0 17%, #0f0 33%, #0ff 50%, #00f 67%, #f0f 83%, red 100%);
+}
+.cp-hue-handle {
+  position: absolute; top: 50%;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid var(--surface);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .45);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+/* 不透明度スライダー(仕様書 4.1: 元のリテラルがアルファを持っていた場合のみ表示)。
+   市松模様の上に「透明→現在の色」のグラデーションを重ねる。 */
+.cp-alpha-slider {
+  position: relative;
+  width: 100%; height: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  overflow: hidden;
+  cursor: pointer;
+  touch-action: none;
+}
+.cp-alpha-track {
+  position: absolute; inset: 0;
+  background-image:
+    linear-gradient(to right, transparent, rgb(var(--cp-alpha-color, 0, 0, 0))),
+    linear-gradient(45deg, var(--cp-checker) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--cp-checker) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--cp-checker) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--cp-checker) 75%);
+  background-size: 100% 100%, 6px 6px, 6px 6px, 6px 6px, 6px 6px;
+  background-position: 0 0, 0 0, 0 3px, 3px -3px, -3px 0;
+}
+.cp-alpha-handle {
+  position: absolute; top: 50%;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid var(--surface);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .45);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.cp-numeric { display: grid; grid-template-columns: repeat(3, 1fr) 1.5fr; gap: 6px; }
+.cp-num-field { display: flex; flex-direction: column; gap: 2px; font-size: 10.5px; color: var(--ink-sub); }
+.cp-num-field input {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--ink);
+  background: var(--input-bg);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 4px 6px;
+  width: 100%;
+  box-sizing: border-box;
+}
+.cp-num-field input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.cp-eyedropper {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  border-radius: 6px;
+  padding: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.cp-eyedropper:hover { background: var(--accent-soft); border-color: var(--accent); }
+
+.cp-palettes { display: flex; flex-direction: column; gap: 8px; }
+.cp-palette-group { display: flex; flex-direction: column; gap: 4px; }
+.cp-palette-title { font-size: 10.5px; color: var(--ink-sub); }
+.cp-palette-row { display: flex; gap: 6px; }
+/* パレットの色: 左クリックで確定、右クリックでコピー(仕様書 4.2 追加要件)。
+   ブラウザ既定のコンテキストメニューは出さない(色-picker.js側でe.preventDefault())。 */
+.cp-palette-swatch {
+  position: relative;
+  flex: 1;
+  height: 22px;
+  min-width: 0;
+  border-radius: 5px;
+  border: 1px solid color-mix(in srgb, var(--ink) 20%, transparent);
+  padding: 0;
+  cursor: pointer;
+}
+.cp-palette-swatch:hover, .cp-palette-swatch:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.cp-copy-toast {
+  position: absolute;
+  left: 50%; bottom: calc(100% + 5px);
+  transform: translateX(-50%);
+  background: var(--ink);
+  color: var(--paper);
+  font-size: 10px;
+  line-height: 1.4;
+  padding: 3px 7px;
+  border-radius: 4px;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: var(--shadow-pop);
+  z-index: 1;
+}
+
+.cp-actions { display: flex; justify-content: flex-end; }

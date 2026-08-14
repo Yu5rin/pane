@@ -1606,6 +1606,7 @@ internal sealed class MainForm : Form
             typewriterKeepCaretCentered = settings.TypewriterKeepCaretCentered,
             spellCheckEnabled = settings.SpellCheckEnabled,
             spellCheckAutoCorrect = settings.SpellCheckAutoCorrect,
+            colorPreviewInCode = settings.ColorPreviewInCode,
             readingSpeedWpm = settings.ReadingSpeedWpm,
             autoDetectMode = settings.AutoDetectMode,
             fileModeOverrides = settings.FileModeOverrides,

@@ -68,6 +68,7 @@ internal static class SettingsBridge
             typewriterKeepCaretCentered = settings.TypewriterKeepCaretCentered,
             spellCheckEnabled = settings.SpellCheckEnabled,
             spellCheckAutoCorrect = settings.SpellCheckAutoCorrect,
+            colorPreviewInCode = settings.ColorPreviewInCode,
             readingSpeedWpm = settings.ReadingSpeedWpm,
             autoDetectMode = settings.AutoDetectMode,
             fileModeOverrides = settings.FileModeOverrides,
@@ -272,6 +273,7 @@ internal static class SettingsBridge
         if (TryGetBool(s, "typewriterKeepCaretCentered", out bool typewriterKeepCaretCentered)) settings.TypewriterKeepCaretCentered = typewriterKeepCaretCentered;
         if (TryGetBool(s, "spellCheckEnabled", out bool spellCheckEnabled)) settings.SpellCheckEnabled = spellCheckEnabled;
         if (TryGetBool(s, "spellCheckAutoCorrect", out bool spellCheckAutoCorrect)) settings.SpellCheckAutoCorrect = spellCheckAutoCorrect;
+        if (TryGetBool(s, "colorPreviewInCode", out bool colorPreviewInCode)) settings.ColorPreviewInCode = colorPreviewInCode;
         if (TryGetInt(s, "readingSpeedWpm", out int readingSpeedWpm)) settings.ReadingSpeedWpm = readingSpeedWpm;
         // AppSettingsの各setterが不正値を既定値へ正規化するため、ここでは受け取った値をそのまま代入すればよい。
         if (TryGetString(s, "autoDetectMode", out string autoDetectMode)) settings.AutoDetectMode = autoDetectMode;
