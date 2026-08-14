@@ -936,7 +936,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
       <div class="settings-group">
         <div class="settings-group-title">スペルチェック</div>
         ${fieldCheckbox("spellCheckEnabled", "スペルチェックを有効にする")}
-        ${fieldCheckbox("spellCheckAutoCorrect", "スペルチェックの自動修正を有効にする")}
+        <label class="settings-checkbox-row"><input type="checkbox" data-field="spellCheckAutoCorrect"><span class="settings-checkbox-title">スペルチェックの自動修正を有効にする<span class="settings-field-desc">WebView2の制約により、この項目からは制御できません。Windowsの入力設定に従います</span></span></label>
       </div>
       <div class="settings-group">
         <div class="settings-group-title">編集モードの自動判定</div>

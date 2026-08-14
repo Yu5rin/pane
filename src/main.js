@@ -1726,6 +1726,8 @@ async function handleHostMessage(msg) {
         shiftTabAutoIndent: msg.shiftTabAutoIndent,
         autoPairMarkdown: msg.autoPairMarkdown,
         // 記法の書き方(メニューバーから作るときの形。仕様書「記法の書き方」節)。
+        strictMode: msg.strictMode,
+        codeBlockLineNumbers: msg.codeBlockLineNumbers,
         headingStyle: msg.headingStyle,
         unorderedListMarker: msg.unorderedListMarker,
         orderedListMarker: msg.orderedListMarker,
@@ -1774,7 +1776,13 @@ async function handleHostMessage(msg) {
       // :root[data-theme="light"][data-light-theme="..."] 等のセレクタで上書きされる。
       // 未設定/不明な値でも属性自体は付けておき、"default"相当(上書きなし)にフォールバックする。
       document.documentElement.dataset.lightTheme = msg.lightTheme || "default";
-      document.documentElement.dataset.darkTheme = msg.darkTheme || "default";
+      // useSeparateThemeInDarkMode(既定true)がfalseのときは、ダークモードでも
+      // darkThemeのプリセットを適用しない(=lightThemeの選択をそのまま使う)。themes.css側の
+      // ダーク用プリセットは"nord"/"dracula"/"solarized-dark"のIDにしか反応しないため、
+      // ここにlightThemeの値(例: "sepia")を入れると一致するセレクタが無くなり、結果として
+      // ダーク既定色(style.cssの無地の配色)のまま=darkThemeによる上書きが効かなくなる。
+      document.documentElement.dataset.darkTheme =
+        (msg.useSeparateThemeInDarkMode === false ? msg.lightTheme : msg.darkTheme) || "default";
       // CodeMirror側(キャレット色・選択範囲色)はgetComputedStyleで一度だけ色を読むため、
       // ライト/ダーク切替・プリセット切替のいずれでも都度refreshThemeして反映させる。
       editor.refreshTheme();

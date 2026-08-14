@@ -41,16 +41,23 @@ internal static class FolderService
     /// ファイル数が多い場合も編集操作をブロックしない」に基づき、Task.Runで
     /// バックグラウンドスレッド上で実行する。
     /// </summary>
-    public static Task<FolderScanResult> ScanAsync(string rootPath, CancellationToken ct = default)
+    /// <param name="rootPath">走査対象のルートフォルダ。</param>
+    /// <param name="showHiddenFiles">設定 showHiddenFilesInTree。trueなら隠し・システム属性の
+    /// ファイル/フォルダ、およびドット始まりの名前も含める(既定false=従来どおり除外)。</param>
+    /// <param name="excludePatterns">設定 fileTreePatterns。GlobMatcherで判定し、除外に該当する
+    /// ファイル・フォルダを走査結果から取り除く(既定は空=何も除外しない)。</param>
+    public static Task<FolderScanResult> ScanAsync(
+        string rootPath, bool showHiddenFiles = false, IReadOnlyList<string>? excludePatterns = null, CancellationToken ct = default)
     {
+        excludePatterns ??= Array.Empty<string>();
         return Task.Run(() =>
         {
             string fullRoot = Path.GetFullPath(rootPath);
             var entries = new List<FolderEntry>();
             bool truncated = false;
 
-            Logger.Write($"FolderService.ScanAsync開始: {fullRoot}");
-            ScanDirectory(fullRoot, fullRoot, entries, ref truncated, ct);
+            Logger.Write($"FolderService.ScanAsync開始: {fullRoot}, showHiddenFiles={showHiddenFiles}, excludePatterns={excludePatterns.Count}件");
+            ScanDirectory(fullRoot, fullRoot, entries, ref truncated, showHiddenFiles, excludePatterns, ct);
             Logger.Write($"FolderService.ScanAsync完了: {fullRoot}, 件数={entries.Count}, truncated={truncated}");
 
             // ディレクトリ優先→名前順(大小文字を区別しない)で安定した表示順にする。
@@ -64,7 +71,9 @@ internal static class FolderService
         }, ct);
     }
 
-    private static void ScanDirectory(string rootPath, string currentDir, List<FolderEntry> entries, ref bool truncated, CancellationToken ct)
+    private static void ScanDirectory(
+        string rootPath, string currentDir, List<FolderEntry> entries, ref bool truncated,
+        bool showHiddenFiles, IReadOnlyList<string> excludePatterns, CancellationToken ct)
     {
         if (truncated) return;
         ct.ThrowIfCancellationRequested();
@@ -89,14 +98,26 @@ internal static class FolderService
             ct.ThrowIfCancellationRequested();
             string name = Path.GetFileName(dir);
 
-            if (ExcludedDirectoryNames.Contains(name) || name.StartsWith('.'))
+            // VCS・ビルド成果物のフォルダは、隠しファイル表示の設定に関わらず常に除外する
+            // (「隠しファイルを表示する」は"見えないファイルを見せる"設定であり、.gitの中身のような
+            // ノイズをあえて列挙したいという意図ではないと判断したため。既存のこの判断はそのまま残す)。
+            if (ExcludedDirectoryNames.Contains(name))
             {
                 continue;
             }
 
-            if (IsHiddenOrSystem(dir))
+            // 隠しファイル表示がOFF(既定)のときだけ、ドット始まりの名前・Hidden/System属性を除外する。
+            // ドット始まりの判定はOS非依存(Windows以外の開発・テスト環境でも同じ結果になる)なので、
+            // FileAttributes.Hiddenが実際には付いていない環境でも一貫して隠しファイル扱いにできる。
+            if (!showHiddenFiles && (name.StartsWith('.') || IsHiddenOrSystem(dir)))
             {
                 continue;
+            }
+
+            string dirRelativePath = ToRelativePath(rootPath, dir);
+            if (GlobMatcher.IsExcluded(dirRelativePath, excludePatterns))
+            {
+                continue; // 除外パターンに一致したフォルダは、配下ごと走査しない(.gitignoreと同じ考え方)
             }
 
             if (entries.Count >= MaxEntries)
@@ -105,8 +126,8 @@ internal static class FolderService
                 return;
             }
 
-            entries.Add(new FolderEntry(dir, name, ToRelativePath(rootPath, dir), IsDirectory: true));
-            ScanDirectory(rootPath, dir, entries, ref truncated, ct);
+            entries.Add(new FolderEntry(dir, name, dirRelativePath, IsDirectory: true));
+            ScanDirectory(rootPath, dir, entries, ref truncated, showHiddenFiles, excludePatterns, ct);
             if (truncated) return;
         }
 
@@ -119,7 +140,16 @@ internal static class FolderService
                 continue;
             }
 
-            if (IsHiddenOrSystem(file))
+            // ファイル側は元々ドット始まりを特別扱いしていなかった(隠しフォルダの除外とは非対称だが、
+            // showHiddenFiles=false時の「従来の見た目」を保つため、その非対称性はそのまま残す)。
+            if (!showHiddenFiles && IsHiddenOrSystem(file))
+            {
+                continue;
+            }
+
+            string name = Path.GetFileName(file);
+            string relativePath = ToRelativePath(rootPath, file);
+            if (GlobMatcher.IsExcluded(relativePath, excludePatterns))
             {
                 continue;
             }
@@ -130,7 +160,7 @@ internal static class FolderService
                 return;
             }
 
-            entries.Add(new FolderEntry(file, Path.GetFileName(file), ToRelativePath(rootPath, file), IsDirectory: false));
+            entries.Add(new FolderEntry(file, name, relativePath, IsDirectory: false));
         }
     }
 

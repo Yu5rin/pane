@@ -63,7 +63,9 @@ internal static class SearchService
             return;
         }
 
-        FolderScanResult scan = await FolderService.ScanAsync(rootPath, ct);
+        // 全文検索の対象範囲は本タスクの対象外(仕様書上も検索とツリー表示は別要件)のため、
+        // 隠しファイル表示・除外パターンの設定は据え置き、従来どおりの既定(除外なし)で走査する。
+        FolderScanResult scan = await FolderService.ScanAsync(rootPath, ct: ct);
         ct.ThrowIfCancellationRequested();
 
         var files = scan.Entries.Where(entry => !entry.IsDirectory).ToList();
