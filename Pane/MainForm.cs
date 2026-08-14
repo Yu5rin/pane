@@ -108,6 +108,13 @@ internal sealed class MainForm : Form
     private string? _titlebarBackgroundOverride;
     private string? _titlebarForegroundOverride;
 
+    /// <summary><see cref="_titlebarBackgroundOverride"/>の読み取り専用公開。<see cref="PaneDialog"/>が
+    /// 自前ダイアログの配色を本文エリアと同じ色に揃えるために参照する(オーナーがこのウィンドウの場合のみ)。</summary>
+    internal string? TitlebarBackgroundOverride => _titlebarBackgroundOverride;
+
+    /// <summary><see cref="_titlebarForegroundOverride"/>の読み取り専用公開。用途は上記と同じ。</summary>
+    internal string? TitlebarForegroundOverride => _titlebarForegroundOverride;
+
     /// <summary>自動保存スナップショットの識別子。ウィンドウごとに一意。</summary>
     public Guid WindowId { get; } = Guid.NewGuid();
 
@@ -206,7 +213,7 @@ internal sealed class MainForm : Form
             // タイマーの停止漏れ対策(不具合修正)。従来は_autoSaveTimerのStopのみで、
             // _externalChangeDebounceTimerはStop/Disposeともに行っていなかった。
             // 閉じた直後にTickが走ると、破棄済みのFormに対してOnExternalChangeDebounceElapsedから
-            // MessageBox.Show(this, ...)を呼ぶ経路が残ってしまう。また、どちらのTimerも
+            // PaneDialog.Show(this, ...)を呼ぶ経路が残ってしまう。また、どちらのTimerも
             // コンポーネントコレクションに登録していないためForm.Dispose()では解放されず、
             // ここで明示的にDisposeしておく必要がある。
             _autoSaveTimer.Stop();
@@ -308,7 +315,7 @@ internal sealed class MainForm : Form
     {
         if (!_isDirty) return true;
 
-        DialogResult choice = MessageBox.Show(
+        DialogResult choice = PaneDialog.Show(
             this,
             "保存されていない変更があります。保存しますか?",
             "Pane",
@@ -1072,7 +1079,7 @@ internal sealed class MainForm : Form
         if (path.Length == 0) return;
         if (!FolderService.DeleteToRecycleBin(path, out string? error))
         {
-            MessageBox.Show(this, $"削除できませんでした。\n{error}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            PaneDialog.Show(this, $"削除できませんでした。\n{error}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         ReloadLoadedFolderIfAny();
     }
@@ -1085,7 +1092,7 @@ internal sealed class MainForm : Form
         if (path.Length == 0 || newName.Length == 0) return;
         if (!FolderService.RenamePath(path, newName, out string? error))
         {
-            MessageBox.Show(this, $"名前を変更できませんでした。\n{error}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            PaneDialog.Show(this, $"名前を変更できませんでした。\n{error}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         ReloadLoadedFolderIfAny();
     }
@@ -1098,7 +1105,7 @@ internal sealed class MainForm : Form
         if (dirPath.Length == 0 || name.Length == 0) return;
         if (!FolderService.CreateFile(dirPath, name, out string? error))
         {
-            MessageBox.Show(this, $"ファイルを作成できませんでした。\n{error}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            PaneDialog.Show(this, $"ファイルを作成できませんでした。\n{error}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         ReloadLoadedFolderIfAny();
     }
@@ -1191,7 +1198,7 @@ internal sealed class MainForm : Form
 
         if (_isReadOnly && !saveAs)
         {
-            DialogResult choice = MessageBox.Show(
+            DialogResult choice = PaneDialog.Show(
                 this,
                 "このファイルは読み取り専用です。上書きできません。\n名前を付けて別のファイルとして保存しますか?",
                 "Pane",
@@ -1319,7 +1326,7 @@ internal sealed class MainForm : Form
         catch (Exception ex)
         {
             Logger.WriteException($"ファイルを開けなかった: {path}", ex);
-            MessageBox.Show(
+            PaneDialog.Show(
                 this,
                 $"ファイルを開けませんでした。\n{ex.Message}",
                 "Pane",
@@ -1378,7 +1385,7 @@ internal sealed class MainForm : Form
         catch (Exception ex)
         {
             Logger.WriteException($"タブとして開けなかった: {path}", ex);
-            MessageBox.Show(
+            PaneDialog.Show(
                 this,
                 $"ファイルを開けませんでした。\n{ex.Message}",
                 "Pane",
@@ -1760,7 +1767,7 @@ internal sealed class MainForm : Form
         catch (Exception ex)
         {
             Logger.WriteException($"ドロップされたファイルを開けなかった: {name}", ex);
-            MessageBox.Show(this, $"ファイルを開けませんでした。\n{ex.Message}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            PaneDialog.Show(this, $"ファイルを開けませんでした。\n{ex.Message}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
@@ -1951,11 +1958,23 @@ internal sealed class MainForm : Form
         }
     }
 
+    /// <summary>request-textを送った時点の_currentPath。応答(text-response)が届くまでの間に
+    /// ユーザーが別ファイルを開くと_currentPathが変わってしまうため、<see cref="WriteAutoSaveSnapshot"/>
+    /// 側でこれと応答時点の_currentPathを突き合わせ、一致しなければそのスナップショットを
+    /// 別ファイルのものとして破棄する。JS側(dist)は変更できないため、この照合はC#側だけで完結させる。</summary>
+    private string? _autoSaveSnapshotRequestPath;
+
+    /// <summary>request-textを送ってから応答を待っている間だけtrue。要求していないのに届いた
+    /// text-response(想定外の経路)を誤って書き込まないための保険。</summary>
+    private bool _autoSaveSnapshotRequestPending;
+
     private void RequestAutoSaveSnapshot()
     {
         // タブ形式(仕様書 第2.10節 C-14)。一度でもtabs-changedを受信していれば
         // (=タブ形式で運用中)、全タブぶんまとめて要求する(request-text/text-responseの
         // 単一文書版とは別経路。HandleAllTabsTextResponse参照)。
+        // こちらは応答にタブ自身のGuid/pathが含まれる自己完結した経路のため、
+        // 単一文書版と違って「要求後に別ファイルを開く」ような取り違えは起こらない。
         if (_tabInfos.Count > 0)
         {
             if (_tabInfos.Any(t => t.Dirty)) PostToWeb(new { type = "request-all-tabs-text" });
@@ -1964,11 +1983,34 @@ internal sealed class MainForm : Form
         if (!_isDirty) return;
         // 本文はJS(CodeMirror)側にしかないため、都度取得を依頼する。
         // 頻繁なキー入力のたびには送らず、タイマー間隔(既定30秒)でのみ発生させる。
+        // 要求した時点のパスを覚えておく(WriteAutoSaveSnapshot参照)。
+        _autoSaveSnapshotRequestPath = _currentPath;
+        _autoSaveSnapshotRequestPending = true;
         PostToWeb(new { type = "request-text" });
     }
 
     private void WriteAutoSaveSnapshot(string text)
     {
+        if (!_autoSaveSnapshotRequestPending)
+        {
+            // 要求していないtext-response(想定外の経路)は対象外。
+            return;
+        }
+        _autoSaveSnapshotRequestPending = false;
+
+        if (!string.Equals(_autoSaveSnapshotRequestPath, _currentPath, StringComparison.OrdinalIgnoreCase))
+        {
+            // request-textを送ってから応答が届くまでの間に、このウィンドウで別のファイルが
+            // 開かれた(OpenFile等で_currentPathが変わった)。そのままWriteSnapshotすると
+            // OriginalPath(要求時のパス、または現在のパス)とText(応答時点の本文)が
+            // 別ファイルのものとして組み合わさってしまうため、このスナップショットは書き込まず
+            // 破棄する。次回のタイマー間隔で改めて(今開いているファイルに対して)要求し直される。
+            Logger.Write(
+                $"WriteAutoSaveSnapshot: 要求時と応答時でパスが一致しないため破棄 " +
+                $"(要求時={_autoSaveSnapshotRequestPath ?? "(無題)"}, 応答時={_currentPath ?? "(無題)"})");
+            return;
+        }
+
         var snapshot = new AutoSaveSnapshot(
             _currentPath, text, _currentEncoding, _currentLineEnding, _hasTrailingNewline, DateTime.UtcNow);
         AutoSaveService.WriteSnapshot(WindowId, snapshot);
@@ -2050,12 +2092,16 @@ internal sealed class MainForm : Form
             ? "\n(このウィンドウには未保存の変更があります。再読み込みすると失われます。)"
             : string.Empty;
 
-        DialogResult choice = MessageBox.Show(
+        // 「はい」は現在の編集内容をディスクの内容で上書きする(未保存の変更があれば失われる)ため、
+        // データが失われうる確認としてキャンセル相当側(「いいえ」)を既定にする
+        // (src/dialog.jsのdanger:trueと揃えた方針。詳細はPaneDialog.ShowのdefaultToCancel引数を参照)。
+        DialogResult choice = PaneDialog.Show(
             this,
             $"このファイルは他のアプリケーションによって変更されました。再読み込みしますか?{unsavedWarning}",
             "Pane",
             MessageBoxButtons.YesNo,
-            MessageBoxIcon.Warning);
+            MessageBoxIcon.Warning,
+            defaultToCancel: true);
 
         if (choice == DialogResult.Yes)
         {
@@ -2069,69 +2115,77 @@ internal sealed class MainForm : Form
 
     private void ShowSettingsDialog()
     {
-        AppSettings settings = SettingsService.Load();
-        using var dialog = new SettingsForm(settings);
+        // dialogはユーザー操作待ちで開いたままモーダルになるため、ここで読み込んだinitialは
+        // 非常に長い間古いスナップショットのままになりうる(Lost Updateの原因)。そのため
+        // initialは「ダイアログの初期表示」と「ユーザーが何を変更したか(トグルの前後比較)」の
+        // 判定にのみ使い、実際にディスクへ書き込む段(SettingsService.Update)では最新の設定を
+        // 読み直し、このダイアログが変更した項目だけをそこへ適用する
+        // (PaneApplicationContext.OnWindowClosedと同じ考え方)。
+        AppSettings initial = SettingsService.Load();
+        using var dialog = new SettingsForm(initial);
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
-        bool wantsAssociation = dialog.FileAssociationEnabled;
-        if (wantsAssociation != settings.FileAssociationEnabled)
+        string? errorMessage = null;
+        SettingsService.Update(settings =>
         {
-            try
+            bool wantsAssociation = dialog.FileAssociationEnabled;
+            if (wantsAssociation != initial.FileAssociationEnabled)
             {
-                // WinForms版の設定画面(SettingsForm)はON/OFFの単一チェックボックスしか持たず、
-                // 拡張子ごとの選択肢はまだ無いため、有効化時は従来どおり .md/.markdown/.mdown の
-                // 3つを対象にする(任意拡張子の選択は後続のHTML製設定画面(B節)で行う)。
-                IReadOnlyCollection<string> desiredExtensions = wantsAssociation
-                    ? FileAssociationService.LegacyDefaultExtensions
-                    : Array.Empty<string>();
-                FileAssociationService.Apply(desiredExtensions, settings.GetEffectiveAssociatedExtensions());
-                settings.FileAssociationEnabled = wantsAssociation;
-                settings.AssociatedExtensions = desiredExtensions.ToList();
+                try
+                {
+                    // WinForms版の設定画面(SettingsForm)はON/OFFの単一チェックボックスしか持たず、
+                    // 拡張子ごとの選択肢はまだ無いため、有効化時は従来どおり .md/.markdown/.mdown の
+                    // 3つを対象にする(任意拡張子の選択は後続のHTML製設定画面(B節)で行う)。
+                    // 解除対象(previous)は最新の設定(settings)から求める。initialのAssociatedExtensions
+                    // は古いスナップショットのため、これを使うとダイアログを開いている間に他所で
+                    // 変わった関連付けを正しく解除できない場合がある。
+                    IReadOnlyCollection<string> desiredExtensions = wantsAssociation
+                        ? FileAssociationService.LegacyDefaultExtensions
+                        : Array.Empty<string>();
+                    FileAssociationService.Apply(desiredExtensions, settings.GetEffectiveAssociatedExtensions());
+                    settings.FileAssociationEnabled = wantsAssociation;
+                    settings.AssociatedExtensions = desiredExtensions.ToList();
+                }
+                catch (Exception ex)
+                {
+                    Logger.WriteException("ファイルの関連付け設定の変更に失敗", ex);
+                    errorMessage = $"ファイルの関連付け設定を変更できませんでした。\n{ex.Message}";
+                }
             }
-            catch (Exception ex)
-            {
-                Logger.WriteException("ファイルの関連付け設定の変更に失敗", ex);
-                MessageBox.Show(
-                    this,
-                    $"ファイルの関連付け設定を変更できませんでした。\n{ex.Message}",
-                    "Pane",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
-            }
-        }
 
-        bool wantsPreload = dialog.PreloadOnStartup;
-        if (wantsPreload != settings.PreloadOnStartup)
+            bool wantsPreload = dialog.PreloadOnStartup;
+            if (wantsPreload != initial.PreloadOnStartup)
+            {
+                try
+                {
+                    if (wantsPreload) StartupService.Register();
+                    else StartupService.Unregister();
+                    settings.PreloadOnStartup = wantsPreload;
+                }
+                catch (Exception ex)
+                {
+                    // StartupService側で既にLogger.WriteException済みのため、ここではUI表示のみ。
+                    string msg = $"スタートアップ登録を変更できませんでした。\n{ex.Message}";
+                    errorMessage = errorMessage is null ? msg : $"{errorMessage}\n{msg}";
+                }
+            }
+
+            settings.StartupBehavior = dialog.RestoreSessionOnStartup ? "restoreSession" : "blank";
+            settings.CalloutsEnabled = dialog.CalloutsEnabled;
+            settings.SuperSubscriptEnabled = dialog.SuperSubscriptEnabled;
+            settings.HighlightEnabled = dialog.HighlightEnabled;
+            settings.InlineMathEnabled = dialog.InlineMathEnabled;
+            // 旧WinForms設定画面はON/OFFの単一チェックボックスのみのため、3値のMathAutoNumberへは
+            // "off"/"all"の二値でのみ対応する("ams"はHTML製設定画面からのみ選べる)。
+            settings.MathAutoNumber = dialog.MathAutoNumberEnabled ? "all" : "off";
+            settings.MathAutoNumberEnabled = dialog.MathAutoNumberEnabled;
+            settings.DefaultCopyFormat = dialog.DefaultCopyFormat;
+        });
+
+        if (errorMessage is not null)
         {
-            try
-            {
-                if (wantsPreload) StartupService.Register();
-                else StartupService.Unregister();
-                settings.PreloadOnStartup = wantsPreload;
-            }
-            catch (Exception ex)
-            {
-                // StartupService側で既にLogger.WriteException済みのため、ここではUI表示のみ。
-                MessageBox.Show(
-                    this,
-                    $"スタートアップ登録を変更できませんでした。\n{ex.Message}",
-                    "Pane",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
-            }
+            PaneDialog.Show(this, errorMessage, "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
-
-        settings.StartupBehavior = dialog.RestoreSessionOnStartup ? "restoreSession" : "blank";
-        settings.CalloutsEnabled = dialog.CalloutsEnabled;
-        settings.SuperSubscriptEnabled = dialog.SuperSubscriptEnabled;
-        settings.HighlightEnabled = dialog.HighlightEnabled;
-        settings.InlineMathEnabled = dialog.InlineMathEnabled;
-        // 旧WinForms設定画面はON/OFFの単一チェックボックスのみのため、3値のMathAutoNumberへは
-        // "off"/"all"の二値でのみ対応する("ams"はHTML製設定画面からのみ選べる)。
-        settings.MathAutoNumber = dialog.MathAutoNumberEnabled ? "all" : "off";
-        settings.MathAutoNumberEnabled = dialog.MathAutoNumberEnabled;
-        settings.DefaultCopyFormat = dialog.DefaultCopyFormat;
-        SettingsService.Save(settings);
 
         // 設定はアプリ全体で共有されるため、自分のウィンドウだけでなく他のウィンドウにも反映する。
         BroadcastOrRefreshSelf();
@@ -2358,9 +2412,9 @@ internal sealed class MainForm : Form
             return;
         }
 
-        AppSettings settings = SettingsService.Load();
-        settings.PerFileModes = UpdatePerFileModes(settings.PerFileModes, path, mode);
-        SettingsService.Save(settings);
+        // Lost Update対策(SettingsService.Update参照)。ここは「最新のPerFileModesに対して
+        // 1件だけ挿入/更新/削除する」差分操作のため、Update経由にするだけで安全になる。
+        SettingsService.Update(settings => settings.PerFileModes = UpdatePerFileModes(settings.PerFileModes, path, mode));
     }
 
     /// <summary>
@@ -2388,33 +2442,36 @@ internal sealed class MainForm : Form
     private static void SaveTheme(string theme)
     {
         if (theme != "light" && theme != "dark" && theme != "system") return;
-        AppSettings settings = SettingsService.Load();
-        settings.Theme = theme;
-        SettingsService.Save(settings);
+        // Lost Update対策(SettingsService.Update参照)。
+        SettingsService.Update(settings => settings.Theme = theme);
     }
 
     /// <summary>本文の文字サイズ(Ctrl+マウスホイールでの変更)を永続化する。</summary>
     private static void SaveFontSize(int size)
     {
         if (size < 8 || size > 40) return; // JS側(editor.js)と同じ範囲。想定外の値は無視する
-        AppSettings settings = SettingsService.Load();
-        settings.EditorFontSize = size;
-        SettingsService.Save(settings);
+        // Lost Update対策(SettingsService.Update参照)。
+        SettingsService.Update(settings => settings.EditorFontSize = size);
     }
 
     /// <summary>最近使ったファイル一覧(仕様書 F-09)を更新する。先頭が最新、重複除去、最大10件。
     /// recordRecentFilesがfalseの場合は記録しない。</summary>
     private static void AddRecentFile(string path)
     {
-        AppSettings settings = SettingsService.Load();
-        if (!settings.RecordRecentFiles) return;
-        settings.RecentFiles.RemoveAll(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase));
-        settings.RecentFiles.Insert(0, path);
-        if (settings.RecentFiles.Count > 10)
+        // ファイルを開くたびに呼ばれる経路。複数ウィンドウで同時にファイルを開いたり、
+        // 設定画面での保存と重なったりすると容易に競合するため、Lost Update対策として
+        // 必ずSettingsService.Update経由にする(最新のRecentFilesに対して差分操作するだけで、
+        // このメソッドが呼ばれた時点のsettings丸ごとを書き戻さない)。
+        SettingsService.Update(settings =>
         {
-            settings.RecentFiles.RemoveRange(10, settings.RecentFiles.Count - 10);
-        }
-        SettingsService.Save(settings);
+            if (!settings.RecordRecentFiles) return;
+            settings.RecentFiles.RemoveAll(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase));
+            settings.RecentFiles.Insert(0, path);
+            if (settings.RecentFiles.Count > 10)
+            {
+                settings.RecentFiles.RemoveRange(10, settings.RecentFiles.Count - 10);
+            }
+        });
     }
 
     /// <summary>
@@ -2532,7 +2589,7 @@ internal sealed class MainForm : Form
         catch (Exception ex)
         {
             Logger.WriteException($"エクスポートに失敗: format={format}, targetPath={targetPath}", ex);
-            MessageBox.Show(this, $"エクスポートに失敗しました。\n{ex.Message}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            PaneDialog.Show(this, $"エクスポートに失敗しました。\n{ex.Message}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
         {
@@ -2793,7 +2850,7 @@ internal sealed class MainForm : Form
             {
                 Logger.WriteException("画像挿入: dataBase64が不正なBase64だった", ex);
                 PostToWeb(new { type = "insert-image-error", error = "画像データを読み取れませんでした。" });
-                MessageBox.Show(this, "画像データを読み取れませんでした。", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                PaneDialog.Show(this, "画像データを読み取れませんでした。", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
             if (TryGetString(message, "name", out string n) && n.Length > 0)
@@ -2822,7 +2879,7 @@ internal sealed class MainForm : Form
 
             if (!result.Ok)
             {
-                MessageBox.Show(this, result.ErrorMessage, "Pane", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                PaneDialog.Show(this, result.ErrorMessage, "Pane", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
@@ -2837,7 +2894,7 @@ internal sealed class MainForm : Form
         catch (Exception ex)
         {
             Logger.WriteException("画像挿入に失敗", ex);
-            MessageBox.Show(this, $"画像を挿入できませんでした。\n{ex.Message}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            PaneDialog.Show(this, $"画像を挿入できませんでした。\n{ex.Message}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 }

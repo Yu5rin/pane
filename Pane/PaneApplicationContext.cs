@@ -83,7 +83,9 @@ internal sealed class PaneApplicationContext : ApplicationContext
             }
 
             string label = snapshot.OriginalPath ?? "無題のドキュメント";
-            DialogResult choice = MessageBox.Show(
+            // この時点ではまだ本体ウィンドウが1つも無い(起動直後)ため、オーナー無しで表示する
+            // (PaneDialog.Show側は画面中央にフォールバックする)。
+            DialogResult choice = PaneDialog.Show(
                 $"前回のPaneは正常に終了しませんでした。\n未保存の内容を復元しますか?\n\n{label}",
                 "Pane - 復元の確認",
                 MessageBoxButtons.YesNo,
@@ -349,23 +351,29 @@ internal sealed class PaneApplicationContext : ApplicationContext
         {
             // _settingsは起動時に一度読み込んだままのスナップショットのため、そのまま保存すると
             // セッション中に他の経路(テーマ切替・最近使ったファイル・設定ダイアログ等、いずれも
-            // 都度SettingsService.Load/Saveで直接ディスクへ書いている)で変更された内容を
-            // 上書きして消してしまう。保存直前にディスクの最新設定を読み直し、このクラスが
-            // 責務を持つ項目(ウィンドウ位置・サイズ・セッション復元用パス)だけを反映する。
-            AppSettings latest = SettingsService.Load();
-            latest.WindowX = _settings.WindowX;
-            latest.WindowY = _settings.WindowY;
-            latest.WindowWidth = _settings.WindowWidth;
-            latest.WindowHeight = _settings.WindowHeight;
-            if (openFilePaths is not null) latest.OpenFilePaths = openFilePaths;
-            SettingsService.Save(latest);
+            // 都度SettingsService.Updateで直接ディスクへ書いている)で変更された内容を
+            // 上書きして消してしまう。SettingsService.Updateが保存直前にディスクの最新設定を
+            // 読み直すため、ここではこのクラスが責務を持つ項目(ウィンドウ位置・サイズ・
+            // セッション復元用パス)だけを最新設定へ適用すればよい(Lost Update対策)。
+            // quitOnLastWindowClosedはUpdateのmodify内でしか読めない(latestはmodifyの外へ
+            // 出せない)ため、後続の分岐で使えるようクロージャで捕まえておく。
+            bool quitOnLastWindowClosed = true;
+            SettingsService.Update(latest =>
+            {
+                latest.WindowX = _settings.WindowX;
+                latest.WindowY = _settings.WindowY;
+                latest.WindowWidth = _settings.WindowWidth;
+                latest.WindowHeight = _settings.WindowHeight;
+                if (openFilePaths is not null) latest.OpenFilePaths = openFilePaths;
+                quitOnLastWindowClosed = latest.QuitOnLastWindowClosed;
+            });
 
             // preload起動の常駐プロセス、またはquitOnLastWindowClosed=falseの場合は、
             // 最後のウィンドウが閉じられてもプロセスを終了させず、再びウィンドウ0枚の待機状態へ
             // 戻る(次にファイルを開くときもWebView2環境のキャッシュを保ったまま高速に開けるため)。
             // 次にOpenWindowFromPipeRequestが呼ばれたときも、既にウィンドウを一度見せた後なので
             // 復元確認は再実行しない(_initialOpenPendingは既にfalse)。
-            if (_preload || !latest.QuitOnLastWindowClosed)
+            if (_preload || !quitOnLastWindowClosed)
             {
                 string reason = _preload ? "preload起動" : "quitOnLastWindowClosed=false";
                 Logger.Write($"最後のウィンドウが閉じられた({reason})。ExitThreadは呼ばず常駐状態へ戻る" +
