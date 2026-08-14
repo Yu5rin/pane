@@ -67,6 +67,53 @@ const STYLE_DANGEROUS_RE = /expression\s*\(|javascript\s*:|url\s*\(/i;
 // 扱う以上は付けておくべき最低限の防御)。
 const MAX_DEPTH = 200;
 
+// ---- パース前の安全弁(MAX_DEPTHの手前で効かせる) ----
+// appendSanitized()の再帰上限(MAX_DEPTH)はDOMツリーが出来上がった後にしか働かない。
+// しかしボトルネックは DOMParser.parseFromString() 自体(Chromiumは深いネストに対して
+// ほぼ二次関数的なコストを持つ)であり、パースに入った時点で手遅れになる。そのため
+// パースする「前」に文字列だけを見て危険性を見積もり、危険なら丸ごとプレーンテキスト
+// 扱いに倒す(HTMLとして解釈しない)。
+//
+// MAX_HTML_INPUT_LENGTH: 2MB。Markdown文書中の生HTML1ブロック分としては通常あり得ない
+// 大きさで、かつ「2MB」は文字数ベースの上限として調査時に指示された目安値をそのまま採用した。
+// 通常のコピー&ペースト(Webページ1枚分のHTML等)はこれを大きく下回るため、正常系には影響しない。
+const MAX_HTML_INPUT_LENGTH = 2 * 1024 * 1024;
+// MAX_HTML_NEST_DEPTH: 500。appendSanitized()側のMAX_DEPTH(200)より十分大きい値にして、
+// 「後段のMAX_DEPTHで安全に切り詰められる程度の深さ」までは通し、それを超える異常な
+// ネスト(数万段規模の攻撃/事故入力)だけをパース前に弾く。実測(調査時)では数千段を
+// 超えるネストは通常の文書には現れず、Chromiumのパース時間もこのあたりから急激に
+// 悪化し始めるため、余裕を持たせつつ実害の出る手前で止める値として選んだ。
+const MAX_HTML_NEST_DEPTH = 500;
+
+// 開始/終了タグらしき箇所だけを正規表現で拾い、実際にDOMを構築せずにネストの深さを見積もる。
+// 属性値の中身などは解釈しない(パースではなく「見積り」でよい。危険な入力を弾ければ十分)。
+const TAG_BOUNDARY_RE = /<\/?([a-zA-Z][a-zA-Z0-9-]*)\b[^>]*>/g;
+function estimateMaxNestDepth(html) {
+  let depth = 0;
+  let max = 0;
+  TAG_BOUNDARY_RE.lastIndex = 0;
+  let m;
+  while ((m = TAG_BOUNDARY_RE.exec(html))) {
+    const whole = m[0];
+    if (whole[1] === "/") {
+      if (depth > 0) depth--;
+    } else if (whole[whole.length - 2] !== "/") { // "<br/>" のような自己終了タグは深さを増やさない
+      depth++;
+      if (depth > max) max = depth;
+    }
+  }
+  return max;
+}
+
+// 入力文字列がパースするには危険(長すぎる/ネストが深すぎる)かどうかを判定する。
+// html-to-markdown.js(貼り付け経路)からも同じ基準を使う。
+export function isHtmlInputTooDangerous(html) {
+  const s = String(html ?? "");
+  if (s.length > MAX_HTML_INPUT_LENGTH) return true;
+  if (estimateMaxNestDepth(s) > MAX_HTML_NEST_DEPTH) return true;
+  return false;
+}
+
 // URL文字列の正規化(仕様書の指示: 前後の空白・制御文字・大文字小文字による偽装を通さない)。
 // タブ・改行・復帰は「URL中のどこにあっても無視される」というWHATWG URL仕様の挙動に合わせて
 // 位置を問わず除去し、先頭・末尾の空白/制御文字も除去してから小文字化して比較する。
@@ -79,7 +126,9 @@ function normalizeUrl(raw) {
 
 // href/src系のURLが安全か判定する。javascript:/vbscript: は常に禁止。
 // data: は仕様書の指示どおり "data:image/" だけ例外的に許可する(img/video posterなど)。
-function isSafeUrl(raw, { allowDataImage = false } = {}) {
+// md-to-html.js(Markdown記法のリンク・画像)とeditor.js(リンククリック時の遷移)からも
+// 同じ基準を使う(生HTMLだけ保護対象という一貫性の欠落を防ぐため、ここで export する)。
+export function isSafeUrl(raw, { allowDataImage = false } = {}) {
   if (raw == null) return false;
   const n = normalizeUrl(raw);
   if (n.startsWith("javascript:") || n.startsWith("vbscript:")) return false;
@@ -223,10 +272,20 @@ function appendSanitized(node, destParent, destDocument, depth) {
 // options.doc: 生成先のDocument(既定はグローバルのdocument。テスト等での差し替え用)。
 export function sanitizeHtml(html, options = {}) {
   const destDocument = options.doc || document;
+  const raw = String(html ?? "");
+  // DOMParser.parseFromString() 自体が深いネストに対してほぼ二次関数的なコストを持つため、
+  // パースに入る前に危険性を見積もり、危険であればパースせずプレーンテキストとして扱う
+  // (黙って消すのではなく、原文をそのままテキストとして表示することで内容は失わない)。
+  if (isHtmlInputTooDangerous(raw)) {
+    console.log(`Pane: 生HTMLが長すぎる/ネストが深すぎるためパースを打ち切り、プレーンテキストとして表示しました(文字数=${raw.length})`);
+    const frag = destDocument.createDocumentFragment();
+    frag.appendChild(destDocument.createTextNode(raw));
+    return frag;
+  }
   // DOMParserで解析するだけの段階ではスクリプトは実行されず、画像・iframe等の
   // リソースも取得されない(生成された文書はどこにもアタッチされていないため)。
   // ここで得たツリーの要素・属性をそのまま使わず、許可したものだけを再構築する。
-  const parsed = new DOMParser().parseFromString(String(html ?? ""), "text/html");
+  const parsed = new DOMParser().parseFromString(raw, "text/html");
   const frag = destDocument.createDocumentFragment();
   for (const child of Array.from(parsed.body.childNodes)) {
     appendSanitized(child, frag, destDocument, 0);

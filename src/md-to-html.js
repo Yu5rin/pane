@@ -3,6 +3,9 @@
 import { syntaxTree } from "@codemirror/language";
 import { EMOJI_SHORTCODES, extractHeadings } from "./markdown-extras.js";
 import { renderMathToHtml } from "./math.js";
+// 生HTML(html-sanitize.js)と同じ基準でURLの安全性を検証する。Markdown記法の
+// リンク・画像だけ検証対象外というのは一貫性を欠くため、判定ロジックを共用する。
+import { isSafeUrl } from "./html-sanitize.js";
 
 function escText(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -97,7 +100,14 @@ function inlineHtml(doc, tree, from, to, opts) {
           const textTo = marks[1] ? marks[1].from : textFrom;
           const altText = doc.sliceString(textFrom, textTo);
           const src = resolveImageSrc(linkTarget(doc, c), opts?.rootUrl);
-          html += `<img src="${escText(src)}" alt="${escText(altText)}">`;
+          if (src && isSafeUrl(src, { allowDataImage: true })) {
+            html += `<img src="${escText(src)}" alt="${escText(altText)}">`;
+          } else {
+            // javascript:等の安全でないURLは<img>にせず、Markdown記法をそのままテキストとして
+            // 残す(html-sanitize.jsのisSafeUrl()と同じ基準。黙って画像を消すのではなく、
+            // 変換されなかったことが原文の見た目からそのまま分かるようにする)。
+            html += inlineTextToHtml(doc.sliceString(c.from, c.to), opts);
+          }
           pos = c.to;
           break;
         }
@@ -111,7 +121,10 @@ function inlineHtml(doc, tree, from, to, opts) {
             const textFrom = marks[0] ? marks[0].to : c.from;
             const textTo = marks[1] ? marks[1].from : textFrom;
             const href = linkTarget(doc, c);
-            html += href
+            // 安全でないURL(javascript:/vbscript:/data:等。isSafeUrl()参照)はリンク化せず、
+            // href無しのときと同じくMarkdown記法をそのままテキストとして残す(黙ってリンクを
+            // 消すのではなく、変換されなかったことが原文の見た目からそのまま分かるようにする)。
+            html += (href && isSafeUrl(href))
               ? `<a href="${escText(href)}">${inlineHtml(doc, tree, textFrom, textTo, opts)}</a>`
               : inlineTextToHtml(text, opts);
           }
