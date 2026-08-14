@@ -50,7 +50,12 @@ export function buildCommands(ctx) {
     { id: "file.exportHtml", menu: "File", label: "エクスポート: HTML", run: app((c) => c.actions.exportAs("html")) },
     { id: "file.exportHtmlPlain", menu: "File", label: "エクスポート: HTML(スタイルなし)", run: app((c) => c.actions.exportAs("html-plain")) },
     { id: "file.exportWord", menu: "File", label: "エクスポート: Word", run: app((c) => c.actions.exportAs("docx")), enabled: () => ctx.getState().pandocAvailable, note: "Pandoc未導入" },
-    { id: "file.exportEpub", menu: "File", label: "エクスポート: EPUB", run: app((c) => c.actions.exportAs("epub")), enabled: () => ctx.getState().pandocAvailable, note: "Pandoc未導入", separatorAfter: true },
+    { id: "file.exportEpub", menu: "File", label: "エクスポート: EPUB", run: app((c) => c.actions.exportAs("epub")), enabled: () => ctx.getState().pandocAvailable, note: "Pandoc未導入" },
+    // 仕様書 第2.11節 X-05「Word / RTF / LaTeX / EPUB / Textile 等」。既存のPandoc呼び出し
+    // (docx/epub)の作りをそのまま踏襲する。
+    { id: "file.exportRtf", menu: "File", label: "エクスポート: RTF", run: app((c) => c.actions.exportAs("rtf")), enabled: () => ctx.getState().pandocAvailable, note: "Pandoc未導入" },
+    { id: "file.exportLatex", menu: "File", label: "エクスポート: LaTeX", run: app((c) => c.actions.exportAs("latex")), enabled: () => ctx.getState().pandocAvailable, note: "Pandoc未導入" },
+    { id: "file.exportTextile", menu: "File", label: "エクスポート: Textile", run: app((c) => c.actions.exportAs("textile")), enabled: () => ctx.getState().pandocAvailable, note: "Pandoc未導入", separatorAfter: true },
     { id: "file.print", menu: "File", label: "印刷", shortcut: `${MOD}+Alt+P`, run: app((c) => c.actions.print()), separatorAfter: true },
     { id: "file.settings", menu: "File", label: "設定", shortcut: `${MOD}+,`, run: app((c) => c.actions.openSettings()), separatorAfter: true },
     { id: "file.close", menu: "File", label: "閉じる", shortcut: `${MOD}+W`, run: app((c) => c.actions.closeWindow()) },

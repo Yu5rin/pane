@@ -438,6 +438,28 @@ internal sealed class MainForm : Form
             case "save":
                 HandleSaveRequest(root);
                 break;
+            case "set-encoding":
+                // ステータスバーからの明示的な文字コード変更(仕様書 第6.1節)。ここでは
+                // _currentEncodingを更新するだけでファイルへは書き込まない。次回保存
+                // (HandleSaveRequest)がこの値を使って再エンコードする。「dirty」通知は
+                // JS側main.jsのsetEncoding()が別途送る(未保存の変更としてタイトルへ反映するため)。
+                if (root.TryGetProperty("encoding", out JsonElement setEncProp) && setEncProp.ValueKind == JsonValueKind.String)
+                {
+                    _currentEncoding = TextFileService.ParseEncodingLabel(setEncProp.GetString() ?? "");
+                    Logger.Write($"set-encoding: {TextFileService.EncodingLabel(_currentEncoding)}");
+                }
+                break;
+            case "set-line-ending":
+                // ステータスバーからの明示的な改行コード変更(仕様書 第6.2節)。「混在」からの
+                // 統一操作も含め、実体はここで_currentLineEndingを差し替えるだけ(本文は読み込み時
+                // 点で既に\nへ正規化済みのため、保存時にDenormalizeFromLfが選んだ改行コードで
+                // 全体を書き出す=統一される)。
+                if (root.TryGetProperty("lineEnding", out JsonElement setLeProp) && setLeProp.ValueKind == JsonValueKind.String)
+                {
+                    _currentLineEnding = TextFileService.ParseLineEndingLabel(setLeProp.GetString() ?? "");
+                    Logger.Write($"set-line-ending: {TextFileService.LineEndingLabel(_currentLineEnding)}");
+                }
+                break;
             case "dirty":
                 if (root.TryGetProperty("value", out JsonElement dirtyProp))
                 {
@@ -2109,6 +2131,11 @@ internal sealed class MainForm : Form
             "html" or "html-plain" => ("HTML (*.html)|*.html", ".html"),
             "docx" => ("Word文書 (*.docx)|*.docx", ".docx"),
             "epub" => ("EPUB (*.epub)|*.epub", ".epub"),
+            // 仕様書 第2.11節 X-05「Word / RTF / LaTeX / EPUB / Textile 等」。docx/epubと同じく
+            // Pandocに委譲する(出力形式はtargetPathの拡張子からPandocが自動判別する)。
+            "rtf" => ("リッチテキスト (*.rtf)|*.rtf", ".rtf"),
+            "latex" => ("LaTeX (*.tex)|*.tex", ".tex"),
+            "textile" => ("Textile (*.textile)|*.textile", ".textile"),
             _ => ("すべてのファイル (*.*)|*.*", ""),
         };
         string? targetPath = null;
@@ -2138,6 +2165,9 @@ internal sealed class MainForm : Form
                     break;
                 case "docx":
                 case "epub":
+                case "rtf":
+                case "latex":
+                case "textile":
                     await ExportViaPandocAsync(text, targetPath);
                     break;
             }

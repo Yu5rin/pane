@@ -338,6 +338,48 @@ function updateStatusMeta() {
   statusEncoding.textContent = currentEncoding ? `文字コード: ${currentEncoding}` : "";
   statusLineEnding.textContent = currentLineEnding ? `改行コード: ${currentLineEnding}` : "";
 }
+// 文字コード・改行コードの選択肢(仕様書 第6.1/6.2節)。Pane/TextFileService.csの
+// EncodingLabel/LineEndingLabelが返すラベル文字列とそのまま揃える(ParseEncodingLabel/
+// ParseLineEndingLabelで逆変換できるようにするため)。
+const ENCODING_OPTIONS = ["UTF-8", "UTF-8 (BOM付き)", "UTF-16 LE", "UTF-16 BE", "Shift_JIS"];
+const LINE_ENDING_OPTIONS = ["CRLF", "LF", "CR"];
+
+// ステータスバーから文字コード・改行コードを明示的に変更する(仕様書6.1「変更：ステータスバー
+// から明示的に変更でき、その場合のみ再エンコードする」)。ここでは currentEncoding/
+// currentLineEnding とタブの表示だけを更新し、ファイルへは一切書き込まない
+// (未保存の変更として扱い、次回保存時にC#側がその文字コード・改行コードで書き出す。
+// HandleSaveRequestは_currentEncoding/_currentLineEndingを使うため、set-encoding/
+// set-line-endingメッセージでその場で更新しておけば保存時に自動的に反映される)。
+// 改行コード「混在」からの統一操作(仕様書6.2)もこの経路がそのまま実現する: 読み込み時に
+// C#側が本文を\nへ正規化済み(TextFileService.NormalizeToLf)なので、エディタの内容自体を
+// 書き換える必要はなく、保存時に使う改行コードのラベルを差し替えるだけで全体が
+// その改行コードへ統一される。
+function setEncoding(label) {
+  if (currentEncoding === label) return;
+  currentEncoding = label;
+  const tab = activeTab(); // タブ形式(displayMode==="tab")のときは表示中のタブにも書き戻す
+  if (tab) tab.encoding = label; // (次のnotifyTabsChangedで古い値に巻き戻らないようにするため)
+  updateStatusMeta();
+  setDirty(true);
+  bridge?.postMessage({ type: "set-encoding", encoding: label });
+}
+function setLineEnding(label) {
+  if (currentLineEnding === label) return;
+  currentLineEnding = label;
+  const tab = activeTab();
+  if (tab) tab.lineEnding = label;
+  updateStatusMeta();
+  setDirty(true);
+  bridge?.postMessage({ type: "set-line-ending", lineEnding: label });
+}
+function buildEncodingMenuTree() {
+  return ENCODING_OPTIONS.map((label) => ({ label, checked: currentEncoding === label, run: () => setEncoding(label) }));
+}
+function buildLineEndingMenuTree() {
+  // 「混在」はcurrentLineEndingがそのまま入っているだけの状態(選択肢には含めない)なので、
+  // どの項目にもcheckedは付かない。ここで何かを選ぶと仕様書6.2の「統一操作」になる。
+  return LINE_ENDING_OPTIONS.map((label) => ({ label, checked: currentLineEnding === label, run: () => setLineEnding(label) }));
+}
 const MODE_LABELS = { markdown: "Markdown", code: "コード", plain: "プレーンテキスト" };
 // モード表示ラベル(仕様書 第1章の拡張): コードモードのときは言語名も添える(例: "コード (Python)")。
 function modeLabel(mode, language) {
@@ -348,6 +390,10 @@ function updateStatusMode() {
   const mode = editor.getMode();
   statusMode.textContent = modeLabel(mode, editor.getCodeLanguage());
   host.classList.toggle("mode-code", mode === "code");
+  // 仕様書 第10.3節「本文の最大幅」はMarkdownモードのときだけ適用する(style.css側が
+  // この属性で出し分ける)。コードモード・プレーンテキストモードで幅を制限すると横に長い
+  // コード行やログが折り返されて読みにくくなるため、意図的に対象外にする(親側の判断)。
+  document.documentElement.setAttribute("data-editor-mode", mode);
 }
 
 // ---- 自動判定の通知バナー(仕様書 第1章の拡張)。モーダルにせず、ステータスバー付近に
@@ -917,6 +963,19 @@ const commandPalette = initCommandPalette(document.body, commands, ctx);
 // それ以外は本文(CodeMirror)の上かどうかで判定する(サイドバーの行別メニューは
 // sidebar.js自身がshowContextMenuを使って個別に配線しており、ここには含めない)。
 initContextMenu(document, ctx, (c, e) => (host.contains(e.target) ? buildEditorContextMenuTree(c, e) : null));
+
+// ステータスバーの文字コード・改行コード(仕様書 第6.1/6.2節)。クリックでネイティブ
+// ポップアップのメニューを出す(docs/コンテキストメニュー仕様.mdの作法どおりshowContextMenuを
+// 使う。ブリッジが無い環境ではHTMLの.menu-dropdownへ自動的にフォールバックする)。
+// 右クリックではなく通常クリックのため、クリック位置ではなくボタンの左下に出す。
+statusEncoding.addEventListener("click", () => {
+  const rect = statusEncoding.getBoundingClientRect();
+  showContextMenu(ctx, rect.left, rect.bottom, buildEncodingMenuTree());
+});
+statusLineEnding.addEventListener("click", () => {
+  const rect = statusLineEnding.getBoundingClientRect();
+  showContextMenu(ctx, rect.left, rect.bottom, buildLineEndingMenuTree());
+});
 
 // 設定画面(仕様書 第2.10節)。キーバインドタブがコマンド一覧を必要とするため、
 // buildCommands()の後でctx.commandsとして公開してから生成する。

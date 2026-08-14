@@ -634,18 +634,24 @@ internal sealed class AppSettings
         set => _editorFontSize = Math.Clamp(value, 8, 72);
     }
 
-    private double _editorLineHeight = 1.85;
+    private double _editorLineHeight = 1.95;
 
-    /// <summary>本文の行間(倍率)。1.0〜3.0の範囲でクランプする。既定1.85。</summary>
+    /// <summary>本文の行間(倍率)。1.0〜3.0の範囲でクランプする。既定1.95
+    /// (仕様書 第10.3節: 日本語のため現行の1.85から広げる)。</summary>
     public double EditorLineHeight
     {
         get => _editorLineHeight;
         set => _editorLineHeight = Math.Clamp(value, 1.0, 3.0);
     }
 
-    private int _editorMaxWidthPx;
+    // 仕様書 第10.3節「本文の最大幅は42文字相当」。全角文字はおおよそ正方形(幅=フォントサイズの
+    // 1em)とみなせるため、全角42文字分の幅を「既定フォントサイズ(EditorFontSize既定15px) × 42」で
+    // 算出する(630px)。src/settings.js側にも同じ計算式・同じ既定値をコメント付きで置く
+    // (両者は独立した既定値なので、フォントサイズの既定を変える場合はここも合わせて見直すこと)。
+    private int _editorMaxWidthPx = 15 * 42;
 
-    /// <summary>本文の最大幅(px)。0=テーマ既定。負値は0へ倒す。既定0。</summary>
+    /// <summary>本文の最大幅(px)。0=無制限。負値は0へ倒す。既定630(全角42文字相当、Markdownモードにのみ適用。
+    /// JS側でモードごとの出し分けを行う)。</summary>
     public int EditorMaxWidthPx
     {
         get => _editorMaxWidthPx;
@@ -685,6 +691,13 @@ internal sealed class AppSettings
 
     /// <summary>ファイルツリーの表示フィルタ(glob。`!`始まりで除外)。既定空。</summary>
     public List<string> FileTreePatterns { get; set; } = new();
+
+    /// <summary>
+    /// exeのあるフォルダをユーザー環境変数PATH(<c>HKCU\Environment</c>)へ追加するか(仕様書 F-14)。
+    /// インストーラを使わない方針のため管理者権限が要らないユーザー環境変数側にのみ登録する。
+    /// 既定false。実際の登録・解除は<see cref="PathEnvironmentService"/>が行う。
+    /// </summary>
+    public bool AddToPath { get; set; }
 
     // ================= その他(仕様書外の付随情報) =================
 

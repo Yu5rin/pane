@@ -25,7 +25,11 @@
   #main-area { flex: 1; min-height: 0; display: flex; }
   #cm-host { flex: 1; min-height: 0; overflow: hidden; position: relative; }
   #statusbar { display: flex; gap: 16px; padding: 0 10px; height: 24px; align-items: center; border-top: 1px solid var(--rule); font-size: 11px; color: var(--ink-mute); flex: none; font-family: var(--font-mono); }
-  #statusbar button { border: none; background: transparent; color: inherit; font: inherit; cursor: pointer; padding: 0 4px; }
+  /* min-heightを明示するのは、#status-encoding/#status-line-endingのように文書を開くまで
+     textContentが空になるボタンが、内容が空のあいだ高さ0になってクリックできなくなるのを防ぐため
+     (line-heightだけでは中身が空のテキストノードに行ボックスが生成されず効かないため、
+     min-heightでボタン自体の高さをstatusbarの行の高さぶん確保する)。 */
+  #statusbar button { border: none; background: transparent; color: inherit; font: inherit; cursor: pointer; padding: 0 4px; min-height: 20px; }
   #statusbar button:hover { color: var(--ink); }
 </style>
 </head>
@@ -76,8 +80,8 @@
     </button>
     <button id="status-mode" type="button" title="クリックでコードモードの言語を選択">Markdown</button>
     <span id="status-position">行 1, 列 1</span>
-    <span id="status-encoding"></span>
-    <span id="status-line-ending"></span>
+    <button id="status-encoding" type="button" title="クリックで文字コードを変更"></button>
+    <button id="status-line-ending" type="button" title="クリックで改行コードを変更"></button>
     <button id="status-wrap" type="button" title="折り返し表示を切り替え"></button>
     <button id="status-count" type="button" title="クリックで文字数の詳細を表示">0文字</button>
     <button id="status-zoom" type="button" title="クリックで実際のサイズに戻す">100%</button>
