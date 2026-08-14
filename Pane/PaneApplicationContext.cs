@@ -193,8 +193,26 @@ internal sealed class PaneApplicationContext : ApplicationContext
             Rectangle area = Screen.FromPoint(new Point(baseX, baseY)).WorkingArea;
             int x = baseX + offset;
             int y = baseY + offset;
+            // 右・下方向のはみ出し補正(元からある処理。カスケード配置がウィンドウの外に出ないように)。
             if (x + width > area.Right) x = area.Left + (offset % Math.Max(1, area.Width - width));
             if (y + height > area.Bottom) y = area.Top + (offset % Math.Max(1, area.Height - height));
+            // 左・上方向のはみ出し補正(右・下方向しか見ていなかった不具合の修正)。設定ファイルの
+            // 破損や、多モニタ環境で外部ディスプレイを外した後にその副モニタ側の座標が
+            // 保存されたままだったりすると、baseX/baseYが大きく負の値になりうる。
+            if (x < area.Left) x = area.Left;
+            if (y < area.Top) y = area.Top;
+
+            var candidate = new Rectangle(x, y, width, height);
+            // 上の補正だけでは救えないケース(例: Screen.FromPointが返した画面自体が既に
+            // 現在のモニタ構成に存在しない等)に備え、最終的な配置がどの画面にも一切
+            // 掛かっていない場合は主画面の中央へフォールバックする。
+            if (!Screen.AllScreens.Any(s => s.WorkingArea.IntersectsWith(candidate)))
+            {
+                Rectangle primary = Screen.PrimaryScreen?.WorkingArea ?? area;
+                x = primary.Left + Math.Max(0, (primary.Width - width) / 2);
+                y = primary.Top + Math.Max(0, (primary.Height - height) / 2);
+            }
+
             form.StartPosition = FormStartPosition.Manual;
             form.Location = new Point(x, y);
         }

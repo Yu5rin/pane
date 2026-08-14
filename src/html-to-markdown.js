@@ -2,6 +2,13 @@
 // 他アプリ(Word/ブラウザ等)からコピーした書式付きテキストを、Paneの記法に近い
 // Markdownへ簡易変換する。凝った構造(ネストしたテーブルの結合セル等)は諦めて
 // プレーンテキスト寄りにフォールバックする方針(スマートペーストは「壊れないこと」を優先する)。
+//
+// isHtmlInputTooDangerous(): html-sanitize.js と同じ基準(入力の長さ・ネスト段数)で、
+// DOMParserに渡す前に危険な入力を弾く。クリップボードのHTMLも生HTMLと同じく信頼できない
+// 入力であり、DOMParser.parseFromString()自体が深いネストに対してほぼ二次関数的な
+// コストを持つ点も共通のため、判定ロジックは一箇所(html-sanitize.js)にまとめて共用する。
+import { isHtmlInputTooDangerous } from "./html-sanitize.js";
+
 function textOf(node) {
   return node.textContent.replace(/\s+/g, " ").trim();
 }
@@ -93,6 +100,13 @@ function block(node, out, ctx) {
 }
 
 export function htmlToMarkdown(html) {
+  // パース前に長さ・ネスト段数を見積もり、危険なら丸ごと打ち切る。呼び出し側(main.js)は
+  // 戻り値が空文字列のときクリップボードのプレーンテキストへ自動的にフォールバックするため、
+  // ここでは「変換できなかった」ものとして扱えばよく、別途プレーンテキスト化する必要はない。
+  if (isHtmlInputTooDangerous(html)) {
+    console.log(`Pane: 貼り付けられたHTMLが長すぎる/ネストが深すぎるため変換を打ち切りました(文字数=${String(html ?? "").length})`);
+    return "";
+  }
   const doc = new DOMParser().parseFromString(html, "text/html");
   const out = [];
   block(doc.body, out, {});

@@ -16,7 +16,7 @@ import { renderMathToHtml } from "./math.js";
 import { renderMermaid } from "./mermaid-render.js";
 import { renderMarkdownToHtml, renderStandaloneHtml } from "./md-to-html.js";
 import { charClass, computeTextStats } from "./text-stats.js";
-import { sanitizeHtml } from "./html-sanitize.js";
+import { sanitizeHtml, isSafeUrl } from "./html-sanitize.js";
 import {
   CSS_COLOR_LANGS, findColorMatches, parseColorLiteral, formatColorLiteral,
   readableTextColor, openColorPickerPanel,
@@ -202,6 +202,13 @@ function openOrJumpLink(view, href, modifierKey) {
   }
   let url = href;
   if (!/^[a-zA-Z][\w+.-]*:/.test(url)) url = "https://" + url;
+  if (!isSafeUrl(url)) {
+    // html-sanitize.jsのisSafeUrl()と同じ基準で防御する。window.open("javascript:...")は
+    // WebView2(Chromium)の仕様上スクリプトを実行しないため現状は実害が無いが、
+    // md-to-html.jsの検証と一貫させ、万一の実装変更・別経路にも備える(#2)。
+    console.log(`Pane: 安全でないURLのため開きませんでした: ${url}`);
+    return;
+  }
   confirmOpenExternal(url, () => window.open(url, "_blank", "noopener"));
 }
 

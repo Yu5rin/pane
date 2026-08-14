@@ -25,6 +25,29 @@ const TREE_SPACER_HTML = '<span class="tree-spacer"></span>';
 const TREE_FOLDER_SVG = `<svg class="tree-icon" ${ICON_ATTRS}><path d="M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/></svg>`;
 const TREE_FILE_SVG = `<svg class="tree-icon" ${ICON_ATTRS}><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>`;
 
+// 「名前の変更…」「ここに新しいファイルを作成…」の入力検証(仕様書 4.2/4.3)。
+// C#側 Pane/FolderService.cs の IsValidEntryName() と同じ規則(パス区切り・".."・絶対パス・
+// Windowsで使えない文字・予約デバイス名)を複製する。C#側は「同じ親フォルダ内での改名/
+// 新規作成のみ許可する」という設計を実際に守る最終防衛線であり必須だが、それとは別に
+// こちらは入力中にすぐ間違いが分かるようにするためのもの(二重に守る。どちらか片方だけでは
+// 足りない: JS側はUI体験のため、C#側はブリッジ経由の直接呼び出し等をすり抜けないための保証)。
+const WINDOWS_RESERVED_NAMES = new Set([
+  "CON", "PRN", "AUX", "NUL",
+  "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+  "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+]);
+function validateEntryName(name) {
+  if (!name || !name.trim()) return "名前を入力してください。";
+  if (/[\\/]/.test(name)) return "名前に \\ や / を含めることはできません。";
+  if (name === "." || name === "..") return "この名前は使用できません。";
+  // ":"を含めているため、"C:\..."のようなドライブ文字付き絶対パスもここで弾かれる。
+  if (/[:*?"<>|]/.test(name) || /[\x00-\x1f]/.test(name)) return "名前に使用できない文字が含まれています。";
+  const dot = name.indexOf(".");
+  const baseName = dot >= 0 ? name.slice(0, dot) : name;
+  if (WINDOWS_RESERVED_NAMES.has(baseName.toUpperCase())) return `「${baseName}」はWindowsの予約名のため使用できません。`;
+  return null;
+}
+
 // relativePath(区切りは'/')から親フォルダ部分だけを取り出す。トップレベルなら空文字。
 function parentDirOf(relativePath) {
   const idx = relativePath.lastIndexOf("/");
@@ -183,7 +206,7 @@ export function createSidebar(editor, ctx) {
 
   // 4.2 記事リスト・ファイルツリーのファイル行(entry: { path, name, relativePath }相当)
   async function renameEntryFlow(entry) {
-    const name = await paneInput({ title: "名前の変更", message: "新しい名前を入力してください", value: entry.name, okLabel: "変更" });
+    const name = await paneInput({ title: "名前の変更", message: "新しい名前を入力してください", value: entry.name, okLabel: "変更", validate: validateEntryName });
     if (!name || name === entry.name) return;
     ctx.bridge.postMessage({ type: "rename-path", path: entry.path, newName: name });
   }
@@ -206,7 +229,7 @@ export function createSidebar(editor, ctx) {
 
   // 4.3 ファイルツリーのフォルダ行
   async function createFileFlow(dirEntry) {
-    const name = await paneInput({ title: "新しいファイルを作成", message: "新しいファイル名を入力してください(例: memo.md)", okLabel: "作成" });
+    const name = await paneInput({ title: "新しいファイルを作成", message: "新しいファイル名を入力してください(例: memo.md)", okLabel: "作成", validate: validateEntryName });
     if (!name) return;
     ctx.bridge.postMessage({ type: "create-file-in-folder", dirPath: dirEntry.path, name });
   }

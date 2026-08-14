@@ -22,10 +22,58 @@ internal sealed class AppSettings
     private static int ValidateIntSet(int value, int defaultValue, params int[] allowed) =>
         Array.IndexOf(allowed, value) >= 0 ? value : defaultValue;
 
-    public int? WindowX { get; set; }
-    public int? WindowY { get; set; }
-    public int? WindowWidth { get; set; }
-    public int? WindowHeight { get; set; }
+    // ウィンドウ位置・サイズの検証。設定ファイルが手で(あるいは何らかの事故で)壊れていた場合、
+    // 極端な座標や幅0・負の高さのままPaneApplicationContext側の復元処理に渡ると、画面外や
+    // 幅0のウィンドウが開き、再起動しても同じ壊れた値を読み直すため自己修復しない
+    // (実際に画面内へ収まっているかはモニタ構成に依存するため、その厳密な判定は
+    // PaneApplicationContext.OpenWindow側で行う。ここでは「そもそもあり得ない値」を
+    // 弾く最低限の検証だけを行う。他の数値設定(EditorFontSize等)と同じ方針)。
+
+    /// <summary>座標としてありうる範囲のおおまかな上限(絶対値)。マルチモニタ環境では主画面から
+    /// 数千px離れた位置に副モニタが配置されることも普通にあるため、その程度は正常値として通しつつ、
+    /// 設定ファイル破損時に起こりうる桁違いの異常値(int.MaxValue付近等)だけを弾く目的の値。</summary>
+    private const int MaxWindowCoordinate = 100_000;
+
+    /// <summary>ウィンドウ幅の下限(px)。タイトルバー・サイドバー・最低限の本文が表示できる目安。
+    /// SettingsWindow(640x480)より小さくてよいため、より控えめな値にした。</summary>
+    private const int MinWindowWidth = 400;
+
+    /// <summary>ウィンドウ高さの下限(px)。上記と同じ考え方。</summary>
+    private const int MinWindowHeight = 300;
+
+    private int? _windowX;
+
+    public int? WindowX
+    {
+        get => _windowX;
+        set => _windowX = value is int v ? Math.Clamp(v, -MaxWindowCoordinate, MaxWindowCoordinate) : null;
+    }
+
+    private int? _windowY;
+
+    public int? WindowY
+    {
+        get => _windowY;
+        set => _windowY = value is int v ? Math.Clamp(v, -MaxWindowCoordinate, MaxWindowCoordinate) : null;
+    }
+
+    private int? _windowWidth;
+
+    /// <summary>下限のみならずMaxWindowCoordinateも上限として使う(int.MaxValue級の異常値が
+    /// そのままRectangle計算(x + width等)に渡ってオーバーフローするのを避けるため)。</summary>
+    public int? WindowWidth
+    {
+        get => _windowWidth;
+        set => _windowWidth = value is int v ? Math.Clamp(v, MinWindowWidth, MaxWindowCoordinate) : null;
+    }
+
+    private int? _windowHeight;
+
+    public int? WindowHeight
+    {
+        get => _windowHeight;
+        set => _windowHeight = value is int v ? Math.Clamp(v, MinWindowHeight, MaxWindowCoordinate) : null;
+    }
 
     // ================= 一般 (general) =================
 

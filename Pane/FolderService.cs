@@ -226,11 +226,78 @@ internal static class FolderService
         }
     }
 
+    /// <summary>Windowsのデバイス予約名(拡張子を除いた部分がこれに一致すると使えない)。
+    /// 大文字小文字は区別しない。</summary>
+    private static readonly HashSet<string> ReservedDeviceNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    };
+
+    /// <summary>
+    /// Windowsのファイル名として使えない文字。Path.GetInvalidFileNameChars()は実行環境のOSに
+    /// よって結果が変わる(Linux上の.NETでは"/"以外ほとんど許可される)ため、常にWindowsの
+    /// ルールで検証したいここでは使わず、明示的に列挙する
+    /// (":"を含めているため、"C:\..."のようなドライブ文字付き絶対パスも自動的に弾かれる)。
+    /// </summary>
+    private static readonly char[] WindowsInvalidNameChars = "\\/:*?\"<>|".ToCharArray();
+
+    /// <summary>
+    /// リネーム・新規作成で受け取った名前が「同じ親フォルダの中の単なる名前」として妥当かを検証する。
+    /// RenamePath/CreateFileは「同じ親フォルダ内での改名/新規作成のみ許可する」設計だが、
+    /// Path.Combine(dir, name)はnameが絶対パスだとそれをそのまま返してしまう(dirを無視する)ため、
+    /// パス区切り・".."・絶対パス・Windowsで使えない文字・予約デバイス名を明示的に拒否する
+    /// (JS側 src/sidebar.js の paneInput の validate でも同じ規則を使って入力中に弾くが、
+    /// ここはその最終防衛線であり、こちらが本当のガード)。
+    /// </summary>
+    public static bool IsValidEntryName(string? name, out string? error)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            error = "名前を入力してください。";
+            return false;
+        }
+        if (name.IndexOfAny(new[] { '\\', '/' }) >= 0)
+        {
+            error = "名前に \\ や / を含めることはできません。";
+            return false;
+        }
+        if (name is "." or "..")
+        {
+            error = "この名前は使用できません。";
+            return false;
+        }
+        if (Path.IsPathRooted(name))
+        {
+            // 上のパス区切りチェックで大半は弾けるが、念のため実行環境のルールでも検証する
+            // (defense-in-depth。通常はここに到達する前に上の分岐で弾かれる)。
+            error = "絶対パスは指定できません。";
+            return false;
+        }
+        foreach (char c in name)
+        {
+            if (c < 0x20 || Array.IndexOf(WindowsInvalidNameChars, c) >= 0)
+            {
+                error = "名前に使用できない文字が含まれています。";
+                return false;
+            }
+        }
+        string baseName = name.IndexOf('.') is int dot && dot >= 0 ? name[..dot] : name;
+        if (ReservedDeviceNames.Contains(baseName))
+        {
+            error = $"「{baseName}」はWindowsの予約名のため使用できません。";
+            return false;
+        }
+        error = null;
+        return true;
+    }
+
     /// <summary>「名前の変更…」(仕様書 4.2)。同じ親フォルダ内での改名のみ許可する
     /// (移動は範囲外)。</summary>
     public static bool RenamePath(string path, string newName, out string? error)
     {
-        error = null;
+        if (!IsValidEntryName(newName, out error)) return false;
         try
         {
             string? dir = Path.GetDirectoryName(path);
@@ -255,7 +322,7 @@ internal static class FolderService
     /// 上書きしない(エラーにする)。</summary>
     public static bool CreateFile(string dirPath, string name, out string? error)
     {
-        error = null;
+        if (!IsValidEntryName(name, out error)) return false;
         try
         {
             string dest = Path.Combine(dirPath, name);
