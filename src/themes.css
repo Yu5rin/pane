@@ -70,12 +70,20 @@ html[data-theme="light"][data-light-theme="sepia"] {
   --code-type: #5B4B8A;
   --code-prop: #7A4A1E;
   --code-op: var(--ink);
+  --code-regex: #A33B4E;
 }
 
 /* github: GitHub風。白背景+青系アクセント。
-   --chrome-bg/--titlebar-bg: GitHub本体のUI階層(canvas.default→canvas.subtle→
-   canvas.inset)に倣い、サイドバーと同じcanvas.subtle相当(#F6F8FA)を
-   メニュー・タイトルバーにも適用(本文の白とだけ差を付ける2階調)。
+   --chrome-bg/--titlebar-bg: 【方針転換】以前はGitHub本体のUI階層に倣いサイドバーと
+   同じcanvas.subtle相当(#F6F8FA)を適用していたが、「メニューバー・タイトルバーは
+   本文・サイドバーのどちらよりも濃い(暗い)色にする」という全テーマ共通の原則
+   (ユーザーがTypora実機と比較して明示した要望、詳細はstyle.css側の該当コメント
+   参照)に合わせ、サイドバー(#F6F8FA)よりさらに一段濃いグレーにする。
+   GitHubのPrimer配色にサイドバー(canvas.subtle)よりさらに沈んだ中立グレー
+   (canvas.inset相当)があるため、その近似値(#EAEEF2)を採用した
+   (Primerの正確な配列は取得できなかったため近似値である旨を明記する)。
+   本文(白)→サイドバー(#F6F8FA)→メニュー・タイトルバー(#EAEEF2、最も濃い)の
+   3階調になる。
    シンタックスハイライト(--code-*): 「性格に合わせて決めてよい」対象だが、他の
    部位(--accent等)を実機のGitHub Primer配色に忠実に合わせている以上、コードの
    配色だけ架空の値にするとかえって嘘っぽくなる。そこでGitHub本体が実際に使っている
@@ -97,8 +105,8 @@ html[data-theme="light"][data-light-theme="github"] {
   --accent-hover: #0550AE;
   --accent-soft: #DDF4FF;
   --code-bg: #F6F8FA;
-  --chrome-bg: #F6F8FA;
-  --titlebar-bg: #F6F8FA;
+  --chrome-bg: #EAEEF2;
+  --titlebar-bg: #EAEEF2;
   --code-kw: #D73A49;
   --code-kw2: #D73A49;
   --code-var: #005CC5;
@@ -109,12 +117,19 @@ html[data-theme="light"][data-light-theme="github"] {
   --code-type: #6F42C1;
   --code-prop: #005CC5;
   --code-op: var(--ink);
+  --code-regex: #B31D28;
 }
 
 /* solarized-light: Solarized(Ethan Schoonover配色)のライト側。
-   --chrome-bg/--titlebar-bg: Solarized公式パレットにbase3(本文)/base2(UI)の
-   2階調しか無いため、サイドバーと同じbase2(#EEE8D5)をメニュー・タイトルバーにも
-   適用(本文の色とだけ差を付ける2階調)。
+   --chrome-bg/--titlebar-bg: 【方針転換】以前はSolarized公式パレットにbase3(本文)/
+   base2(UI)の2階調しか無いため、サイドバーと同じbase2(#EEE8D5)をそのまま
+   メニュー・タイトルバーにも適用していた。しかし「メニューバー・タイトルバーは
+   本文・サイドバーのどちらよりも濃い(暗い)色にする」という全テーマ共通の原則
+   (詳細はstyle.css側の該当コメント参照)に合わせ、サイドバー(base2)よりさらに
+   濃い値が要る。Solarizedの公式パレットにbase2より暗く、かつbase01(本来は
+   文字色用でUI背景には暗すぎる)より明るい中間段は存在しないため、base2を黒へ
+   12%ほど寄せた独自値(#D1CCBB)を採用した(公式に該当する段が無いための
+   独自算出であることを明記する)。
    シンタックスハイライト(--code-*): 役割の割り当ては公式のvim-colors-solarized
    ソース(altercation/vim-colors-solarized)のhi宣言に忠実に従う
    (Statement=green、Type=yellow、Constant(String/Number/Bool共通)=cyan、
@@ -142,8 +157,8 @@ html[data-theme="light"][data-light-theme="solarized-light"] {
   --accent-hover: #1E6FA8;
   --accent-soft: #E3EFFA;
   --code-bg: #EEE8D5;
-  --chrome-bg: #EEE8D5;
-  --titlebar-bg: #EEE8D5;
+  --chrome-bg: #D1CCBB;
+  --titlebar-bg: #D1CCBB;
   --code-kw: #647300;
   --code-kw2: #647300;
   --code-var: #1D689E;
@@ -154,15 +169,20 @@ html[data-theme="light"][data-light-theme="solarized-light"] {
   --code-type: #886700;
   --code-prop: #1D689E;
   --code-op: var(--ink);
+  --code-regex: #A52623;
 }
 
 /* ---- ダーク用プリセット ---- */
 
 /* nord: Nord配色。
-   --chrome-bg/--titlebar-bg: Nord公式パレットはnord0(本文)/nord1(UI)/nord2(選択・
-   強調)の3段階を持つ。--surface(サイドバー)は元からnord1(#3B4252)だったため、
-   メニュー・タイトルバーにはその1段階濃いnord2(#434C5E)を割り当て、
-   本文・サイドバー・メニュー/タイトルバーの3階調にした。
+   --chrome-bg/--titlebar-bg: 【方針転換】以前はNord公式パレットのnord0(本文)/
+   nord1(サイドバー)/nord2(メニュー・タイトルバー)という3段階(明るくなる方向)を
+   採用していた。しかし「メニューバー・タイトルバーは本文・サイドバーのどちらよりも
+   濃い(暗い)色にする」という全テーマ共通の原則(詳細はstyle.css側の該当コメント
+   参照)に合わせて方向を反転する。Nord公式パレットにnord0(本文)より暗い色は
+   無いため、下の--code-bgと同じ考え方でnord0を黒へ寄せた独自値を使うが、
+   --code-bgと完全に同じ値にすると役割が紛れるため、--code-bg(30%黒寄せ)より
+   ゆるい22%黒寄せの値(#242932)を採用した。
    --code-bg: 旧値#333A47は本文(nord0 #2E3440)よりわずかに明るく、「コードブロックが
    本文よりはっきり暗い」という今回の要望に反していた。Nord公式パレットにnord0より
    暗い色は無いため、nord0を黒へ30%寄せた値(#20242D)を採用する(色相はNordの
@@ -185,8 +205,8 @@ html[data-theme="dark"][data-dark-theme="nord"] {
   --accent-hover: #8FBCBB;
   --accent-soft: #3B4A52;
   --code-bg: #20242D;
-  --chrome-bg: #434C5E;
-  --titlebar-bg: #434C5E;
+  --chrome-bg: #242932;
+  --titlebar-bg: #242932;
   --code-kw: #81A1C1;
   --code-kw2: #81A1C1;
   --code-var: #D8DEE9;
@@ -197,6 +217,7 @@ html[data-theme="dark"][data-dark-theme="nord"] {
   --code-type: #8FBCBB;
   --code-prop: #D8DEE9;
   --code-op: #81A1C1;
+  --code-regex: #CB7D85;
 }
 
 /* dracula: Dracula配色。
@@ -204,9 +225,14 @@ html[data-theme="dark"][data-dark-theme="nord"] {
    VSCode版Dracula拡張の慣習(サイドバーを本文より暗い#21222Cにする)に倣い、
    --surface(#343746、フローティングUI全般で使う値。変更なし)とは別に
    --sidebar-bgだけ上書きした。
-   --chrome-bg/--titlebar-bg: 既存の--surface(#343746、本文より明るい"Current Line"
-   寄りの色)をそのまま流用。結果として サイドバー(#21222C、最も暗い) <
-   本文(#282A36) < メニュー/タイトルバー(#343746、最も明るい) の3階調になる。
+   --chrome-bg/--titlebar-bg: 【方針転換】以前は既存の--surface(#343746、本文より
+   明るい"Current Line"寄りの色)を流用し、サイドバー(#21222C、最も暗い) < 本文
+   (#282A36) < メニュー/タイトルバー(#343746、最も明るい)という3階調にしていた。
+   しかし「メニューバー・タイトルバーは本文・サイドバーのどちらよりも濃い(暗い)
+   色にする」という全テーマ共通の原則(詳細はstyle.css側の該当コメント参照)に
+   合わせて方向を反転する。Dracula公式パレットにサイドバー(#21222C、VSCode拡張の
+   慣習値で公式ではない)よりさらに暗い定義は無いため、本文(#282A36)を黒へ35%
+   寄せた独自値(#1B1C24、サイドバーの#21222Cよりも暗い)を採用した。
    --code-bg: 旧値#2F3140は本文(#282A36)よりわずかに明るく、「コードブロックが本文より
    はっきり暗い」という今回の要望に反していた。Dracula公式パレットに本文より暗い色の
    定義は無いため、本文を黒へ25%寄せた値(#1E2029)を採用する。
@@ -229,8 +255,8 @@ html[data-theme="dark"][data-dark-theme="dracula"] {
   --accent-soft: #3B3D52;
   --code-bg: #1E2029;
   --sidebar-bg: #21222C;
-  --chrome-bg: #343746;
-  --titlebar-bg: #343746;
+  --chrome-bg: #1B1C24;
+  --titlebar-bg: #1B1C24;
   --code-kw: #FF79C6;
   --code-kw2: #FF79C6;
   --code-var: #F8F8F2;
@@ -241,12 +267,19 @@ html[data-theme="dark"][data-dark-theme="dracula"] {
   --code-type: #8BE9FD;
   --code-prop: #8BE9FD;
   --code-op: #FF79C6;
+  --code-regex: #FF5555;
 }
 
 /* solarized-dark: Solarizedのダーク側。
-   --chrome-bg/--titlebar-bg: Solarized公式パレットにbase03(本文)/base02(UI)の
-   2階調しか無いため、サイドバーと同じbase02(#073642)をメニュー・タイトルバーにも
-   適用(本文の色とだけ差を付ける2階調)。
+   --chrome-bg/--titlebar-bg: 【方針転換】以前はSolarized公式パレットにbase03
+   (本文)/base02(UI)の2階調しか無いため、サイドバーと同じbase02(#073642)を
+   そのままメニュー・タイトルバーにも適用していた。しかし「メニューバー・
+   タイトルバーは本文・サイドバーのどちらよりも濃い(暗い)色にする」という
+   全テーマ共通の原則(詳細はstyle.css側の該当コメント参照)に合わせ、
+   サイドバー(base02)よりさらに濃い値が要る。本文(base03)より暗い公式の段も
+   無いため、下の--code-bgで使ったbase03の25%黒寄せ(#001F2A)よりもさらに
+   ゆるい15%黒寄せの独自値(#00252E)を採用した(--code-bgとの役割の混同を
+   避けるため、あえて同値にしていない)。
    --code-bg: 旧値はサイドバー/chrome-bgと同じbase02(#073642)を流用していたが、
    本文(base03 #002B36)より明るく、「コードブロックが本文よりはっきり暗い」という
    今回の要望に反していた。Solarized公式パレットにbase03より暗い色は無いため、
@@ -272,8 +305,8 @@ html[data-theme="dark"][data-dark-theme="solarized-dark"] {
   --accent-hover: #4CA6E0;
   --accent-soft: #0E4B5E;
   --code-bg: #001F2A;
-  --chrome-bg: #073642;
-  --titlebar-bg: #073642;
+  --chrome-bg: #00252E;
+  --titlebar-bg: #00252E;
   --code-kw: #859900;
   --code-kw2: #859900;
   --code-var: #268BD2;
@@ -284,6 +317,7 @@ html[data-theme="dark"][data-dark-theme="solarized-dark"] {
   --code-type: #B58900;
   --code-prop: #268BD2;
   --code-op: var(--ink);
+  --code-regex: #E56563;
 }
 
 /* night: Typoraの「Night」テーマ移植(ユーザー要望、id/ラベルは実機フィードバックで
@@ -292,8 +326,8 @@ html[data-theme="dark"][data-dark-theme="solarized-dark"] {
    という要望の実例として最初に用意したプリセット(このプリセットのために
    --chrome-bg/--sidebar-bg/--titlebar-bg/--titlebar-fgを導入した)。
 
-   【実機フィードバックによる修正】Typora本体と並べて比較したところ、メニューバー・
-   タイトルバーの色が異なると指摘された。Typora公式のnight.cssを確認したところ、
+   【実機フィードバックによる修正・1回目】Typora本体と並べて比較したところ、メニュー
+   バー・タイトルバーの色が異なると指摘された。Typora公式のnight.cssを確認したところ、
    以下の2点に移植の誤りがあった。
      1. Typora本体は#top-titlebarに専用の背景色指定を持たず、--bg-color(本文と
         同じ色)を継承する。つまり実際のTyporaは「タイトルバー・メニューバーは
@@ -302,7 +336,57 @@ html[data-theme="dark"][data-dark-theme="solarized-dark"] {
         (#2E3033)に揃えてしまっていた(誤り)。
      2. --primary-color(アクセント色)は正しくは#6dc1e7。旧実装は#a5b4cbを
         使っていた(誤り)。
-   この2点を修正し、Typora公式night.cssの値に忠実にした。
+   この2点を修正し、いったんTypora公式night.cssの値に忠実にした(メニュー/
+   タイトルバーをvar(--paper)にして本文と同色にした)。
+
+   【実機フィードバックによる修正・2回目、Typora準拠から再度方針転換】上記の
+   修正で「本文・タイトルバー・メニューバーが同色、サイドバーだけ別色」という
+   Typora準拠の2階調にしたところ、今度は「タイトルバーとメニューバーの色が
+   戻っています(メリハリが失われた)」という指摘を受けた。ユーザーの一連の要望を
+   時系列で並べると:
+     (1) 「メニューバー・タイトルバーの色がTyporaと違う」→ Typora準拠(2階調)に修正
+     (2) 「他のカラーモードも本文・サイドバー・メニュー+タイトルバーで色を変えて
+          ほしい。メリハリが付いていて良いと思うので」→ 他の7プリセット・既定を
+          3階調化(このコメント末尾の他プリセットの説明を参照)
+     (3) 「タイトルバーとメニューバーの色が戻っている」→ 今回の修正
+   (1)のときはTypora準拠を優先したが、(2)(3)を踏まえると、ユーザーが一貫して
+   優先しているのは「Typora本体との完全一致」ではなく「3つの領域が見てすぐ
+   区別できるメリハリ」だと判断できる。そのため、nightだけ2階調(本文+タイトルバー
+   =サイドバー)に据え置くのをやめ、他の8テーマ(既定・sepia・github・
+   solarized-light・nord・dracula・solarized-dark)と同じ3階調(本文 <
+   サイドバー(暗) / メニュー・タイトルバー(明) の3色)に変更する。
+   【今後この判断を見た人へ】「Typora本体の#top-titlebarに専用の背景指定が無い」
+   という上記1回目修正時の調査結果それ自体は事実であり、誤りではない。しかし
+   「Typora本体に忠実であること」よりも「ユーザーが求める3階調のメリハリ」を
+   優先するとあえて決めた結果、ここだけTypora本体とは異なる配色になっている。
+   Typora本体と見比べて「タイトルバーの色が違う」と気づいても、それは意図した
+   差分なので絶対にTypora準拠へ戻さないこと(このコメントが無いと、また
+   同じ調査から--chrome-bg: var(--paper)へ戻してしまいかねないため明記する)。
+   具体的な色は、本文(#363B40)・サイドバー(#2E3033、いずれもTypora公式値のため
+   変更しない)に対し、当時の既定ダーク(--paper < --surface < --chrome-bgの順で
+   明るくなる並び)にあわせた「本文よりワントーン明るい第3の色」#3E444Aを
+   新設していた。
+
+   【実機フィードバックによる修正・3回目、明暗の方向が全体的に逆だった】上記
+   2回目の修正(#3E444A、本文より明るい)を適用した直後、今度はユーザーから
+   Typora実機のダーク画面が届き、「Typoraのタイトルバー+メニューバーはサイドバー
+   より濃い(暗い)。Paneも同じにしたい」という明確な指摘を受けた。2回目の修正は
+   「本文・サイドバーと違う色にする」という点は正しく押さえていたが、明暗の
+   方向を逆に判断していた(本文より明るくしていたが、Typoraは逆に暗くしている)。
+   これを受けて、Pane全体の原則を次のとおり確定する(詳細・根拠はstyle.css側の
+   該当コメント参照): メニューバー・タイトルバーは、本文・サイドバーの
+   どちらよりも濃い(暗い)色にする。night単体の話ではなく全9テーマに適用する
+   原則としたため、既定ダーク・nord・dracula・solarized-dark・solarized-light・
+   githubも同じ方針でこのファイル内の該当箇所を修正している。
+   night自体の値は、本文(#363B40)・サイドバー(#2E3033、どちらもTypora公式値
+   なので変更しない)のどちらよりも濃い#26282B(コーディネーター提案値をそのまま
+   採用)にした。サイドバー(#2E3033)よりもさらに一段暗く、メニューバーの文字色
+   --ink(#b8bfc6)とのコントラスト比は約8.0で、本文(#363B40)に対する6.1より
+   むしろ高く、文字は問題なく読める。
+   【今後この判断を見た人へ】このコメントには方向違いの修正(2回目)の記録も
+   あえて残してある。「本文より明るい色にする」という2回目の判断は、実機との
+   比較で誤りと判明したものなので、絶対に#3E444A(またはそれに類する「本文より
+   明るい」値)へ戻さないこと。
 
    色の対応づけ(Typora公式night.cssより):
      --paper                   … --bg-color(#363B40)。
@@ -312,17 +396,12 @@ html[data-theme="dark"][data-dark-theme="solarized-dark"] {
                                   変数が別途無いため、サイドバーと同じ色として扱う
                                   (以前からの扱いを踏襲)。
      --chrome-bg / --titlebar-bg
-                                … 明示的にvar(--paper)を指定し、本文と同じ色にする
-                                  (Typora本体の#top-titlebarと同じ見た目にするため)。
-                                  「既定(プリセット無し)も本文よりわずかに濃い/
-                                  明るい--chrome-bgを持つ」よう変更した(style.css側)
-                                  ため、このnight用ルールで上書きしないとnightにも
-                                  既定側の値が漏れてきてしまう(このファイルの
-                                  data-dark-theme="night"セレクタの方がstyle.css側の
-                                  html[data-theme="dark"]より詳細度が高いため、
-                                  ここで明示しないと打ち消せない)。そのため
-                                  「あえて何も書かない」ではなく「var(--paper)を
-                                  明示する」方針にした。
+                                … 【3回目の修正で確定】Typora本体の#top-titlebarに
+                                  忠実にするならvar(--paper)(本文と同色)だが、上記
+                                  「実機フィードバックによる修正・2回目/3回目」の
+                                  経緯によりあえてTypora非準拠の第3の色#26282Bを
+                                  採用した(詳細な根拠は同セクション参照。本文・
+                                  サイドバーのどちらよりも濃い(暗い)色)。
      --accent                   … --primary-color(#6dc1e7)。
      --accent-hover              … Typora側にprimary-colorの2色目(ホバー用)が
                                   無いため、他プリセットの傾向に倣い独自に決めた値。
@@ -371,8 +450,8 @@ html[data-theme="dark"][data-dark-theme="night"] {
   --paper: #363B40;
   --surface: #2E3033;
   --sidebar-bg: #2E3033;
-  --chrome-bg: var(--paper);
-  --titlebar-bg: var(--paper);
+  --chrome-bg: #26282B;
+  --titlebar-bg: #26282B;
   --ink: #b8bfc6;
   --ink-sub: #838A92;
   --ink-mute: #6A7280;
@@ -392,4 +471,5 @@ html[data-theme="dark"][data-dark-theme="night"] {
   --code-type: #7FB4CA;
   --code-prop: #8FA8C4;
   --code-op: var(--ink);
+  --code-regex: #DF9090;
 }
