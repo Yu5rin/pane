@@ -131,6 +131,19 @@ let folderData = null;
 // HTML側は確認ダイアログの判定等に使う内部状態としてのみ保持する。
 let isDirty = false;
 let isReadOnly = false;
+// ---- ダーティ判定の基準(実機不具合の修正) ----
+// 以前は「変更操作があったか(onChangeが呼ばれたかどうか)」でdirtyを立てていたため、
+// 文字を打ってからCtrl+Z・BackSpace等で読み込み時/保存時とまったく同じ内容に戻しても
+// 「未保存」表示が消えなかった。VS Code・Typora・メモ帳など主要なエディタはいずれも
+// 「内容が最後に保存(または読み込み)した状態と一致していればdirty表示を消す」ため、それに揃える。
+// savedDocRef: 最後に保存/読み込みした時点のCodeMirrorのdoc(Text、markSaved()で更新)。
+// nullは「基準が無い」ことを示す特殊値で、常にdirty扱いにしたい場合(クラッシュリカバリ
+// からの復元直後など)にだけ使う。
+let savedDocRef = null;
+// 文字コード・改行コードをステータスバーから明示的に変更したことによる追加のダーティフラグ。
+// 本文そのものは変わらないが、保存すると別の内容(別のバイト列)になるため、本文の一致とは
+// 独立してdirty扱いにする(markSaved()でクリアする)。
+let metaDirty = false;
 const closedFiles = []; // 閉じたファイルを再度開く(このウィンドウ内での置き換え履歴、ブリッジ利用時のみ)
 const CLOSED_FILES_CAP = 20;
 // グローバル検索のヒット行クリック(仕様書 第2.6節 G-02)から「開いたら指定行へジャンプする」
@@ -316,6 +329,40 @@ function setDirty(v) {
       notifyTabsChanged();
     }
   }
+}
+// 2つのdoc(CodeMirrorのText)が同じ内容かどうか。Textは長さが違えば即座にfalseを返すため
+// 比較自体は比較的安価だが、1万行規模の文書で入力のたびに全比較するのは避けたいので、
+// 呼び出し側(computeIsDirty)でまず参照そのものが同じでないか・長さが違わないかを見てから、
+// 本当に必要な場合(長さが同じで中身を実際に見比べないと判定できない場合)だけTextのeq()に
+// 委ねる。通常の1文字挿入・削除は長さが変わるため、ここでO(1)の判定になる。
+function docsEqual(a, b) {
+  if (a === b) return true; // 同一のTextインスタンス(未編集で参照が変わっていない)
+  if (a.length !== b.length) return false;
+  return a.eq(b);
+}
+// 現在の内容が「未保存かどうか」を、変更操作の有無ではなく内容そのものから判定する。
+// metaDirty(文字コード・改行コードの明示変更)は本文の一致とは独立に常にdirty扱いにする。
+// savedDocRefが無い(クラッシュリカバリ直後等)場合は、比較のしようが無いため常にdirty扱いにする。
+function computeIsDirty() {
+  if (metaDirty) return true;
+  if (!savedDocRef) return true;
+  return !docsEqual(editor.view.state.doc, savedDocRef);
+}
+// 内容変化のたびに呼ぶ。実際にdirtyの値が変わった時だけsetDirty()(DOM更新・C#側への
+// postMessage・タブの●同期)を行うことで、dirty=trueのまま入力し続けている間の
+// 無駄な通知(bridge.postMessage)の連打を避ける。
+function refreshDirty() {
+  const next = computeIsDirty();
+  if (next !== isDirty) setDirty(next);
+}
+// 現在の内容を「保存済み/読み込み済みの基準」として確定する。ファイルを開く・保存する・
+// 名前を付けて保存する・新規文書を作る・外部変更を再読み込みする、の各経路の最後に
+// 必ず呼ぶこと(取りこぼすと「保存したのに未保存のままになる」等の不具合になる)。
+// クラッシュリカバリからの復元(仕様書 N-06)は例外で、復元直後から意図的にdirty扱いに
+// したいためこれを呼ばない(savedDocRefをnullのままにし、常にcomputeIsDirty()===trueにする)。
+function markSaved() {
+  savedDocRef = editor.view.state.doc;
+  metaDirty = false;
 }
 function setName(name) {
   currentName = name;
@@ -545,7 +592,10 @@ function setEncoding(label) {
   const tab = activeTab(); // タブ形式(displayMode==="tab")のときは表示中のタブにも書き戻す
   if (tab) tab.encoding = label; // (次のnotifyTabsChangedで古い値に巻き戻らないようにするため)
   updateStatusMeta();
-  setDirty(true);
+  // 本文は変わらないが保存すると別の内容(別のバイト列)になるため、内容の一致とは
+  // 独立してdirty扱いにする(metaDirty。computeIsDirty参照)。
+  metaDirty = true;
+  refreshDirty();
   bridge?.postMessage({ type: "set-encoding", encoding: label });
 }
 function setLineEnding(label) {
@@ -555,7 +605,9 @@ function setLineEnding(label) {
   const tab = activeTab();
   if (tab) tab.lineEnding = label;
   updateStatusMeta();
-  setDirty(true);
+  // 同上(setEncoding参照): 本文は変わらないが保存内容は変わるためmetaDirtyを立てる。
+  metaDirty = true;
+  refreshDirty();
   bridge?.postMessage({ type: "set-line-ending", lineEnding: label });
 }
 function buildEncodingMenuTree() {
@@ -803,7 +855,10 @@ window.addEventListener("afterprint", exitExportLayout);
 
 const editor = createEditor(host, {
   onChange() {
-    setDirty(true);
+    // 実機不具合の修正: 以前はここで無条件にsetDirty(true)していたため、入力してから
+    // Ctrl+Z等で元の内容にぴったり戻しても「未保存」表示が残ったままだった。
+    // 内容が保存/読み込み時の基準と一致しているかどうかで判定し直す(computeIsDirty参照)。
+    refreshDirty();
     // サイドバー(アウトラインパネル)の更新はsidebar.js側で300msデバウンスし、
     // かつ閉じている間・アウトライン以外を見ている間は再計算しない(性能要件)。
     sidebar.refresh();
@@ -1521,6 +1576,11 @@ function saveActiveTabSnapshot() {
   tab.lineEnding = currentLineEnding;
   tab.readOnly = isReadOnly;
   tab.dirty = isDirty;
+  // ダーティ判定の基準(computeIsDirty参照)もタブごとに独立させる。ここで書き戻して
+  // おかないと、他のタブへ切り替えて戻ってきたときに「別のタブの基準」と比較してしまい、
+  // 誤った未保存判定になる。
+  tab.savedDoc = savedDocRef;
+  tab.metaDirty = metaDirty;
 }
 // C#側(タイトル・自動保存対象・セッション復元用パスの追跡)へ、タブの一覧を送る。
 // 頻度は「タブが増減した/切り替わった/dirty状態が変わった」時だけで、入力のたびには送らない。
@@ -1653,6 +1713,7 @@ async function closeTabsToRight(fromId) {
 }
 // 新規タブ用の空のタブオブジェクトを作る(共通部分。newTab/openInNewTab/closeTabの補充から使う)。
 function makeEmptyTab() {
+  const freshState = editor.createFreshState("");
   return {
     id: tabIdSeq++,
     guid: makeTabGuid(),
@@ -1662,7 +1723,11 @@ function makeEmptyTab() {
     lineEnding: null,
     readOnly: false,
     dirty: false,
-    editorState: editor.createFreshState(""),
+    // 空の新規タブの基準は「空文書」そのもの(まだ何も入力していないのでdirtyではない)。
+    // editorStateと同じcreateFreshState("")の結果からdocを取ることで、生成を1回で済ませる。
+    savedDoc: freshState.doc,
+    metaDirty: false,
+    editorState: freshState,
     mode: "markdown",
     codeLanguage: null,
     sourceMode: false,
@@ -1720,6 +1785,11 @@ function switchToTab(id, { skipSaveCurrent = false } = {}) {
   currentEncoding = next.encoding;
   currentLineEnding = next.lineEnding;
   setReadOnly(next.readOnly);
+  // ダーティ判定の基準(computeIsDirty参照)もタブごとに切り替える。next.dirtyは
+  // saveActiveTabSnapshotで書き戻された時点の判定結果をそのまま使う(savedDoc/metaDirtyと
+  // 揃って保存されているため、ここで改めてcomputeIsDirty()し直さなくても整合する)。
+  savedDocRef = next.savedDoc ?? null;
+  metaDirty = next.metaDirty ?? false;
   setDirty(next.dirty);
   const scrollTop = next.scrollTop, scrollLeft = next.scrollLeft;
   requestAnimationFrame(() => {
@@ -1795,6 +1865,9 @@ function applyDisplayMode(next) {
       lineEnding: currentLineEnding,
       readOnly: isReadOnly,
       dirty: isDirty,
+      // 今まさに画面に出している内容の基準(computeIsDirty参照)をそのままタブへ引き継ぐ。
+      savedDoc: savedDocRef,
+      metaDirty,
       editorState: editor.getEditorState(),
       ...editor.getModeSnapshot(),
       scrollTop: editor.view.scrollDOM.scrollTop,
@@ -1825,6 +1898,10 @@ async function applyOpenInTab(msg) {
   tab.lineEnding = msg.lineEnding;
   tab.readOnly = !!msg.readOnly;
   tab.dirty = false;
+  // makeEmptyTab()時点のsavedDocは「空文書」の基準のままなので、いま読み込んだ内容に
+  // 合わせて更新する(ここを取りこぼすと、内容がある状態のタブなのに毎回dirty判定されてしまう)。
+  tab.savedDoc = tab.editorState.doc;
+  tab.metaDirty = false;
   // createFreshStateは常にMarkdown初期状態のため、拡張子・記憶に基づく実際のモードを
   // 改めて適用する必要がある(applyFileOpenedと同じ決定ロジック)。modePending:trueにしておくと、
   // これから行うswitchToTab(このタブへの切替)が自動的にresolveTabFileMode()を呼んで
@@ -1877,6 +1954,12 @@ async function applyFileOpened(msg) {
   currentEncoding = msg.encoding;
   currentLineEnding = msg.lineEnding;
   setReadOnly(msg.readOnly);
+  // ダーティ判定の基準(computeIsDirty参照)を、いま読み込んだ内容に確定させる。
+  // ただし異常終了後の自動保存スナップショットからの復元(msg.recovered、仕様書 N-06)は
+  // 例外: 「元ファイルの内容ではなく未保存の編集内容を表示する」ため、復元直後から
+  // 意図的にdirty扱いにしたい。savedDocRefをnullのままにしておくことでcomputeIsDirty()が
+  // 常にtrueを返すようにする(markSaved()は呼ばない)。
+  if (!msg.recovered) markSaved();
   if (isLogFile) {
     const stamp = formatDateTimeStamp(new Date());
     const endPos = editor.view.state.doc.length;
@@ -1888,7 +1971,7 @@ async function applyFileOpened(msg) {
     suppressNextAutoDetectChange = false;
     setDirty(true); // 追記した時点で未保存状態にする(仕様書どおり)
   } else {
-    setDirty(false);
+    setDirty(!!msg.recovered); // 復元時はtrue、通常の読み込みはfalse(基準と一致しているため)
   }
   updateCount();
   updateStatusMeta();
@@ -1926,6 +2009,7 @@ async function applyNewDocumentLocal(msg) {
   encodingSetExplicitly = false;
   lineEndingSetExplicitly = false;
   setReadOnly(false);
+  markSaved(); // ダーティ判定の基準を「空文書」に確定させる
   setDirty(false);
   updateCount();
   updateStatusMeta();
@@ -1967,6 +2051,7 @@ async function handleHostMessage(msg) {
         currentEncoding = msg.encoding;
         currentLineEnding = msg.lineEnding;
         setReadOnly(false);
+        markSaved(); // ダーティ判定の基準を「いま保存した内容」に確定させる(名前を付けて保存も含む)
         setDirty(false);
         updateStatusMeta();
         if (nextExt !== prevExt) {
@@ -2272,6 +2357,7 @@ async function openFile() {
     setEditorValueQuiet(await file.text());
     currentHandle = handle;
     setName(file.name);
+    markSaved(); // ダーティ判定の基準を「いま読み込んだ内容」に確定させる
     setDirty(false);
     updateCount();
     updateStatusMode();
@@ -2288,6 +2374,7 @@ fileInput.addEventListener("change", async () => {
   setEditorValueQuiet(await file.text());
   currentHandle = null;
   setName(file.name);
+  markSaved();
   setDirty(false);
   updateCount();
   updateStatusMode();
@@ -2408,6 +2495,7 @@ window.addEventListener("drop", async (e) => {
   currentHandle = null;
   currentPath = null;
   setName(file.name);
+  markSaved();
   setDirty(false);
   updateCount();
   updateStatusMode();
@@ -2444,6 +2532,7 @@ async function saveFile(forcePicker) {
     await writable.write(text);
     await writable.close();
     setName(currentHandle.name);
+    markSaved(); // ダーティ判定の基準を「いま保存した内容」に確定させる
     setDirty(false);
     return;
   }
@@ -2454,6 +2543,10 @@ async function saveFile(forcePicker) {
   a.download = currentName === "無題" ? "無題.md" : currentName;
   a.click();
   URL.revokeObjectURL(a.href);
+  // ダウンロード保存(ブラウザ単体フォールバック)には元ファイルという概念が無いため、
+  // ダウンロードした時点の内容を基準にする(実ファイルへの保存ではないが、他の保存経路と
+  // 同じくdirty表示を消す既存挙動に合わせる)。
+  markSaved();
   setDirty(false);
 }
 

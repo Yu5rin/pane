@@ -323,8 +323,13 @@ function comboFromEvent(e) {
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
-function fieldCheckbox(key, title, desc) {
-  return `<label class="settings-checkbox-row"><input type="checkbox" data-field="${key}"><span class="settings-checkbox-title">${title}${desc ? `<span class="settings-field-desc">${desc}</span>` : ""}</span></label>`;
+// invert: true を渡すと、チェックボックスの見た目(チェックON/OFF)と実際の設定値
+// (draft[key])を反転させる。quitOnLastWindowClosed用(依頼: 「最後のウィンドウを閉じても
+// 常駐させる」という、チェックを付けると常駐する向きのUIにしたいが、設定キー自体は
+// 既存互換のため反転させずに残す)。data-invert属性を付け、実際の反転処理はここではなく
+// wireCommonFields側で行う(値の読み書きが集約されている場所と揃えるため)。
+function fieldCheckbox(key, title, desc, { invert = false } = {}) {
+  return `<label class="settings-checkbox-row"><input type="checkbox" data-field="${key}"${invert ? " data-invert" : ""}><span class="settings-checkbox-title">${title}${desc ? `<span class="settings-field-desc">${desc}</span>` : ""}</span></label>`;
 }
 function fieldSelect(key, label, options, desc) {
   const opts = options.map(([v, t]) => `<option value="${escapeHtml(v)}">${escapeHtml(t)}</option>`).join("");
@@ -886,8 +891,12 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     }
     for (const cb of container.querySelectorAll('input[type="checkbox"][data-field]')) {
       const key = cb.dataset.field;
-      cb.checked = !!draft[key];
-      cb.addEventListener("change", () => { draft[key] = cb.checked; markDirty(); });
+      // data-invert: UI上のチェックの意味と設定値(draft[key])を反転させる項目
+      // (quitOnLastWindowClosed用。fieldCheckboxのコメント参照)。チェックON=常駐する
+      // ⇔ draft.quitOnLastWindowClosed=false、という向きになる。
+      const invert = cb.hasAttribute("data-invert");
+      cb.checked = invert ? !draft[key] : !!draft[key];
+      cb.addEventListener("change", () => { draft[key] = invert ? !cb.checked : cb.checked; markDirty(); });
     }
     for (const sel of container.querySelectorAll("select[data-field]")) {
       const key = sel.dataset.field;
@@ -981,8 +990,19 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
       </div>
       <div class="settings-group">
         <div class="settings-group-title">起動・終了</div>
-        ${fieldCheckbox("quitOnLastWindowClosed", "最後のウィンドウを閉じたら終了する")}
-        ${fieldCheckbox("preloadOnStartup", "PCの起動時に常駐して起動を速くする")}
+        <!-- ユーザー報告: 「チェックを付ける=常駐する」だと誤解していた
+             (旧文言「最後のウィンドウを閉じたら終了する」はチェックON=終了する、という
+             逆の意味だった)。文言だけでなくチェックの意味自体を反転させる。
+             設定キー(quitOnLastWindowClosed)・既定値・C#側の判定ロジック
+             (PaneApplicationContext.OnWindowClosed)は変更しない(互換性優先。判断の理由は
+             docs/設定項目一覧.md側の注記を参照)。fieldCheckboxのinvert:trueにより、
+             このチェックボックスだけ「チェックON = 常駐する(draft.quitOnLastWindowClosed
+             = false)」という向きで表示・保存する。 -->
+        ${fieldCheckbox("quitOnLastWindowClosed", "最後のウィンドウを閉じても常駐させる(次回の起動が速くなります)",
+          "オフにすると、最後のウィンドウを閉じたときにPaneごと終了します。下の項目とは独立していて、こちらは「ウィンドウを閉じたときに常駐し続けるか」の設定です。",
+          { invert: true })}
+        ${fieldCheckbox("preloadOnStartup", "PCの起動時からあらかじめ常駐しておく(起動が速くなります)",
+          "こちらは「PCの起動直後から常駐するか」の設定です(上の項目とは独立して動作します)。")}
       </div>`;
     wireCommonFields(el);
     wireBrowseButtons(el);

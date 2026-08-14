@@ -7,8 +7,17 @@
 <link rel="icon" type="image/svg+xml" href="icon.svg">
 <script>
   try {
-    var dark = matchMedia("(prefers-color-scheme: dark)").matches;
-    document.documentElement.dataset.theme = dark ? "dark" : "light";
+    // 起動時の白(黒)フラッシュ対策(実機不具合の修正): C#側(Pane/MainForm.cs OnLoadAsync)が
+    // AddScriptToExecuteOnDocumentCreatedAsyncで、保存されているテーマ設定に基づく
+    // data-theme属性をこのスクリプトより先に設定している(ブリッジ経由でPaneアプリとして
+    // 動いている場合)。それが既に付いていればOS設定より優先して尊重し、無い場合
+    // (C#側からの注入が無いブラウザ単体検証時など)だけOS設定(prefers-color-scheme)へ
+    // フォールバックする。ここを「常にOS設定で上書き」にすると、保存済みテーマがOS設定と
+    // 異なる場合に一瞬OS設定側の配色が見えてから正しいテーマへ切り替わるチラつきが起きる。
+    if (!document.documentElement.dataset.theme) {
+      var dark = matchMedia("(prefers-color-scheme: dark)").matches;
+      document.documentElement.dataset.theme = dark ? "dark" : "light";
+    }
   } catch (e) {}
 </script>
 <link rel="stylesheet" href="style.css">

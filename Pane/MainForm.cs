@@ -189,6 +189,17 @@ internal sealed class MainForm : Form
             // 仮アイコンが見つからなくても起動は継続する(実行ファイル埋め込みアイコンが使われる)
         }
 
+        // 起動時の白フラッシュ対策(実機不具合の修正)。WebView2がHTMLを描画する時点では
+        // まだC#側から設定(テーマ)が届いておらず、既定のライト配色(またはWebView2自体の
+        // 既定背景色である白)が一瞬見えてしまっていた。原因は複数の層にまたがりうるため、
+        // ここではまず「WebView2に覆われる前に見えうる2つの層」——WinFormsコントロール
+        // 自体の背景色(BackColor)と、WebView2/CoreWebView2Controllerの既定背景色
+        // (DefaultBackgroundColor、HTML/CSSが読み込まれる前にWebView2自体が塗る色)——を
+        // 保存されているテーマ設定に合わせて塗っておく。DefaultBackgroundColorはCoreWebView2
+        // 生成前でも設定でき、生成後にそのまま引き継がれる。もう1つの層(HTML自体の初期表示色)は
+        // OnLoadAsync側でNavigate前にdata-theme属性を注入することで対処する(そちらを参照)。
+        ApplyInitialWebViewBackground();
+
         // ウィンドウのうちWebView2に覆われていない部分(タイトルバー等)へのD&D用。
         // クライアント領域はWebView2が全面を覆うため、そちらへのドロップは下記のとおり
         // WebView2(Webページ側のJavaScript)が受け取る。
@@ -321,6 +332,29 @@ internal sealed class MainForm : Form
     };
 
     /// <summary>
+    /// 起動時の白フラッシュ対策(実機不具合の修正)。保存されているテーマ設定に応じて、
+    /// WebView2がHTML/CSSを読み込み終える前に見えうる2つの背景(WinFormsコントロール自体の
+    /// BackColorと、CoreWebView2ControllerのDefaultBackgroundColor)を先に塗っておく。
+    /// 色はsrc/style.cssの:root(ライト既定)・html[data-theme="dark"]それぞれの--paperと
+    /// 揃える(CSSファイル自体を読めないのでここでは値を決め打ちにする。style.cssには
+    /// 同じセレクタ(:root / html[data-theme="dark"])のブロックが複数あり、後方のブロックが
+    /// カスケードで--paperを上書きしているため、値は実際にブラウザで解決される最終値
+    /// (Playwrightでcomputed styleを実測して確認済み)を使うこと。既定テーマの色が
+    /// style.css側で変わった場合はここも合わせて直すこと。テーマプリセット(lightTheme/
+    /// darkTheme)による上書きまでは反映していない(近似値で十分なため)。
+    /// </summary>
+    private void ApplyInitialWebViewBackground()
+    {
+        AppSettings settings = SettingsService.Load();
+        bool isDark = ResolveIsDarkTheme(settings.Theme);
+        Color background = isDark
+            ? Color.FromArgb(0x14, 0x17, 0x1A) // src/style.css: html[data-theme="dark"] --paper(最終値)
+            : Color.FromArgb(0xFB, 0xFB, 0xFA); // src/style.css: :root --paper(最終値)
+        BackColor = background;
+        _webView.DefaultBackgroundColor = background;
+    }
+
+    /// <summary>
     /// 未保存の変更がある場合、閉じる・新規作成・別のファイルを開く等、現在の文書を
     /// 置き換えるあらゆる操作の前に呼ぶ。保存する/しない/キャンセルを確認し、「保存する」が
     /// 選ばれた場合はJS側に保存を依頼してその完了(save-result)を待つ。
@@ -393,6 +427,24 @@ internal sealed class MainForm : Form
         // 範囲外アクセスの遮断はOnLocalFileResourceRequested/ResolveAllowedLocalFilePath参照。
         _webView.CoreWebView2.AddWebResourceRequestedFilter($"https://{LocalFileHostName}/*", CoreWebView2WebResourceContext.All);
         _webView.CoreWebView2.WebResourceRequested += OnLocalFileResourceRequested;
+
+        // 起動時の白フラッシュ対策(実機不具合の修正、続き)。ApplyInitialWebViewBackground
+        // (コンストラクタで実行済み)はWebView2自体の背景色を塗るだけで、実際にHTML/CSSが
+        // 読み込まれた後はindex.html側の初期スクリプトがdata-theme属性を決めるまで、その
+        // 属性の有無で切り替わるCSS変数(--paper等)は「未設定時の既定値」で描画される。
+        // index.html冒頭の<script>は元々OS設定(prefers-color-scheme)だけを見てdata-themeを
+        // 決めており、ユーザーが保存済みでOS設定と異なるテーマ(例: OSはライトだがPaneは
+        // ダーク運用)を選んでいる場合、初回描画がOS設定側の配色になり、直後にapply-settingsが
+        // 届いて選択済みテーマへ切り替わる、という一瞬のチラつきが起きていた。
+        // AddScriptToExecuteOnDocumentCreatedAsyncで登録したスクリプトは、ナビゲート先の
+        // 新しいdocumentが作られた直後・そのdocument内の他のどのスクリプト(index.html自身の
+        // <script>を含む)よりも先に実行されるため、ここでdata-theme属性を確定させておけば
+        // index.html側はOS設定を見る前にそれを尊重できる(index.html側もその判定に更新済み)。
+        AppSettings navigateSettings = SettingsService.Load();
+        bool navigateIsDark = ResolveIsDarkTheme(navigateSettings.Theme);
+        string initialThemeAttr = navigateIsDark ? "dark" : "light";
+        await _webView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(
+            $"document.documentElement.dataset.theme = '{initialThemeAttr}';");
 
         string distPath = ResolveDistPath();
         Logger.Write($"distPath={distPath} (存在={Directory.Exists(distPath)}, index.html存在={File.Exists(Path.Combine(distPath, "index.html"))})");
@@ -1996,6 +2048,11 @@ internal sealed class MainForm : Form
             encoding = TextFileService.EncodingLabel(snapshot.Encoding),
             lineEnding = TextFileService.LineEndingLabel(snapshot.LineEnding),
             readOnly = _isReadOnly,
+            // JS側(main.js)へ「クラッシュリカバリからの復元である」ことを伝える。通常の
+            // file-openedは読み込んだ内容を未保存表示の基準にするが、これは元ファイルの内容
+            // ではなく未保存の編集内容を表示しているため、JS側は基準を確定させず
+            // 復元直後から常にdirty扱いにする(src/main.js applyFileOpened参照)。
+            recovered = true,
         });
         SetDirty(true);
     }
