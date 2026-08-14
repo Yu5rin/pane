@@ -87,6 +87,8 @@ const DEFAULT_EXT_TOGGLES = {
   shiftTabAutoIndent: false, autoPairMarkdown: true, copyWholeLineWhenNoSelection: true,
   typewriterKeepCaretCentered: true, whitespaceOnExport: "ignore", defaultCodeLanguage: "",
   defaultCodeLanguageApplyWhen: "menubar", emojiAutocomplete: "auto",
+  // 厳格モード(仕様 strictMode、既定false)・コードブロック行番号(仕様 codeBlockLineNumbers、既定true)。
+  strictMode: false, codeBlockLineNumbers: true,
 };
 const extTogglesField = StateField.define({
   create: () => DEFAULT_EXT_TOGGLES,
@@ -293,6 +295,20 @@ class CodeCopyWidget extends WidgetType {
     return btn;
   }
   ignoreEvent() { return false; }
+}
+// コードブロックの行番号(仕様 codeBlockLineNumbers、既定true)。フェンスコードブロックの
+// 各コード行の先頭にウィジェットとして番号を差し込むだけで、ドキュメントのテキストは変えない
+// (CodeCopyWidgetと同じ「装飾はウィジェットで足す、本文は書き換えない」方針)。
+class CodeLineNumberWidget extends WidgetType {
+  constructor(n) { super(); this.n = n; }
+  eq(o) { return o.n === this.n; }
+  toDOM() {
+    const s = document.createElement("span");
+    s.className = "cm-code-linenum";
+    s.textContent = String(this.n);
+    return s;
+  }
+  ignoreEvent() { return true; } // クリックしても何もしない(コピー用ではなく表示専用のため)
 }
 class CalloutMarkerWidget extends WidgetType {
   constructor(type) { super(); this.type = type; }
@@ -625,12 +641,20 @@ const livePreview = ViewPlugin.fromClass(class {
           const blockLive = cursorInside(view, open.from, close.to);
           marks.push({ from: open.from, to: close.to, deco: Decoration.mark({ class: "tok-codeblock" }) });
           // 行全体を塗るブロック背景(行デコレーション)。開始行にコピー用マーカーを付与。
+          const showLineNumbers = toggles.codeBlockLineNumbers !== false; // 仕様 codeBlockLineNumbers、既定true
+          let codeLineNo = 0;
           for (let ln = open.number; ln <= close.number; ln++) {
             const l = state.doc.line(ln);
+            const isContentLine = ln > open.number && ln < close.number; // フェンス行自体(```)は除く
             const cls = "cm-codeblock-line" + (ln === open.number ? " cm-cb-first" : "") + (ln === close.number ? " cm-cb-last" : "")
               + (!blockLive && (ln === open.number || ln === close.number) ? " cm-cb-fence-hidden" : "") // 記号を隠している時だけフェンス行を圧縮
-              + (toggles.codeAutoWrap === false ? " cm-cb-nowrap" : ""); // 仕様書 codeAutoWrap: falseなら長い行を折り返さない
+              + (toggles.codeAutoWrap === false ? " cm-cb-nowrap" : "") // 仕様書 codeAutoWrap: falseなら長い行を折り返さない
+              + (showLineNumbers && isContentLine ? " cm-cb-numbered" : ""); // 行番号ぶんの左余白を確保
             marks.push({ from: l.from, to: l.from, deco: Decoration.line({ class: cls }), line: true });
+            if (showLineNumbers && isContentLine) {
+              codeLineNo++;
+              marks.push({ from: l.from, to: l.from, deco: Decoration.widget({ widget: new CodeLineNumberWidget(codeLineNo), side: -1 }) });
+            }
           }
           // コピーボタンを開始フェンス行の行末にwidgetで配置(行デコレーションとは位置/sideが異なるため競合しない)
           if (open.number + 1 <= close.number - 1 || close.number > open.number) {
@@ -673,6 +697,18 @@ const livePreview = ViewPlugin.fromClass(class {
         if (name === "StrongEmphasis" || name === "Emphasis") {
           const cls = name === "StrongEmphasis" ? "tok-bold" : "tok-italic";
           const mlen = name === "StrongEmphasis" ? 2 : 1;
+          // 厳格モード(仕様 strictMode)。見出し直後のスペース必須・強調記号内側の空白を許さない、
+          // といったCommonMarkの基本ルールはlezer/markdown(構文木を作る側)が既定パーサーの時点で
+          // 常に守っており、緩めた実装が別に存在するわけではない(実測確認済み)。そのためstrictMode
+          // をONにしても差が出ない。唯一、lezerがCommonMark準拠の範囲で"_"による語中の強調
+          // (例: "_snake_case_"のように、語の外側の"_"同士は正当な開始・終了境界を満たすため
+          // 強調として成立してしまう)を許容しているのは、docs/設定項目一覧.mdの記述が無い場合の
+          // 代替方針として挙げられた「アンダースコアによる語中の強調を強調として扱わない」に反する
+          // ため、ONの時だけ追加でここを厳しくする(内側に別の"_"を含む"_..._"は強調として扱わない)。
+          if (toggles.strictMode && state.doc.sliceString(nf, nf + 1) === "_"
+              && state.doc.sliceString(nf + mlen, nt - mlen).includes("_")) {
+            return; // 装飾を何も付けず、"_"を含む生のテキストのまま表示する
+          }
           marks.push({ from: nf, to: nt, deco: Decoration.mark({ class: cls }) });
           if (!live) { marks.push({ from: nf, to: nf + mlen, deco: Decoration.replace({}) }); marks.push({ from: nt - mlen, to: nt, deco: Decoration.replace({}) }); }
           return;

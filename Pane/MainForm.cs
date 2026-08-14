@@ -1249,7 +1249,11 @@ internal sealed class MainForm : Form
         _folderScanCts = cts;
         try
         {
-            FolderScanResult result = await FolderService.ScanAsync(path, cts.Token);
+            // 隠しファイル表示・除外パターン(仕様書「詳細」節 showHiddenFilesInTree/fileTreePatterns)は
+            // 走査のたびに最新の設定を読み直す(設定画面を開いたまま値を変えても、次の再走査から
+            // 反映されるようにするため。ReloadLoadedFolderIfAny/PostCapabilities側で再走査をトリガーする)。
+            AppSettings settings = SettingsService.Load();
+            FolderScanResult result = await FolderService.ScanAsync(path, settings.ShowHiddenFilesInTree, settings.FileTreePatterns, cts.Token);
             if (cts.IsCancellationRequested) return;
 
             _loadedFolderRootPath = result.RootPath;
@@ -1934,6 +1938,11 @@ internal sealed class MainForm : Form
             showHiddenFilesInTree = settings.ShowHiddenFilesInTree,
             fileTreePatterns = settings.FileTreePatterns,
         });
+
+        // showHiddenFilesInTree/fileTreePatterns(隠しファイル表示・除外パターン)は走査結果自体に
+        // 影響するため、apply-settingsを送るだけでは反映されない。読み込み済みのフォルダがあれば
+        // ここで再走査させ、設定画面で切り替えた結果がすぐツリーに反映されるようにする。
+        ReloadLoadedFolderIfAny();
     }
 
     /// <summary>カスタムCSS(仕様書 第2.10節 C-07)の読み込み上限。これを超えるファイルは読み込まない。</summary>
