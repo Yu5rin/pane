@@ -236,12 +236,19 @@ internal sealed class AppSettings
 
     private int _codeIndentSize = 4;
 
-    /// <summary>コードブロックのインデント幅。2|4|8のいずれか。既定4。JS `editor.js`。</summary>
+    /// <summary>
+    /// Tabキーで新規挿入するスペースの数、およびタブ文字の表示幅。2|4|8のいずれか。既定4。
+    /// JS `editor.js`(indentUnit・EditorState.tabSizeの両方に反映)。
+    /// 注意: 既にスペースで書かれているインデントの見た目の幅は変わらない(文字そのものなので)。
+    /// </summary>
     public int CodeIndentSize
     {
         get => _codeIndentSize;
         set => _codeIndentSize = ValidateIntSet(value, 4, 2, 4, 8);
     }
+
+    /// <summary>コードモードでの折りたたみ(関数・オブジェクト・配列等)を有効にするか。既定true。JS `editor.js`。</summary>
+    public bool CodeFoldingEnabled { get; set; } = true;
 
     /// <summary>コードブロック内の長い行を折り返すか。既定true。JS `editor.js`。</summary>
     public bool CodeAutoWrap { get; set; } = true;
@@ -620,11 +627,16 @@ internal sealed class AppSettings
 
     private string _darkTheme = "default";
 
-    /// <summary>ダークモード時に使うテーマ名(仕様書 C-06)。既定"default"。</summary>
+    /// <summary>ダークモード時に使うテーマ名(仕様書 C-06)。既定"default"。
+    /// 移行措置: 実機フィードバックによりプリセットid "typora-night" を "night" へ
+    /// 改称した(ラベルも「Typora Night」→「Night」)。既に"typora-night"で保存済みの
+    /// 利用者の設定ファイルをそのままValidateEnumに通すと一覧に無い値として既定値
+    /// "default"へ倒れてしまい、選んでいたテーマが失われるため、setterの入口で
+    /// "typora-night"だけ"night"へ読み替えてから検証する。</summary>
     public string DarkTheme
     {
         get => _darkTheme;
-        set => _darkTheme = ValidateEnum(value, "default", "default", "nord", "dracula", "solarized-dark", "typora-night");
+        set => _darkTheme = ValidateEnum(value == "typora-night" ? "night" : value, "default", "default", "nord", "dracula", "solarized-dark", "night");
     }
 
     /// <summary>ダークモード時に(ライトモードとは)別のテーマを使うか。既定true。</summary>

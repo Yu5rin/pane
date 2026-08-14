@@ -6,7 +6,7 @@ import { EditorState, Compartment, StateEffect, StateField, Prec, Transaction } 
 import { markdown } from "@codemirror/lang-markdown";
 import { Strikethrough, Table, Superscript, Subscript, Emoji, Autolink } from "@lezer/markdown";
 import { defaultKeymap, history, historyKeymap, indentWithTab, insertNewline, undo, redo, moveLineUp, moveLineDown, copyLineDown, deleteLine, indentLess, indentSelection, selectAll } from "@codemirror/commands";
-import { syntaxTree, syntaxHighlighting, HighlightStyle, LanguageDescription, bracketMatching, indentUnit } from "@codemirror/language";
+import { syntaxTree, syntaxHighlighting, HighlightStyle, LanguageDescription, bracketMatching, indentUnit, foldGutter, foldCode, unfoldCode, foldAll, unfoldAll } from "@codemirror/language";
 import { autocompletion, closeBrackets, closeBracketsKeymap, startCompletion } from "@codemirror/autocomplete";
 import { search, setSearchQuery, getSearchQuery, SearchQuery, findNext, findPrevious, replaceNext, replaceAll } from "@codemirror/search";
 import { tags as t } from "@lezer/highlight";
@@ -20,20 +20,53 @@ import { sanitizeHtml, isSafeUrl } from "./html-sanitize.js";
 import {
   CSS_COLOR_LANGS, findColorMatches, parseColorLiteral, readableTextColor,
 } from "./color-picker.js";
+// 不具合3の修正で使う。カラーピッカーパネル(color-picker-panel.js)の動的importが失敗した
+// 場合にユーザーへ知らせるための、このアプリ既存の警告ダイアログ(confirmOpenExternal等と
+// 同じ仕組み。詳細はdialog.js冒頭のコメント参照)。
+import { paneAlert } from "./dialog.js";
 // formatColorLiteral・openColorPickerPanel(カラーピッカーパネル本体)は、本文の色プレビュー
 // 表示(常時の装飾)には要らず、「色を変更…」で実際にパネルを開いたときにしか使わない。
 // 初期ロードJS削減(仕様書 第8.4節)のため、openColorPicker()の中で動的importする
 // (math.js/mermaid-render.jsと同じ作法)。
 
 // コードのハイライト配色(仕様書 第5章・第10.2節)。色は単独で決め打ちせず、
-// style.cssで定義した--code-*トークン(--ink/--ink-mute/--accentから派生)を参照する。
+// style.cssで定義した--code-*トークンを参照する(実体はテーマごとにstyle.css/
+// themes.cssで異なる具体色。詳細は style.css の「コードのハイライト配色」コメント参照)。
+//
+// 不具合修正1(ユーザー報告「```json のキーが色分けされず単調に見える」): Playwrightで
+// 実描画のgetComputedStyle().colorを実測したところ、キー("port"等)を表す
+// @lezer/highlightの t.propertyName にはこの配列に対応するルールが1つも無く、
+// 生成されたCodeMirrorのDOMにそもそもハイライト用のspan自体が付かず、本文と同じ
+// --ink色でそのまま描画されていた(=「効いていない」ではなく「このタグだけ未定義」で
+// 発生していた不具合)。t.propertyNameは@lezer/json(JSONのキー)だけでなく、
+// t.attributeName(HTML/XMLの属性名・@lezer/html)やt.definition(t.propertyName)
+// (JSのオブジェクトリテラルのキー・YAMLのキー)の親タグでもある(.setに含まれる)ため、
+// ここへ1行足すだけでそれらもまとめて色が付くようになる。
+//
+// 不具合修正2(ユーザー報告「Graft(VS Code Dark+系)と並べると色分けが明らかに弱い」):
+// 実機比較のスクリーンショット付きで、`document.getElementById('back-btn')`のような
+// 行で「document(変数)・getElementById(メソッド名)・'back-btn'(文字列)がPaneでは
+// 地の色のまま」と指摘された。実測すると、t.variableName単体(修飾なしの変数参照)に
+// 対応するルールが1つも無く(function()/definition()で修飾された場合しか色が
+// 付いていなかった)、変数参照が軒並み無色(本文と同じ--ink)になっていたのが原因と
+// 判明した。t.variableNameへのルールをここへ追加する。
+// あわせて、キーワードをt.controlKeyword(if/for/return等の制御構文)とそれ以外
+// (const/let/function等の宣言・修飾キーワード)で色を分けた(--code-kw2/--code-kw、
+// VS Code Dark+が同様に2色を使い分けているのに合わせた)。
+// 関数名(--code-fn)は「呼び出し・宣言される関数/メソッド名」、変数(--code-var)は
+// 「変数の参照・宣言」で役割を分ける。t.function(...)で修飾されたものだけを
+// --code-fnにし、無修飾のt.variableNameとt.definition(t.variableName)(変数宣言の
+// 左辺)は--code-varにする。
 const codeHighlightStyle = HighlightStyle.define([
-  { tag: [t.keyword, t.controlKeyword, t.moduleKeyword], color: "var(--code-kw)", fontWeight: "600" },
+  { tag: t.controlKeyword, color: "var(--code-kw2)", fontWeight: "600" },
+  { tag: [t.keyword, t.moduleKeyword, t.operatorKeyword], color: "var(--code-kw)", fontWeight: "600" },
   { tag: [t.atom, t.bool, t.self], color: "var(--code-kw)" },
   { tag: [t.string, t.special(t.string)], color: "var(--code-str)" },
   { tag: t.comment, color: "var(--code-cmt)", fontStyle: "italic" },
   { tag: [t.number, t.integer, t.float], color: "var(--code-num)" },
-  { tag: [t.function(t.variableName), t.definition(t.variableName)], color: "var(--code-fn)" },
+  { tag: t.propertyName, color: "var(--code-prop)", fontWeight: "600" },
+  { tag: [t.function(t.variableName), t.function(t.propertyName)], color: "var(--code-fn)" },
+  { tag: [t.variableName, t.definition(t.variableName)], color: "var(--code-var)" },
   { tag: [t.typeName, t.className], color: "var(--code-type)" },
   { tag: [t.operator, t.punctuation, t.meta], color: "var(--code-op)" },
 ]);
@@ -1531,14 +1564,51 @@ const tocField = StateField.define({
 // 大文字小文字を問わない記法(例: [TOC])も拾えるように)。
 // 判定はやや粗く倒してある(例: "|"を含む挿入は表と無関係でも再計算する)が、見落とし
 // (再計算すべきなのにしない)より誤検知(不要な再計算)の方が安全なため、意図的にこちらへ倒す。
+//
+// 不具合1の修正(ラウンド3レビュー分・追加調査分の両方): 上記の「挿入テキストにトリガー
+// 文字列を含むか」という判定には、性質の異なる2つの見落としがあった。
+//   (a) 削除方向: コードフェンス(```)の中に表を書いてから開始・終端の```を両方"削除"して
+//       生テキストに戻す操作は、何も挿入しない(削除のみ)ため素通りしてしまい、フェンスが
+//       無くなって表・生HTML等として解釈できるようになったのに再計算されない(カーソル移動や
+//       無関係な編集では直らず、後で偶然"|"や"<"を含む編集をした瞬間に直るという分かりにくい
+//       不具合になっていた)。
+//   (b) 分割入力: 実際のユーザー入力は1文字ずつのキー入力であり、1トランザクション=1文字が
+//       基本になる。挿入/削除された「差分そのもの」だけを見ていると、"```mermaid"のような
+//       複数文字のマーカーは1回のトランザクションでは決して現れず(どのトランザクションを
+//       見てもマーカー全体ではなく1文字しか挿入されていない)、どのタイミングでもトリガーに
+//       一致しないままになる。これは[toc]/```math/```mermaidいずれでも同様に起こり、
+//       「実ユーザーの通常のタイピングではほぼ再計算されない」という重大度の高い見落としだった。
+//
+// 対策: 挿入/削除された差分そのものではなく、変更位置の前後を含む固定幅の"窓"の中に
+// トリガー文字列が現れているかを見る。窓は変更後(tr.state)側・変更前(tr.startState)側の
+// 両方で見る(挿入方向・削除方向どちらの見落としも拾うため)。窓の幅はトリガー文字列の
+// 最大長+余白だけに留め、行の長さや文書サイズには比例させない(性能維持: 1文字ずつの
+// 入力でSTR全体が揃った瞬間のトランザクションでは、カーソル位置の前後にSTRの残りの文字が
+// 既に存在しているため、この窓の中に収まる)。
+// フェンス境界そのもの(```/~~~)の増減は、このフィールドが対象とする記法がフェンスの
+// 内側かどうかで解釈が変わってしまう、表・[toc]・Mermaid・生HTML・コードブロック内数式
+// すべてに共通の境界なので、呼び出し側のtriggers配列に含まれているかどうかに関わらず
+// 常にチェック対象へ加える(例: 表フィールドのtriggersは"|"だけだが、フェンスを消して
+// 中の表が現れるケースもこれで拾う)。
+const FENCE_MARK_TRIGGERS = ["```", "~~~"];
+function windowContainsTrigger(doc, from, to, pad, triggers) {
+  const wFrom = Math.max(0, from - pad);
+  const wTo = Math.min(doc.length, to + pad);
+  const text = doc.sliceString(wFrom, wTo).toLowerCase();
+  return triggers.some((s) => text.includes(s));
+}
 function blockListNeedsRecompute(existing, tr, triggers) {
+  const allTriggers = triggers.length ? [...triggers, ...FENCE_MARK_TRIGGERS] : FENCE_MARK_TRIGGERS;
+  const pad = Math.max(...allTriggers.map((s) => s.length)) + 2; // トリガー最大長+前後の余白
   let needs = false;
-  tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+  tr.changes.iterChanges((fromA, toA, fromB, toB) => {
     if (needs) return;
-    if (triggers.length) {
-      const ins = inserted.toString().toLowerCase();
-      if (triggers.some((s) => ins.includes(s))) { needs = true; return; }
-    }
+    // 変更後の文書で、挿入位置の前後の窓にトリガーが揃っていないか(1文字ずつの入力で
+    // マーカーが完成した瞬間を拾う。既に打たれている残りの文字は変更後の文書に残っている)。
+    if (windowContainsTrigger(tr.state.doc, fromB, toB, pad, allTriggers)) { needs = true; return; }
+    // 変更前の文書で、削除位置の前後の窓にトリガーが揃っていないか(1文字ずつの削除で
+    // マーカーを壊した/表れさせた瞬間を拾う)。
+    if (windowContainsTrigger(tr.startState.doc, fromA, toA, pad, allTriggers)) { needs = true; return; }
     for (const b of existing) { if (fromA <= b.to && toA >= b.from) { needs = true; return; } }
   });
   return needs;
@@ -2250,10 +2320,79 @@ const livePreviewExt = () => [
   defaultCodeLangInputHandler, // 仕様書 defaultCodeLanguage・defaultCodeLanguageApplyWhen="markdown"
 ];
 
-// コードモード限定の拡張(仕様書 決定済み事項: 行番号・括弧の対応表示まで。
-// インデントガイドは視認性を損なうため搭載しない。矩形選択・コード補完・LSP連携・
-// エラー診断も搭載しない)。
-const codeModeExtras = () => [lineNumbers(), bracketMatching()];
+// コード折りたたみ(依頼: 「Graftのようにコードをたたむ」)のキー割り当て。
+// @codemirror/languageの標準foldKeymapをそのまま使うと、既定の Ctrl-Shift-[ (foldCode) と
+// Ctrl-Shift-] (unfoldCode) が、Pane既存のParagraphメニューのショートカット
+// Ctrl+Shift+[ (para.olist 番号付きリスト) / Ctrl+Shift+] (para.list 箇条書きリスト)と
+// 衝突する(src/commands.js)。Paneのショートカットはwindowのcaptureフェーズで先に
+// e.preventDefault()+e.stopPropagation()するため、標準foldKeymapのこの2つはCodeMirrorまで
+// 届かず常に無効化されてしまう(実害は無いが、キーボードから畳めなくなる)。
+// そのため単体の折り畳み/展開だけ Alt-[ / Alt-] に付け替える(Pane・CodeMirror標準キーマップの
+// いずれにも Alt-[ / Alt-] の割り当ては無いことを確認済み)。全折りたたみ/全展開
+// (Ctrl-Alt-[ / Ctrl-Alt-])は元々衝突が無いため標準どおり残す。
+const foldKeymapSafe = [
+  { key: "Alt-[", run: foldCode },
+  { key: "Alt-]", run: unfoldCode },
+  { key: "Ctrl-Alt-[", run: foldAll },
+  { key: "Ctrl-Alt-]", run: unfoldAll },
+];
+
+// インデントガイド(縦線)。ユーザー報告「コードモードのインデントが小さすぎる」への対応の一部。
+// 実測の結果、Tabキーで新たに挿入されるインデント幅(indentUnit)と、既に書かれているスペース
+// インデントの見た目の幅は別物で、後者はCSS側では変えようがない(スペースは文字なのでフォントの
+// 文字幅ぶんの幅を持つ)。そこで、既存のインデントの深さそのものを列単位で視覚化することで
+// 「小さすぎて分かりにくい」という体感を補う。行頭の空白(スペース/タブいずれも)をmark
+// decorationで囲み、CSSの `1ch`(等幅フォントの1文字ぶん)を単位にした反復グラデーションで
+// codeIndentSize(=タブ幅)ごとに縦線を引く。tab-sizeもchも同じ「文字幅」を基準にしているため、
+// タブ・スペースどちらのインデントでもJSで実際のpx幅を測らずに列がそろう。
+// 色は新規CSSを追加せず、罫線に使っている既存の変数--rule(全テーマ定義済み・控えめな色)を
+// そのまま使う。src/style.css・src/themes.cssは他エージェントが配色を作り直し中のため触れず、
+// EditorView.themeで完結させる。
+// なお、この行(旧: 「インデントガイドは視認性を損なうため搭載しない」)は決定済み事項として
+// 一度は見送られていたが、docs/仕様書.md 11章「決定済み」では逆に
+// 「コードモードの範囲：…インデントガイド・折り返し切替まで」と明記されており、実装が
+// 仕様書と食い違っていた。今回のユーザー報告を機に、仕様書どおりインデントガイドを実装する
+// (詳細な経緯は今回の対応報告を参照)。
+const indentGuideMarks = ViewPlugin.fromClass(class {
+  constructor(view) { this.decorations = this.build(view); }
+  update(u) {
+    if (u.docChanged || u.viewportChanged) this.decorations = this.build(u.view);
+  }
+  build(view) {
+    const marks = [];
+    const { state } = view;
+    for (const { from, to } of view.visibleRanges) {
+      let pos = from;
+      while (pos <= to) {
+        const line = state.doc.lineAt(pos);
+        const m = /^[ \t]+/.exec(line.text);
+        if (m && m[0].length > 0) marks.push(Decoration.mark({ class: "cm-indent-guide" }).range(line.from, line.from + m[0].length));
+        if (line.to + 1 > to) break;
+        pos = line.to + 1;
+      }
+    }
+    return Decoration.set(marks, true);
+  }
+}, { decorations: (v) => v.decorations });
+// sizeはcodeIndentSize(=タブ幅)。呼び出しのたびに現在値を焼き込んだテーマ拡張を作る
+// (codeModeExtras()がsetCodeIndentSize時にも呼び直されるため、都度最新値で再生成される)。
+function indentGuideTheme(size) {
+  return EditorView.theme({
+    ".cm-indent-guide": {
+      backgroundImage: "linear-gradient(to right, var(--rule) 0, var(--rule) 1px, transparent 1px, transparent 100%)",
+      backgroundRepeat: "repeat-x",
+      backgroundSize: `calc(${size} * 1ch) 100%`,
+    },
+  });
+}
+
+// コードモード限定の拡張を作る本体。codeFoldingOn/codeIndentGuidesOn/codeIndentSizeValueは
+// createEditor()内のインスタンス状態(タブ/ウィンドウごとに独立)のため、この関数自体は
+// createEditor()の中(該当state変数の宣言以降)で定義する。ここでは仕様のメモだけ残す。
+// 仕様書 決定済み事項: 行番号・括弧の対応表示・インデントガイド・折りたたみまで。
+// 矩形選択・コード補完・LSP連携・エラー診断は搭載しない。
+// 折りたたみマーカーは行番号の左に出す(依頼画像どおり)ため、lineNumbers()より先に置く
+// (CodeMirrorのgutter表示順は、gutter()を登録した拡張の並び順に一致する)。
 
 // 選択が無いときのコピー・切り取り(仕様書 copyWholeLineWhenNoSelection、既定true)。
 // カーソル行(末尾の改行含む。最終行など次行が無ければ改行なし)を対象にする。
@@ -2325,11 +2464,25 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
   let currentCodeLanguage = null;
   // 自動ペアリング(仕様書 第2.10節 C-05)。既定はON。
   let autoPairingOn = true;
+  // コードブロックのインデント幅(仕様書 codeIndentSize)。indentUnit/tabSizeの再構成や、
+  // インデントガイドの間隔計算にも使うため、setCodeIndentSizeが更新するたびここへも保持する。
+  let codeIndentSizeValue = 4;
+  // コードモードの折りたたみ(依頼: 「Graftのようにコードをたたむ」)。既定ON。
+  let codeFoldingOn = true;
+  // コードモードのインデントガイド(縦線)。既定ON。ユーザー報告「インデントが小さすぎる」への対応
+  // として、既存のインデント(スペース/タブいずれも)を列単位で視覚化する。codeIndentSizeと同じ
+  // 幅で線を引くため、専用のON/OFF設定は今回は追加していない(詳細は報告参照)。
+  let codeIndentGuidesOn = true;
   // ソースコードモード(仕様書 V-05): 記法マーカーを隠さない生表示。docModeComp(構文ハイライト)は
   // 外さず、livePreviewComp(装飾・マーカー非表示)だけを空にすることで実現する。markdownモード
   // かつsourceMode===falseの時だけライブプレビューを入れる、という条件はsetFileMode/setSourceMode
   // 双方から参照する内部状態としてここに持つ。
   let sourceMode = false;
+  // 現在開いているカラーピッカーパネル(不具合2の修正)。openColorPicker()が呼ばれるたびに
+  // { forceApplyAndClose() } を差し替えて保持する。同時に2つ目のopenColorPicker()が呼ばれた
+  // 場合、こちらを使って前のパネルを閉じてから新しいパネルを開く(1つのeditorインスタンスに
+  // つき色ピッカーパネルは常に高々1枚、という不変条件を保つ)。詳細はopenColorPicker側のコメント参照。
+  let activeColorPicker = null;
   let focusModeOn = false;
   let typewriterOn = false;
   // 本文のフォントサイズ(Ctrl+マウスホイールで変更する。メニューバー・ステータスバーは
@@ -2408,7 +2561,24 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
           // "Shift-Enter"と"Enter"で別物のため衝突はしないが、指示どおり優先順位を明示する)。
           // IME変換中の確定Enterで誤発火しないよう、view.composingがtrueの間は既定動作に委ねる(falseを返す)。
           { key: "Shift-Enter", run: (v) => (v.composing ? false : insertSoftBreak(v)) },
-          { key: "Enter", run: handleEnter },
+          // 不具合Bの修正: 表の中でのTab/Shift-Tab(セル間移動)・Enter(最終セルでの行追加)は
+          // handleTableKey()として実装済み(editor.tableKeyとしてAPI公開もされている)だったが、
+          // 実際にキー入力へ配線する箇所がどこにも無く(配線漏れ)、Ctrl+Tで表を挿入して
+          // セルにTabを押すと、セル移動せずindentWithTab(通常のインデント挿入)が代わりに
+          // 実行され、以降の入力が最初のセルへ積み重なって表が壊れていた(Enterも同様に、
+          // 表の最終セルでの行追加が起きず、handleEnter任せの素の改行になっていた)。
+          // ここでCodeMirrorのキーマップとして配線する。表の外ではtableAt()がnullを返して
+          // handleTableKey()がfalseを返すので、そのままEnterは従来どおりhandleEnter
+          // (リスト継続等)に、Tab/Shift-Tabは後続のバインディング(下のカスタムShift-Tab→
+          // indentWithTab)に委ねられ、表の外での既存のEnter/Tab/Shift-Tabの挙動
+          // (インデント含む)は変えない。handleEnter・indentWithTab・直後のカスタム
+          // Shift-Tabエントリ(shiftTabAutoIndent設定)のいずれよりも先に評価されるよう、
+          // 配列の先頭(Shift-Enterの直後)に置く。
+          // handleTableKey側が自前でisComposing中は何もしない(!ev.isComposing)ようになって
+          // いるため、ここでは素通しでよい(表の外・IME変換中は従来どおりhandleEnter任せになる)。
+          { key: "Enter", run: (v) => handleTableKey(v, { key: "Enter", shiftKey: false, isComposing: v.composing }) || handleEnter(v) },
+          { key: "Tab", run: (v) => handleTableKey(v, { key: "Tab", shiftKey: false, isComposing: v.composing }) },
+          { key: "Shift-Tab", run: (v) => handleTableKey(v, { key: "Tab", shiftKey: true, isComposing: v.composing }) },
           // 仕様書 shiftTabAutoIndent: falseならShift+Tabはアウトデント(indentLess、既定の
           // indentWithTabと同じ挙動)、trueなら自動インデント(indentSelection)にする。
           // indentWithTab自体もshift:indentLessでShift-Tabを扱うため、それより先に評価される
@@ -2435,8 +2605,15 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
         // 記法文字(*_~`)まで自動ペアリングするとやりすぎで邪魔になりうるため、あえて追加しない
         // (判断に迷う点であり、追加するかどうかは仕様確定後の判断に委ねる)。
         autoPairComp.of(autoPairingOn ? closeBrackets() : []),
-        // コードブロックのインデント幅(仕様書 codeIndentSize)。既定4スペース。
-        codeIndentComp.of(indentUnit.of("    ")),
+        // コードブロックのインデント幅(仕様書 codeIndentSize)。既定4。indentUnit(Tabキーで
+        // 新たに挿入するスペースの数)に加えて、EditorState.tabSize(タブ文字1個の表示幅)も
+        // 同じ値に連動させる。以前はtabSizeの指定が無くCodeMirror既定の4に固定されており、
+        // タブ文字でインデントされたファイルはcodeIndentSizeをいくつに変えても表示幅が
+        // 変わらなかった(実測で確認済み。詳細は今回の対応報告を参照)。
+        // なお、この設定はあくまで「タブキーで新規入力する幅」と「タブ文字の表示幅」を
+        // 揃えるものであり、スペースで既に書かれているインデントの見た目の幅までは変えられない
+        // (スペースは文字なのでフォントの文字幅ぶんの幅を持つ。CSSでは伸縮できない)。
+        codeIndentComp.of([indentUnit.of("    "), EditorState.tabSize.of(4)]),
         // スペルチェック(仕様書 spellCheckEnabled)。既定OFF。
         spellCheckComp.of(EditorView.contentAttributes.of({ spellcheck: "false" })),
         livePreviewComp.of(livePreviewExt()),
@@ -2632,6 +2809,17 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
     openColorPicker: (from, to, colorText) => {
       const parsed = parseColorLiteral(colorText);
       if (!parsed) return false;
+      // 不具合2の修正: パネルを閉じずに別の色リテラルでopenColorPicker()を呼ぶと、呼び出しごとに
+      // 独立したクロージャ(ended/panelHandle)が作られ、前回のパネルを閉じる処理が無かったため
+      // .color-picker-panel が2枚同時にDOMへ残っていた。activeColorPicker(createEditor内で
+      // 保持する、このeditorインスタンスに1つだけの参照)に前回分が残っていれば、新しいパネルを
+      // 開く前にまずそれを閉じる。「別のリテラルをクリックした」は「パネルの外をクリックした」の
+      // 一種とみなせるため、閉じ方はdocs/カラープレビュー仕様.md 第4.3節にある外側クリックと同じ
+      // 「確定して閉じる(適用扱い)」に揃える(forceApplyAndCloseの実装は下記)。
+      if (activeColorPicker) {
+        activeColorPicker.forceApplyAndClose();
+        activeColorPicker = null;
+      }
       const rFrom = view.coordsAtPos(from);
       const rTo = view.coordsAtPos(Math.max(from, to - 1), -1);
       if (!rFrom || !rTo) return false;
@@ -2650,6 +2838,10 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
       // (自分の書き込みも他の編集も区別せず)に追従させる。
       let ended = false; // finish()/対象消失時の後始末の二重実行防止
       let panelHandle = null; // openColorPickerPanelの戻り値。対象消失時に強制クローズするのに使う
+      // 不具合2の修正: このopenColorPicker呼び出し1回分を指す目印。activeColorPickerが
+      // まさにこの呼び出しを指しているかどうかを、abandon/finish側で確認するのに使う
+      // (「今closeしようとしているのは本当に自分自身か」を厳密にするための単純な参照比較用)。
+      const thisPicker = {};
       // 対象範囲の「今」の位置を返す。範囲が編集で潰れている、またはそこにある文字列が
       // もはや色リテラルとして解釈できない場合はnull(=対象が壊れたとみなす)。
       const currentTarget = () => {
@@ -2663,6 +2855,7 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
       const abandon = () => {
         if (ended) return;
         ended = true;
+        if (activeColorPicker === thisPicker) activeColorPicker = null; // 不具合2の修正: 参照を掃除する
         view.dispatch({ effects: setColorPickerHighlight.of(null) });
         if (panelHandle) panelHandle.close();
       };
@@ -2687,6 +2880,7 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
       const finish = (finalText) => {
         if (ended) return;
         ended = true;
+        if (activeColorPicker === thisPicker) activeColorPicker = null; // 不具合2の修正: 参照を掃除する
         const target = currentTarget();
         if (target) {
           view.dispatch({
@@ -2704,6 +2898,28 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
         view.dispatch({ effects: setColorPickerHighlight.of(null) });
         view.focus();
       };
+      // 不具合2の修正: 「新しいパネルを開くとき、既に開いているパネルを閉じる」ための唯一の
+      // 入口。docs/カラープレビュー仕様.md 第4.3節「パネルの外をクリックした場合は確定して
+      // 閉じる(適用扱い)」に揃え、外側クリック(color-picker-panel.js側のonDocMouseDown→commit()→
+      // onCommit)と同じ「現在の色で確定」という結果にする。ただしここではパネル自身に
+      // 確定させる(=onCommitを呼ばせる)のではなく、こちら側でfinish()を直接呼ぶ。理由は、
+      // writeLive()が既に(addToHistory:falseで)現在のライブ値をドキュメントへ反映済みなので、
+      // currentTarget()の指す範囲の"今の"テキストがそのままライブ値そのものであり、
+      // 動的importが未解決でpanelHandleがまだ無い(=何もライブ反映されていない)場合を含めて
+      // 常に安全に「今の状態をfinalTextとしてfinish()する」だけで確定できるため
+      // (finish()はfinalText===colorTextなら(2)の履歴付き変更を行わないので、何も
+      // ドラッグしていない状態で閉じても余計な履歴は残らない)。
+      // finish()自体はドキュメントを書き換えないので閉じる前後で位置がズレる心配も無い。
+      // 最後にDOM上のパネルを閉じる(パネル側のcommit/cancelは呼ばない。確定は上のfinish()で
+      // 既に行ったため、二重に走らせないようpanelHandle.close()を使う)。
+      const forceApplyAndClose = () => {
+        if (ended) return;
+        const target = currentTarget();
+        const finalText = target ? view.state.sliceDoc(target.from, target.to) : colorText;
+        finish(finalText);
+        if (panelHandle) panelHandle.close();
+      };
+      activeColorPicker = { forceApplyAndClose };
       // パネル本体(color-picker-panel.js)は動的importで必要になった瞬間にだけ読み込む。
       // 呼び出し自体は同期でtrueを返す(枠線ハイライトも上でdispatch済み)ため、
       // ここでのわずかな遅延は「パネルの表示が一瞬遅れる」以上の影響を持たない。
@@ -2720,6 +2936,16 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
           onCommit: (rgba) => finish(formatColorLiteral(rgba, parsed.notation)),
           onCancel: () => finish(colorText), // 開いた時の色に戻す。履歴には何も残らない
         });
+      }).catch((err) => {
+        // 不具合3の修正: 動的importが失敗した(オフライン/ファイル欠落等)場合、.catchが
+        // 無いとunhandled rejectionになり、枠線のハイライトだけ表示されてパネルが開かない
+        // まま操作不能になっていた。ここでは(1)まだ確定していなければabandon()でハイライトを
+        // 消して対象消失扱いにし(パネルはpanelHandleがnullのまま=作られていないのでpanelHandle.
+        // close()は何もしない)、(2)ユーザーに分かる形でエラーを知らせる(このアプリ既存の
+        // 警告ダイアログpaneAlertを使う。confirmOpenExternal等と同じ流儀)。
+        console.error("カラーピッカーパネルの読み込みに失敗しました:", err);
+        abandon();
+        paneAlert({ title: "カラーピッカーを開けません", message: "カラーピッカーの読み込みに失敗しました。もう一度お試しください。" });
       });
       return true;
     },
@@ -2732,10 +2958,22 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
     },
     isAutoPairing: () => autoPairingOn,
     // コードブロックのインデント幅(仕様書 codeIndentSize)。2/4/8以外の値は既定4にフォールバックする。
+    // indentUnit(Tabキーで新規挿入する幅)とEditorState.tabSize(タブ文字の表示幅)を同時に
+    // 切り替える。インデントガイドの間隔もこの値に連動しているため、コードモードで表示中なら
+    // codeModeExtrasComp側も併せて作り直す(setAutoPairing等と同じ、モードに応じてComp再構成
+    // するかどうかを出し分ける流儀)。
     setCodeIndentSize: (n) => {
       const size = [2, 4, 8].includes(n) ? n : 4;
-      view.dispatch({ effects: codeIndentComp.reconfigure(indentUnit.of(" ".repeat(size))) });
+      codeIndentSizeValue = size;
+      view.dispatch({ effects: codeIndentComp.reconfigure([indentUnit.of(" ".repeat(size)), EditorState.tabSize.of(size)]) });
+      if (currentMode === "code") view.dispatch({ effects: codeModeExtrasComp.reconfigure(codeModeExtras()) });
     },
+    // コードモードの折りたたみ(fold gutter・fold keymap)のON/OFF。既定はON。
+    setCodeFolding: (on) => {
+      codeFoldingOn = !!on;
+      if (currentMode === "code") view.dispatch({ effects: codeModeExtrasComp.reconfigure(codeModeExtras()) });
+    },
+    isCodeFolding: () => codeFoldingOn,
     // スペルチェック(仕様書 spellCheckEnabled)。.cm-contentのspellcheck属性を切り替える。
     // spellCheckAutoCorrect(自動修正)はWebView2側の機能でJSからは制御できないため未実装。
     setSpellCheck: (on) => {
@@ -3295,7 +3533,68 @@ function applyMdAction(view, action, payload) {
     view.focus();
   };
   const insert = (t, cursorOffset) => view.dispatch({ changes: { from: s, to: e, insert: t }, selection: { anchor: s + (cursorOffset ?? t.length) }, userEvent: MD_ACTION_USER_EVENT });
-  const wrapSel = (w) => view.dispatch({ changes: [{ from: s, insert: w }, { from: e, insert: w }], selection: { anchor: s + w.length, head: e + w.length }, userEvent: MD_ACTION_USER_EVENT });
+  // 不具合Aの修正: "**文章**"を選択してCtrl+Bをもう一度押すと"****文章****"になっていた
+  // (常に無条件でw を前後に挿入するだけで、既に付いているマーカーを外す=トグルする経路が
+  // 無かったため)。見出し(linePrefix、上記)が既存マーカーを検出して解除しているのと
+  // 同じ考え方を、太字**・斜体*・打消し~~・ハイライト==・コード`・上付き^・下付き~の
+  // 7種類(いずれもwrapSel経由。下線<u></u>はwrapPair側で開始/終了マーカーが非対称なため
+  // 対象外)に入れる。
+  //
+  // 判定できるのは次の2パターン:
+  //   (1) 選択範囲そのものがマーカーごと含まれている([**文章**]を選択) → 中身だけ残す
+  //   (2) マーカーが選択範囲の外側にある(**[文章]**の[文章]だけを選択) → 外側のw を外す
+  // これら以外(マーカーが無い、または曖昧)は従来どおり単純にwで囲む。
+  //
+  // 曖昧さの扱い: このアプリのマーカーはいずれも同じ文字の繰り返し(**, ~~, ==)か1文字
+  // (*, `, ^, ~)なので、境界での「その文字の連続数」を数え、ちょうどw.lengthのときだけ
+  // 完全一致とみなす。連続数がそれより長い場合(例: 太字**の外側にさらに斜体*が続いて
+  // "***"になっている等、入れ子で"**太字と*斜体***"のようなケース)は、どちらの
+  // マーカーの境界なのか文字だけでは判別できないため、安全側に倒してトグルせず通常の
+  // wrapとして扱う(入れ子で誤爆しないこと)。
+  const runLenBackward = (text, endExclusive, ch) => {
+    let n = 0;
+    while (n < endExclusive && text[endExclusive - 1 - n] === ch) n++;
+    return n;
+  };
+  const runLenForward = (text, start, ch) => {
+    let n = 0;
+    while (start + n < text.length && text[start + n] === ch) n++;
+    return n;
+  };
+  const wrapSel = (w) => {
+    if (s !== e && w.split("").every((c) => c === w[0])) {
+      const ch = w[0];
+      // (1) 選択範囲そのものがマーカーごと含まれている場合
+      if (selText.length >= 2 * w.length && selText.startsWith(w) && selText.endsWith(w)) {
+        const leadRun = runLenForward(selText, 0, ch);
+        const trailRun = runLenBackward(selText, selText.length, ch);
+        if (leadRun === w.length && trailRun === w.length) {
+          const inner = selText.slice(w.length, selText.length - w.length);
+          view.dispatch({ changes: { from: s, to: e, insert: inner }, selection: { anchor: s, head: s + inner.length }, userEvent: MD_ACTION_USER_EVENT });
+          return;
+        }
+      }
+      // (2) マーカーが選択範囲の外側にある場合(直前w.length文字・直後w.length文字を見る。
+      // ドキュメント境界(先頭/末尾)に達している場合はそれ以上先が無い=曖昧さも無いとみなす)。
+      const before = state.sliceDoc(Math.max(0, s - w.length - 1), s);
+      const after = state.sliceDoc(e, Math.min(state.doc.length, e + w.length + 1));
+      if (before.slice(-w.length) === w && after.slice(0, w.length) === w) {
+        const beforeRun = runLenBackward(before, before.length, ch);
+        const afterRun = runLenForward(after, 0, ch);
+        if (beforeRun === w.length && afterRun === w.length) {
+          view.dispatch({
+            changes: [{ from: s - w.length, to: s, insert: "" }, { from: e, to: e + w.length, insert: "" }],
+            selection: { anchor: s - w.length, head: e - w.length },
+            userEvent: MD_ACTION_USER_EVENT,
+          });
+          return;
+        }
+      }
+    }
+    // 選択が無い(カーソルのみ)場合は既存仕様どおり常に挿入する(マーカーの内側にカーソルを
+    // 置いて続けて入力できるようにする、という従来の挙動を変えない)。
+    view.dispatch({ changes: [{ from: s, insert: w }, { from: e, insert: w }], selection: { anchor: s + w.length, head: e + w.length }, userEvent: MD_ACTION_USER_EVENT });
+  };
   const wrapPair = (open, close) => view.dispatch({ changes: [{ from: s, insert: open }, { from: e, insert: close }], selection: { anchor: s + open.length, head: e + open.length }, userEvent: MD_ACTION_USER_EVENT });
 
   switch (action) {

@@ -59,6 +59,7 @@ internal static class SettingsBridge
             // ---- 編集 ----
             indentSizeOnSave = settings.IndentSizeOnSave,
             codeIndentSize = settings.CodeIndentSize,
+            codeFoldingEnabled = settings.CodeFoldingEnabled,
             codeAutoWrap = settings.CodeAutoWrap,
             shiftTabAutoIndent = settings.ShiftTabAutoIndent,
             autoPairing = settings.AutoPairing,
@@ -296,6 +297,7 @@ internal static class SettingsBridge
             // ---- 編集 ----
             if (TryGetInt(s, "indentSizeOnSave", out int indentSizeOnSave)) settings.IndentSizeOnSave = indentSizeOnSave;
             if (TryGetInt(s, "codeIndentSize", out int codeIndentSize)) settings.CodeIndentSize = codeIndentSize;
+            if (TryGetBool(s, "codeFoldingEnabled", out bool codeFoldingEnabled)) settings.CodeFoldingEnabled = codeFoldingEnabled;
             if (TryGetBool(s, "codeAutoWrap", out bool codeAutoWrap)) settings.CodeAutoWrap = codeAutoWrap;
             if (TryGetBool(s, "shiftTabAutoIndent", out bool shiftTabAutoIndent)) settings.ShiftTabAutoIndent = shiftTabAutoIndent;
             if (TryGetBool(s, "autoPairing", out bool autoPairing)) settings.AutoPairing = autoPairing;
