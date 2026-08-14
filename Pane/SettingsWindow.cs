@@ -113,6 +113,22 @@ internal sealed class SettingsWindow : Form
         WindowChrome.ApplyTheme(Handle, isDark);
     }
 
+    /// <summary>
+    /// { type: "preview-theme", isDark } を受け取り、ネイティブタイトルバーを保存前の選択中の
+    /// テーマへ塗り直す(仕様: 設定画面でテーマを選んだ瞬間にプレビューできるようにする)。
+    /// 本文(WebView2内)の配色はJS側(src/settings.js)がdocument.documentElementのdata属性を
+    /// 直接書き換えて反映するため、ここではネイティブタイトルバーだけを扱えばよい。
+    /// isDarkの計算(system/light/darkの解決)もJS側(resolveIsDark)で完結しており、ここでは
+    /// 受け取った値をそのままWindowChrome.ApplyTheme(既定色、案B)へ渡すだけ。設定ファイルへの
+    /// 書き込みは一切行わない(キャンセルしても消える一時的な見た目の変更にとどめるため)。
+    /// </summary>
+    private void HandlePreviewThemeRequest(JsonElement root)
+    {
+        if (!root.TryGetProperty("isDark", out JsonElement isDarkProp)) return;
+        if (isDarkProp.ValueKind != JsonValueKind.True && isDarkProp.ValueKind != JsonValueKind.False) return;
+        WindowChrome.ApplyTheme(Handle, isDarkProp.GetBoolean());
+    }
+
     private async void OnLoadAsync(object? sender, EventArgs e)
     {
         Logger.Write("SettingsWindow.OnLoadAsync開始");
@@ -148,6 +164,12 @@ internal sealed class SettingsWindow : Form
         {
             case "get-settings":
                 SettingsBridge.PostSettingsSnapshot(PostToWeb);
+                break;
+            case "preview-theme":
+                // src/settings.js(previewTheme/revertThemePreview)からの、保存前のテーマプレビュー。
+                // ここではネイティブタイトルバー(WebView2内のCSSでは塗れない部分)だけを塗り直す。
+                // 設定ファイルへは一切書き込まない(書き込むのはsave-settingsのみ)。
+                HandlePreviewThemeRequest(root);
                 break;
             case "save-settings":
                 SettingsBridge.HandleSaveSettingsRequest(root, PostToWeb, _broadcastSettingsChanged);

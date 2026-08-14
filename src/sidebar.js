@@ -583,7 +583,26 @@ export function createSidebar(editor, ctx) {
   function setCurrentPath(path) {
     if (path !== openFilePath) outlineCollapsed.clear();
     openFilePath = path;
+    expandAncestorsOf(path);
     if (isOpenFlag && (currentPanelName === "files" || currentPanelName === "tree")) renderActivePanelNow();
+  }
+
+  // pathが読み込み済みフォルダ配下のファイルなら、ツリー上でそこまでの各階層を開いた
+  // 状態にする(祖先フォルダをexpandedDirsへ追加するだけ。既存の開閉状態はそのまま残す)。
+  // 既にルートフォルダが変わらなくなった(AutoLoadParentFolder参照)ことで、孫階層のファイルを
+  // 開いてもそこまで自動的にツリーが展開されないと辿り着けなくなるため、これを補う。
+  function expandAncestorsOf(path) {
+    if (!path || !folder || folder.error) return;
+    const entry = folder.entries.find((e) => e.path === path);
+    if (!entry) return; // ルート外のファイル、または未走査のファイルは対象外
+    const dir = parentDirOf(entry.relativePath);
+    if (!dir) return; // ルート直下のファイルなら展開の必要が無い
+    const parts = dir.split("/");
+    let acc = "";
+    for (const part of parts) {
+      acc = acc ? `${acc}/${part}` : part;
+      expandedDirs.add(acc);
+    }
   }
 
   // アウトラインはMarkdownの見出しから作るため、コードモード・プレーンテキストモードでは

@@ -11,7 +11,12 @@
   --topbar: #0F6E69;
   --topbar-ink: #EAF4F3;
   --input-bg: #FAFBFB;
-  --code-bg: #E7ECEA;
+  /* コードブロック背景(ライト既定): 真っ黒にすると白系の紙面から浮く(GitHub/Typora/
+     VS Codeもライトのコードブロックは黒ではなく、本文よりわずかに沈んだニュートラルな
+     グレーを使う—GitHub Light: canvas.subtle #F6F8FA、Typora既定(Github風)テーマ、
+     VS Code Light+のウィジェット背景も同系統)。それに倣い、彩度の低いグレーを採用
+     (旧値#E7ECEAはやや緑寄りだったため、色味を抜いてニュートラルにした)。 */
+  --code-bg: #EEF1F3;
   --pre-bg: #262C31;
   --pre-ink: #E8EAED;
   --danger-soft: #F9ECEA;
@@ -38,7 +43,11 @@ html[data-theme="dark"] {
   --topbar: #0C2A27;
   --topbar-ink: #D9EAE7;
   --input-bg: #171C20;
-  --code-bg: #262E33;
+  /* コードブロック背景(ダーク既定): 修正前は#262E33で、本文(最終的な--paper #14171A)より
+     明るい青緑寄りの色になっており、「コードブロックが黒っぽく見えない」という指摘の
+     原因の一つだった。本文よりはっきり暗く、かつ青緑に寄せないニュートラルな黒系に
+     変更する。 */
+  --code-bg: #0B0D0F;
   --pre-bg: #10151A;
   --pre-ink: #DDE3E7;
   --danger-soft: #3A2320;
@@ -62,17 +71,32 @@ html[data-theme="dark"] {
 
   /* ===== 画面の各部で色を分けるためのトークン(ユーザー要望: Typora Nightのように
      本文・サイドバー・メニューバー/ステータスバー・タイトルバーそれぞれに違う色を
-     持たせたい)。テーマプリセット(themes.css)側がこれらを個別に上書きできるようにする。
-     未指定のときは必ず以下へ倒し、既存テーマの見た目を変えない:
-       --chrome-bg  … 従来#menubar/#statusbarには専用の背景指定が無くbodyの--paperが
-                      そのまま透けていたため、その見た目のまま--paperへ倒す。
+     持たせたい)。テーマプリセット(themes.css)側がこれらを個別に上書きできるようにする
+     ための土台がこの4変数で、未指定のプリセット(将来追加されるものを含む)は
+     以下へ自動的に倒れ、既存の見た目を変えない:
+       --chrome-bg  … 専用の指定が無ければ#menubar/#statusbarはbodyの--paperが
+                      そのまま透けて見える、というのが元々の既定の見た目だったため。
        --sidebar-bg … #sidebarは元々 background: var(--surface) だったため、
                       その見た目のまま--surfaceへ倒す。
-     --titlebar-bg / --titlebar-fg はここでは定義しない(未指定のままにする)。
-     main.jsのsyncTitleBarColor()がこの2つを最優先で読みにいき、定義されていない
-     ときだけ従来どおり本文エリアの実描画色をタイトルバーへ送る。 */
-  --chrome-bg: var(--paper);
+     --titlebar-fg はここでは定義しない(未指定のままにする)。main.jsの
+     syncTitleBarColor()が--titlebar-bg/--titlebar-fgを最優先で読みにいき、
+     定義されていない方だけ本文エリアの実描画色にフォールバックする。
+
+     既定(プリセット無し)のライト/ダークについて: 当初は上記のとおり
+     --chrome-bg: var(--paper)(本文と同色)のままにしていたが、「他のカラーモードも
+     本文・サイドバー・メニューバー+タイトルバーで色を変えてほしい」という要望は
+     既定も対象に含むと明確化されたため、既定にも本文よりわずかに濃い(ダークは
+     わずかに明るい)独自の--chrome-bg/--titlebar-bgを与えた(値は下の
+     --chrome-bg代入・html[data-theme="dark"]ブロックを参照。根拠はdocs等ではなく
+     このコメントに書く: 他プリセット同様「目を刺さない程度の差」を優先し、
+     本文の可読性(--inkとのコントラスト比)を保てる範囲に留めた)。
+     これに伴い、titlebar-colorの送信先(.verify-titlebar-paste.mjs)も
+     「本文エリアの実描画色と一致」ではなく「--titlebar-bgの実効値(=タイトルバーの
+     実描画色)と一致」を検証するよう更新している(カスタムCSSで本文の色を変えたときに
+     追従する、というテストの主旨自体は変えていない)。 */
+  --chrome-bg: #EFF1F0;
   --sidebar-bg: var(--surface);
+  --titlebar-bg: #EFF1F0;
 
   --font-heading: "Source Serif 4", "Noto Serif JP", serif;
   --font-body: "Inter", "Noto Sans JP", system-ui, sans-serif;
@@ -85,26 +109,87 @@ html[data-theme="dark"] {
   --rule: #242A2E;
   --accent: #6FB3A8;
   --accent-soft: #1E2C2B;
+  /* ダーク既定の部位別配色。本文(--paper #14171A)より少し明るい--surface(#1C2226)を
+     サイドバーに、そこからさらにもう一段明るい色をメニュー/ステータス/タイトルバーに
+     割り当て、本文→サイドバー→メニュー・タイトルバーの3階調にした
+     (ライト版が「本文より少し濃い」方向なのに対し、ダーク版は「本文より少し明るい」
+     方向で階調を作る。ダークUIでは奥の本文を暗く沈め、手前の操作バーを一段明るく
+     見せる方が一般的な視覚階層に合うため)。 */
+  --chrome-bg: #232A30;
+  --sidebar-bg: var(--surface);
+  --titlebar-bg: #232A30;
 }
 
 /* ===== コードのハイライト配色(仕様書 第5章・第10.2節) =====
-   単独の色を決め打ちせず、上の6トークン(--ink / --ink-mute / --accent)から
-   color-mix()で派生させる。ライト/ダークとも再定義不要(--accent等が
-   テーマごとに切り替わるため自動的に追従する)。 */
+   【改訂の経緯】当初は--accent/--ink/--ink-muteのcolor-mix()だけで全トークン色を
+   派生させていた(単一の色相を混ぜ分けるだけ)。しかしユーザーからPane(自製)と
+   実在のエディタ(VS Code Dark+系配色)を並べたスクリーンショットで指摘があり、
+   実測(PlaywrightでgetComputedStyle().colorを比較)したところ、
+     - 実装は当たっている(無色ではない)が、変数名(document等)は無色のまま
+       (t.variableNameそのものに対応するルールが無く、function()/definition()で
+       修飾された場合のみ色が付いていた)。
+     - 色が付いている部分(キーワード等)も、accentとink(単一色相)の混色にすぎず
+       彩度・色相の変化が乏しいため、種類の違うトークンが「太字かどうか」でしか
+       区別できず、Dark+のような「見た瞬間に種類がわかる」配色になっていなかった。
+   という2つの問題が判明した。そこで単一色相のcolor-mix()をやめ、役割ごとに
+   別の色相を持つ具体的な色を各テーマで指定する方式に改めた(このためテーマ
+   プリセット側(themes.css)にも同じ変数群の上書きを追加している)。
+   役割は以下の9種(ユーザー指摘のDark+対応表 + 変数名 + プロパティ名/属性名 + 記号):
+     --code-kw   … キーワード全般(const/let/function等の宣言・修飾キーワード)
+     --code-kw2  … 制御構文キーワード(if/for/return等)。Dark+が紫で分けているため
+                   追随できるよう別変数にした。分けない配色のテーマは--code-kwと
+                   同じ値を入れればよい。
+     --code-var  … 変数の参照・宣言(document, sum等)。以前は無色だった主犯。
+     --code-fn   … 関数・メソッド名(getElementById等)
+     --code-str  … 文字列
+     --code-num  … 数値・真偽値
+     --code-cmt  … コメント(斜体、下のfont-style指定と対)
+     --code-type … 型名・クラス名
+     --code-prop … オブジェクト/JSONのキー・HTML/CSS属性名(tags.propertyName)
+     --code-op   … 演算子・括弧・カンマ等の記号
+   既定(本ブロック)はVS Code "Light+"配色に強くインスパイアされた値(ユーザーが
+   Dark+を「実質の業界標準」と位置づけたため、その明るい版としてLight+の実値を
+   参考にした。ただし完全な丸写しではなく、コメント色等は自テーマのink-muteとの
+   兼ね合いで独自に調整している)。 */
 :root {
-  --code-kw: var(--accent);
-  --code-str: color-mix(in srgb, var(--accent) 70%, var(--ink) 30%);
-  --code-cmt: var(--ink-mute);
-  --code-num: color-mix(in srgb, var(--accent) 55%, var(--ink) 45%);
-  --code-fn: color-mix(in srgb, var(--ink) 75%, var(--accent) 25%);
-  --code-type: color-mix(in srgb, var(--accent) 40%, var(--ink) 60%);
-  --code-op: var(--ink-mute);
+  --code-kw: #0000FF;
+  --code-kw2: #0000FF;
+  --code-var: #001080;
+  --code-fn: #795E26;
+  --code-str: #A31515;
+  --code-num: #098658;
+  --code-cmt: #008000;
+  --code-type: #267F99;
+  --code-prop: #001080;
+  --code-op: var(--ink);
+}
+/* ダーク既定: ユーザーが提示したVS Code "Dark+"の対応表そのまま(既定テーマは
+   「その配色の性格に合わせて決めてよい」対象だが、Dark+はユーザー自身が既定の
+   参照先として明示したため、素直にDark+の実値を採用する)。 */
+html[data-theme="dark"] {
+  --code-kw: #569CD6;
+  --code-kw2: #C586C0;
+  --code-var: #9CDCFE;
+  --code-fn: #DCDCAA;
+  --code-str: #CE9178;
+  --code-num: #B5CEA8;
+  --code-cmt: #6A9955;
+  --code-type: #4EC9B0;
+  --code-prop: #9CDCFE;
+  --code-op: var(--ink);
 }
 
 /* ===== マークダウン記法拡張の配色(仕様書 第2.9節・第10.2節) =====
-   Front Matter・Callouts とも、上の6トークンからcolor-mix()で派生させる。 */
+   Front Matter・Callouts とも、上の6トークンからcolor-mix()で派生させる。
+   --panel-bg: 「本文からわずかに沈んだニュートラルな帯」を表す共通トークン。
+   Front Matter専用に--frontmatter-bgとして個別定義していたが、テーブルの
+   ヘッダー(.cm-table th)・生テキスト表示中の表の行(.cm-line.cm-table-row)にも
+   同種の「主張しすぎない帯色」が要るため(表ヘッダーが従来--accent-soft経由で
+   ティール=緑寄りに見えていた不具合の修正、詳細はstyle.css内 .cm-table th 周辺の
+   コメント参照)、値の実体をここへ集約し--frontmatter-bgはこれを参照するだけにした。 */
 :root {
-  --frontmatter-bg: color-mix(in srgb, var(--ink) 5%, var(--paper));
+  --panel-bg: color-mix(in srgb, var(--ink) 6%, var(--paper));
+  --frontmatter-bg: var(--panel-bg);
 
   --callout-note: var(--accent);
   --callout-tip: color-mix(in srgb, var(--accent) 70%, var(--ink-mute) 30%);
@@ -133,7 +218,25 @@ button { font-family: inherit; cursor: pointer; }
 input, textarea { font-family: inherit; color: var(--ink); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 ::selection { background: var(--accent-soft); }
-* { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+/* ===== スクロールバー =====
+   従来はscrollbar-width:thin(Chromium実測で約11px)のみを指定していたが、指摘により
+   1.5倍(約17px)へ太くする。WebView2はChromium系のため::-webkit-scrollbarで幅を
+   直接指定できるが、標準プロパティのscrollbar-widthが「thin」等の具体的なキーワードを
+   持っていると、対応ブラウザ(新しめのChromiumを含む)ではそちらが優先されて
+   ::-webkit-scrollbar側の幅指定が無視されてしまう。そのためscrollbar-widthは
+   既定値と同じ「auto」を明示するだけに留め(「指定なし」との違いは、後方の要素個別の
+   scrollbar-width指定に上書きされないようにするため)、実際の幅は下の
+   ::-webkit-scrollbarブロックに一本化する。
+   色はテーマの罫線色(--line)ではなく、より視認性の高い--ink-mute(本文の副次テキストに
+   使う程度の濃さ)を薄めに使う(*{scrollbar-color: var(--line) ...}だった旧実装は
+   --lineが「本文とのコントラスト比 約1.2〜1.6」しかなく、多くのテーマで背景に
+   ほぼ埋もれていたため)。常時は控えめに、ホバー中ははっきり見えるよう不透明度を上げる。 */
+* { scrollbar-width: auto; scrollbar-color: color-mix(in srgb, var(--ink-mute) 55%, transparent) transparent; }
+*::-webkit-scrollbar { width: 17px; height: 17px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background-color: color-mix(in srgb, var(--ink-mute) 55%, transparent); border-radius: 9px; }
+*::-webkit-scrollbar-thumb:hover { background-color: var(--ink-mute); }
+*::-webkit-scrollbar-corner { background: transparent; }
 kbd { font-family: var(--font-mono); font-size: 11px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 1px 5px; background: var(--surface); }
 
 /* ロゴ */
@@ -259,10 +362,12 @@ html[data-theme="dark"] #theme-moon { display: none; }
    settings.jsonを直接編集してdisplayMode:"tab"にしたときだけmain.jsがhiddenを外して表示する
    (設定画面には切替UIを置かない。main.js側のapplyDisplayMode参照)。
    横に並ぶタブ一覧(#tabbar-list)は項目数が多いときoverflow-xでスクロールさせるが、
-   *{scrollbar-width:thin}が全体に効いているため専用のスクロールバー抑制は不要。 */
+   スクロールバーの太さ・色は上方の*{scrollbar-*}/*::-webkit-scrollbar-*が全体に
+   効いているため専用の指定は不要(以前あったscrollbar-width:thinの個別指定は、
+   全体を1.5倍幅にする際にここだけ取り残さないよう削除した)。 */
 #tabbar { display: flex; align-items: stretch; height: 32px; border-bottom: 1px solid var(--rule); flex: none; font-size: 12.5px; }
 #tabbar[hidden] { display: none; }
-.tabbar-list { flex: 1; min-width: 0; display: flex; align-items: stretch; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
+.tabbar-list { flex: 1; min-width: 0; display: flex; align-items: stretch; overflow-x: auto; overflow-y: hidden; }
 .tab-item { display: flex; align-items: center; gap: 6px; min-width: 120px; max-width: 220px; padding: 0 6px 0 12px; border-right: 1px solid var(--rule); background: transparent; color: var(--ink-mute); cursor: pointer; flex: none; user-select: none; }
 .tab-item:hover { background: var(--accent-soft); color: var(--ink); }
 .tab-item.active { background: var(--paper); color: var(--ink); box-shadow: inset 0 -2px 0 var(--accent); }
@@ -598,7 +703,12 @@ html[data-theme="dark"] .cm-line.cm-codeblock-line { background: var(--code-bg);
    が既に効くため、ここでは指定しない。 */
 .cm-line.cm-dimmed { opacity: .35; transition: opacity 160ms; }
 .tok-table-sep { color: var(--ink-sub); font-family: var(--font-mono); }
-.cm-line.cm-table-row { background: var(--code-bg); font-family: var(--font-mono); font-size: .9em; padding-left: 8px !important; padding-right: 8px !important; }
+/* 生テキスト表示中の表の行(カーソルが乗って記法が見えている間)は、以前はコードと
+   同じ--code-bgを流用していた。--code-bgを「本文よりはっきり暗いニュートラルな黒系」
+   に変更した(上方の--code-bg定義のコメント参照)結果そのまま使うと表がコード風の
+   重い見た目になってしまうため、表には表専用の控えめな帯色--panel-bgを使う
+   (.cm-table th と同じ考え方、詳細は同セレクタのコメント参照)。 */
+.cm-line.cm-table-row { background: var(--panel-bg); font-family: var(--font-mono); font-size: .9em; padding-left: 8px !important; padding-right: 8px !important; }
 .cm-line.cm-table-header { font-weight: 700; border-bottom: 2px solid var(--line); }
 html[data-theme="dark"] .tok-mark { background: #8A7A2E; color: #F2EFDF; }
 
@@ -700,8 +810,14 @@ html[data-theme="dark"] .cm-search-hit { background: rgba(61,193,181,.25); color
    常に先頭へ入れて、文字が入っているセルと同じ行ボックスを必ず作る。
    操作ボタン(.tbl-ctls)は position:absolute なので行ボックスには寄与しない。 */
 .cm-table th::before, .cm-table td::before { content: "\200B"; }
-.cm-table th { background: var(--accent-soft); font-weight: 700; }
-html[data-theme="dark"] .cm-table th { background: rgba(61,193,181,.14); }
+/* 表のヘッダー背景(不具合修正): 以前はライトが--accent-soft、ダークが
+   rgba(61,193,181,.14)というハードコード値で、いずれもアクセント色(ティール)の
+   薄塗りだったため緑がかって見えていた(ダーク側は現在の--accentの実値(#6FB3A8)
+   にすら連動しない、過去のアクセント値#3DC1B5を直書きした死んだ定数だった)。
+   表は読む場所であり色で主張させたくないため、アクセントではなく上方で定義した
+   ニュートラルな帯色--panel-bg(本文からink 6%だけ混ぜた濃淡)に変更する。
+   これで全テーマ共通のロジックになり、ダーク専用の個別上書きも不要になった。 */
+.cm-table th { background: var(--panel-bg); font-weight: 700; }
 .cm-table { padding: 20px 8px 8px 26px; } /* 上と左に操作ボタンの表示領域を確保 */
 /* 既定は非表示 */
 .cm-table .tbl-ctls { position: absolute; display: none; gap: 2px; z-index: 5; pointer-events: none; }

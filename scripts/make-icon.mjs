@@ -1,15 +1,12 @@
 // Pane.ico(アプリ/ファイル関連付け用アイコン)を生成する。
 //
-// 従来の Pane/Assets/Pane.ico は 32x32 の1サイズしか持っておらず、エクスプローラーが
-// 16px(詳細表示・一覧表示)や 48px/256px(大アイコン表示)を要求したときに適切な
-// 画像が無く、拡大縮小でぼやける・環境によっては既定アイコンのまま表示される原因になっていた。
-// Windowsが要求する主要サイズをすべて含む .ico を作り直す。
+// src/icon.svg(角丸正方形+パステルのカラーブロック+白いP)をPlaywright(Chromium)で
+// 各サイズにラスタライズし、PNGとしてそのままICOに埋め込む(Vista以降が対応する形式)。
+// 生成物はリポジトリにコミットするため、通常のビルド(scripts/build.js)からは呼ばない。
 //
 // 実行: node scripts/make-icon.mjs
-// Chromium(Playwright同梱)のCanvasでラスタライズし、ICOのバイナリはこのスクリプトで組み立てる。
-// 生成物はリポジトリにコミットするため、通常のビルド(scripts/build.js)からは呼ばない。
 
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import pw from "/opt/node22/lib/node_modules/playwright/index.js";
@@ -17,126 +14,73 @@ import pw from "/opt/node22/lib/node_modules/playwright/index.js";
 const { chromium } = pw;
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-// エクスプローラーが実際に使うサイズ。256はPNG圧縮で埋め込む(Vista以降の仕様)。
+// Windowsのエクスプローラーが実際に使う主要サイズ。
 const SIZES = [16, 24, 32, 48, 64, 128, 256];
 
-// 24x24のデザイン座標系で描く。src/icon.svg と同じ「枠+十字(ペイン)」のマーク。
-// 元のSVGは細い線画のみで、16pxではほとんど視認できず、暗い背景では埋もれてしまうため、
-// 塗りつぶした角丸square + 白い十字という、小サイズでも判別できる形にしている。
-const BRAND = "#2F6F68";
-
-async function rasterize(page, size) {
-  return await page.evaluate((s) => {
-    const canvas = document.createElement("canvas");
-    canvas.width = s;
-    canvas.height = s;
-    const g = canvas.getContext("2d");
-    const k = s / 24; // デザイン座標(24x24)から実ピクセルへの倍率
-
-    // 角丸の四角(本体)
-    const pad = 1 * k;
-    const r = 5 * k;
-    const x0 = pad, y0 = pad, x1 = s - pad, y1 = s - pad;
-    g.beginPath();
-    g.moveTo(x0 + r, y0);
-    g.lineTo(x1 - r, y0);
-    g.quadraticCurveTo(x1, y0, x1, y0 + r);
-    g.lineTo(x1, y1 - r);
-    g.quadraticCurveTo(x1, y1, x1 - r, y1);
-    g.lineTo(x0 + r, y1);
-    g.quadraticCurveTo(x0, y1, x0, y1 - r);
-    g.lineTo(x0, y0 + r);
-    g.quadraticCurveTo(x0, y0, x0 + r, y0);
-    g.closePath();
-    g.fillStyle = "#2F6F68";
-    g.fill();
-
-    // 白い十字(ペイン=窓枠の分割)。小サイズでも線が消えないよう最低1pxを保証する。
-    g.strokeStyle = "#FFFFFF";
-    g.lineWidth = Math.max(1, 1.9 * k);
-    g.lineCap = "butt";
-    const mid = s / 2;
-    g.beginPath();
-    g.moveTo(mid, y0);
-    g.lineTo(mid, y1);
-    g.moveTo(x0, mid);
-    g.lineTo(x1, mid);
-    g.stroke();
-
-    return {
-      rgba: Array.from(g.getImageData(0, 0, s, s).data),
-      png: canvas.toDataURL("image/png").split(",")[1],
-    };
-  }, size);
+async function rasterizeAll(svgPath, sizes) {
+  const svg = readFileSync(svgPath, "utf8");
+  const browser = await chromium.launch();
+  const results = [];
+  for (const size of sizes) {
+    const page = await browser.newPage();
+    await page.setViewportSize({ width: size, height: size });
+    // SVGをビューポートいっぱいに表示するだけのページ。角丸の外側は透明にするため
+    // body/html の背景は指定しない(デフォルト透明)。
+    await page.setContent(
+      `<html><body style="margin:0;padding:0;">${svg}</body></html>`
+    );
+    // viewBox 0 0 100 100 のsvgをsize x sizeいっぱいに広げる。
+    await page.evaluate((s) => {
+      const el = document.querySelector("svg");
+      el.setAttribute("width", String(s));
+      el.setAttribute("height", String(s));
+      el.style.display = "block";
+    }, size);
+    const png = await page.screenshot({ omitBackground: true });
+    results.push({ size, png });
+    await page.close();
+  }
+  await browser.close();
+  return results;
 }
 
-/** 32bpp BGRA のDIB(BITMAPINFOHEADER + XORデータ + ANDマスク)を作る。 */
-function toDib(rgba, size) {
-  const header = Buffer.alloc(40);
-  header.writeUInt32LE(40, 0); // biSize
-  header.writeInt32LE(size, 4); // biWidth
-  header.writeInt32LE(size * 2, 8); // biHeight(XOR + ANDマスクぶんで2倍にするのがICOの決まり)
-  header.writeUInt16LE(1, 12); // biPlanes
-  header.writeUInt16LE(32, 14); // biBitCount
-  header.writeUInt32LE(0, 16); // biCompression = BI_RGB
+/**
+ * ICOバイナリを組み立てる。全サイズをPNG圧縮のまま埋め込む形式
+ * (ICONDIRENTRYのbBitCount=32等を指定しつつ、実データはPNGバイト列)。
+ * Windows Vista以降はICO内のPNG埋め込みに対応している。
+ */
+function buildIco(images) {
+  const dir = Buffer.alloc(6);
+  dir.writeUInt16LE(0, 0); // reserved
+  dir.writeUInt16LE(1, 2); // type = 1 (icon)
+  dir.writeUInt16LE(images.length, 4);
 
-  // XORデータ: 下から上へ、BGRAの順
-  const xor = Buffer.alloc(size * size * 4);
-  for (let y = 0; y < size; y++) {
-    const srcY = size - 1 - y;
-    for (let x = 0; x < size; x++) {
-      const s = (srcY * size + x) * 4;
-      const d = (y * size + x) * 4;
-      xor[d] = rgba[s + 2];
-      xor[d + 1] = rgba[s + 1];
-      xor[d + 2] = rgba[s];
-      xor[d + 3] = rgba[s + 3];
-    }
+  let offset = 6 + images.length * 16;
+  const entries = [];
+  for (const img of images) {
+    const e = Buffer.alloc(16);
+    // 256は1バイトに収まらないため、仕様どおり0を書く。
+    const dim = img.size >= 256 ? 0 : img.size;
+    e.writeUInt8(dim, 0); // bWidth
+    e.writeUInt8(dim, 1); // bHeight
+    e.writeUInt8(0, 2); // bColorCount
+    e.writeUInt8(0, 3); // bReserved
+    e.writeUInt16LE(1, 4); // wPlanes
+    e.writeUInt16LE(32, 6); // wBitCount
+    e.writeUInt32LE(img.data.length, 8); // dwBytesInRes
+    e.writeUInt32LE(offset, 12); // dwImageOffset
+    entries.push(e);
+    offset += img.data.length;
   }
 
-  // ANDマスク: 1bpp、各行を4バイト境界に揃える。アルファ付き32bppでは実質使われないが、
-  // 構造として必須なので全ビット0(=不透明)で埋める。
-  const maskRow = Math.ceil(size / 32) * 4;
-  const mask = Buffer.alloc(maskRow * size, 0);
-
-  return Buffer.concat([header, xor, mask]);
+  return Buffer.concat([dir, ...entries, ...images.map((i) => i.data)]);
 }
 
-const browser = await chromium.launch();
-const page = await browser.newPage();
-await page.setContent("<html><body></body></html>");
+const svgPath = join(ROOT, "src", "icon.svg");
+const rendered = await rasterizeAll(svgPath, SIZES);
+const images = rendered.map((r) => ({ size: r.size, data: r.png }));
 
-const images = [];
-for (const size of SIZES) {
-  const { rgba, png } = await rasterize(page, size);
-  // 256pxはPNG圧縮で埋め込む(非圧縮DIBだと256KB超になるため)。それ以外はDIB。
-  const data = size >= 256 ? Buffer.from(png, "base64") : toDib(rgba, size);
-  images.push({ size, data });
-}
-await browser.close();
-
-const dir = Buffer.alloc(6);
-dir.writeUInt16LE(0, 0); // reserved
-dir.writeUInt16LE(1, 2); // type = 1 (icon)
-dir.writeUInt16LE(images.length, 4);
-
-let offset = 6 + images.length * 16;
-const entries = [];
-for (const img of images) {
-  const e = Buffer.alloc(16);
-  e.writeUInt8(img.size >= 256 ? 0 : img.size, 0); // 256は0で表す
-  e.writeUInt8(img.size >= 256 ? 0 : img.size, 1);
-  e.writeUInt8(0, 2); // colorCount
-  e.writeUInt8(0, 3); // reserved
-  e.writeUInt16LE(1, 4); // planes
-  e.writeUInt16LE(32, 6); // bitCount
-  e.writeUInt32LE(img.data.length, 8);
-  e.writeUInt32LE(offset, 12);
-  entries.push(e);
-  offset += img.data.length;
-}
-
-const ico = Buffer.concat([dir, ...entries, ...images.map((i) => i.data)]);
+const ico = buildIco(images);
 const out = join(ROOT, "Pane", "Assets", "Pane.ico");
 writeFileSync(out, ico);
 console.log(`${out} を生成しました (${images.length}サイズ, ${ico.length} bytes)`);

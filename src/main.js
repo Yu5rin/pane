@@ -72,8 +72,38 @@ window.addEventListener("unhandledrejection", (e) => {
 let currentHandle = null; // File System Access API(ブラウザ単体時のみ使用)
 let currentPath = null; // ブリッジ経由で開いた際のフルパス(最近使ったファイル・画像挿入・reopenClosedに使う)
 let currentName = "無題";
-let currentEncoding = null;
-let currentLineEnding = null;
+// 不具合修正: 以前はnullで初期化しており、C#側からencoding/lineEndingが一度も届かない
+// (ブラウザ単体検証・想定外の経路等)とステータスバーの文字コード・改行コードが
+// 空欄のまま丸ごと消えていた。最終フォールバックのUTF-8/CRLFで初期化しておき、
+// 実際の値はnew-document/file-opened等のメッセージで上書きされる。
+let currentEncoding = "UTF-8";
+let currentLineEnding = "CRLF";
+// 設定(defaultEncoding/defaultLineEnding)から作った既定ラベル。C#側がencoding/lineEndingを
+// 送ってこなかった場合(new-documentの旧経路・ブラウザ単体検証等)のフォールバックに使う。
+// apply-settings受信のたびに最新化する(未受信の間は上のUTF-8/CRLFのまま)。
+let defaultEncodingLabel = "UTF-8";
+let defaultLineEndingLabel = "CRLF";
+// ステータスバーから文字コード・改行コードを明示的に変更したかどうか(無題文書ごとに
+// applyNewDocumentLocalでリセットされる)。trueの間は、設定変更(apply-settings)による
+// 無題文書への既定値追従を止める。仕様書6.1「変更：ステータスバーから明示的に変更でき、
+// その場合のみ再エンコードする」を踏まえ、ユーザー操作を設定変更より優先するための判断。
+let encodingSetExplicitly = false;
+let lineEndingSetExplicitly = false;
+// AppSettings.DefaultEncoding/DefaultLineEndingのキー("utf8"等)を表示ラベル("UTF-8"等)へ
+// 変換する。Pane/TextFileService.cs の EncodingLabel/ParseEncodingKey・LineEndingLabel/
+// ParseLineEndingKeyと対応を揃えること(ここが崩れるとステータスバー表示と実際の
+// 保存形式がずれる)。
+function encodingKeyToLabel(key) {
+  switch (key) {
+    case "utf8bom": return "UTF-8 (BOM付き)";
+    case "shiftjis": return "Shift_JIS";
+    case "utf16le": return "UTF-16 LE";
+    default: return "UTF-8";
+  }
+}
+function lineEndingKeyToLabel(key) {
+  return key === "lf" ? "LF" : "CRLF";
+}
 let wordWrapOn = true;
 let defaultCopyFormat = "markdown"; // "markdown" | "html"(仕様書 第2.9.3節、設定で切替)
 let pandocAvailable = false;
@@ -173,6 +203,14 @@ function ensureSettingsUI() {
     settingsUIPromise = import("./settings.js").then(({ createSettings }) => {
       settingsUI = createSettings(ctx);
       return settingsUI;
+    }).catch((err) => {
+      // 不具合3の修正: 読み込みに失敗したPromiseをsettingsUIPromiseへ入れたままにすると、
+      // 「!settingsUIPromise」が常にfalseになり続け、以後ensureSettingsUI()を何度呼んでも
+      // このreject済みPromiseが返るだけで二度と再試行されなくなる。ここで確実にnullへ
+      // 戻し、次にopenSettings()が呼ばれた時にもう一度動的importを試みられるようにする。
+      // 呼び出し側(openSettings)にも失敗を伝える必要があるので、rejectのまま投げ直す。
+      settingsUIPromise = null;
+      throw err;
     });
   }
   return settingsUIPromise;
@@ -290,7 +328,6 @@ function setName(name) {
 // 「ラベルを落とした短縮表示」→「非表示」の2段階で畳んでいく。サイドバー切替・編集モード・
 // 未保存表示・設定ボタンはこの対象に含めない(狭くても「いま何が起きているか」と
 // 「操作の入口」を失わせたくないため常に残す)。
-const STATUS_FIT_ORDER = ["zoom", "encoding", "lineEnding", "wrap", "count", "position"]; // 隠す優先度: 低い→高い
 const STATUS_FIT_ELS = {
   zoom: statusZoom,
   encoding: statusEncoding,
@@ -300,21 +337,44 @@ const STATUS_FIT_ELS = {
   position: statusPosition,
 };
 // 各項目のコンパクト表示(ラベルを落とした短い形)を、フルの文字列(既存のupdateXXX関数が
-// これまで通り組み立てる)から作る関数。
+// これまで通り組み立てる)から作る関数。ユーザー指定の畳む順序(STATUS_FIT_STAGES参照)では
+// 「コンパクト」段階を経由するのは文字コード・改行コードの2項目だけ(他の項目はfullから
+// 直接hiddenへ畳む)なので、この2つだけを持つ。
 const STATUS_FIT_COMPACT = {
-  zoom: (full) => full, // 元々「100%」のように短いので、コンパクト段階でもそのまま
   encoding: (full) => full.replace(/^文字コード: /, ""), // 「文字コード: UTF-8」→「UTF-8」
   lineEnding: (full) => full.replace(/^改行コード: /, ""), // 「改行コード: LF」→「LF」
-  // 折り返し用のアイコンをSVGで新規に用意するとこのタスクのスコープを超えるため、
-  // 既存のテキストのみの構成に合わせ、折り返し中のときだけ記号1文字(⏎)を残す形で
-  // 代用する(アイコン相当の最小表示、という独自判断)。
-  wrap: (full) => (full.includes("あり") ? "⏎" : ""),
-  count: (full) => full.replace(/文字/g, ""), // 「123文字」→「123」、「123文字(選択4文字)」→「123(選択4)」
-  position: (full) => full.replace(/^行 (\d+), 列 (\d+)$/, "$1:$2"), // 「行 1, 列 1」→「1:1」
 };
-// STATUS_FIT_ORDERの項目ごとに「コンパクト→非表示」の2段階があるため、フル(レベル0)から
-// STATUS_FIT_ORDER.length*2まで段階的に畳んでいく列。
-const STATUS_FIT_STAGES = STATUS_FIT_ORDER.flatMap((key) => [{ key, mode: "compact" }, { key, mode: "hidden" }]);
+// 幅が狭くなるにつれて畳んでいく順序(ユーザー指定)。各段階が前の段階を上書きする形で
+// 積み上がっていく(statusFitModeAtが「level未満の段階を先頭から順に見て、同じkeyなら
+// 後の段階のmodeで上書きする」実装のため、同じkeyを離れた位置に複数回書いてよい)。
+//   1. 改行コードのラベル「改行コード: 」を省略(値のLF/CRLF等はまだ残す)
+//   2. 文字コードのラベル「文字コード: 」を省略(値のUTF-8等はまだ残す)
+//   3. 拡大率(100%)を非表示
+//   4. 行・列(行 1, 列 1)を非表示
+//   5. 文字数(0文字)を非表示
+//   6以降はユーザー指定が無く、判断を委ねられた分: 折り返し→改行コード(値ごと非表示)→
+//      文字コード(値ごと非表示)の順にした。折り返しは他の項目よりアイコン化されていて
+//      場所を取らない一方、改行コード・文字コードは「値だけ」でもまだ場所を取るため、
+//      折り返しを先に落としてから最後に改行コード・文字コードを完全に消す方が、
+//      収まりが良くなる段階を細かく刻めると判断したため。
+// モード表示(Markdown等)・未保存インジケータ(●)・サイドバー切替ボタンはこの配列に
+// 含めない(=常に表示。「いま何を編集していて保存済みか」は幅が無くても必要な情報のため)。
+// 以前はSTATUS_FIT_ORDER.flatMap()で「全項目のcompactを先にやってから全項目のhidden」
+// という順序しか作れなかったため、要望の「項目ごとに畳む順序を指定する」を表現できるよう
+// 明示的な配列に書き換えた。
+const STATUS_FIT_STAGES = [
+  { key: "lineEnding", mode: "compact" },
+  { key: "encoding", mode: "compact" },
+  { key: "zoom", mode: "hidden" },
+  { key: "position", mode: "hidden" },
+  { key: "count", mode: "hidden" },
+  { key: "wrap", mode: "hidden" },
+  { key: "lineEnding", mode: "hidden" },
+  { key: "encoding", mode: "hidden" },
+];
+// fitStatusBar()の描画対象キー一覧(順序は描画結果に影響しない。各項目は独立に
+// renderStatusFitItemされる。畳む順序自体はSTATUS_FIT_STAGES側で決まる)。
+const STATUS_FIT_KEYS = Object.keys(STATUS_FIT_ELS);
 let statusFitLevel = 0;
 const statusFitFullText = {};
 
@@ -338,7 +398,7 @@ function renderStatusFitItem(key) {
 }
 function applyStatusFitLevel(level) {
   statusFitLevel = level;
-  for (const key of STATUS_FIT_ORDER) renderStatusFitItem(key);
+  for (const key of STATUS_FIT_KEYS) renderStatusFitItem(key);
 }
 // 現在のstatusbarの幅に収まるレベルを探して適用する。子要素はすべてwhite-space:nowrap+
 // flex:noneのため、収まらないぶんは折り返さずscrollWidthへそのまま反映される
@@ -481,6 +541,7 @@ const LINE_ENDING_OPTIONS = ["CRLF", "LF", "CR"];
 function setEncoding(label) {
   if (currentEncoding === label) return;
   currentEncoding = label;
+  encodingSetExplicitly = true; // 明示操作を優先し、以後は設定変更(apply-settings)での自動追従を止める
   const tab = activeTab(); // タブ形式(displayMode==="tab")のときは表示中のタブにも書き戻す
   if (tab) tab.encoding = label; // (次のnotifyTabsChangedで古い値に巻き戻らないようにするため)
   updateStatusMeta();
@@ -490,6 +551,7 @@ function setEncoding(label) {
 function setLineEnding(label) {
   if (currentLineEnding === label) return;
   currentLineEnding = label;
+  lineEndingSetExplicitly = true; // 同上
   const tab = activeTab();
   if (tab) tab.lineEnding = label;
   updateStatusMeta();
@@ -927,7 +989,14 @@ const ctx = {
     // (settings.js自体はここで初めて動的importする。ensureSettingsUI()参照)。
     openSettings(category) {
       if (bridge) { bridge.postMessage({ type: "open-settings-window" }); return; }
-      ensureSettingsUI().then((ui) => ui.open(category));
+      // 不具合3の修正: .catchが無いとsettings.jsの動的import失敗がunhandled rejectionに
+      // なり、ユーザーには「設定を開いたのに何も起きない」としか見えなかった。
+      // ensureSettingsUI()側でsettingsUIPromiseは既にnullへ戻しているので、失敗を
+      // 知らせた上でもう一度openSettings()を呼べば再試行できる。
+      ensureSettingsUI().then((ui) => ui.open(category)).catch((err) => {
+        console.error("設定画面の読み込みに失敗しました:", err);
+        paneAlert({ title: "設定を開けません", message: "設定画面の読み込みに失敗しました。もう一度お試しください。" });
+      });
     },
     async closeWindow() {
       // 未保存の変更がある場合の保存確認はC#側(FormClosing)が一元的に行う
@@ -1833,7 +1902,7 @@ async function applyFileOpened(msg) {
     pendingGotoLine = null;
   }
 }
-async function applyNewDocumentLocal() {
+async function applyNewDocumentLocal(msg) {
   // 不具合4の修正: 自分の世代を進めておく。これにより、先行して実行中の遅い
   // applyFileOpened等がawaitから戻ってきたときに「自分は割り込まれた(=もう最新ではない)」と
   // 正しく判定できる(この関数自体はdecideFileMode(null,null)が常にmarkdownを返すため
@@ -1847,8 +1916,15 @@ async function applyNewDocumentLocal() {
   setEditorValueQuiet("");
   setName("無題");
   currentPath = null;
-  currentEncoding = null;
-  currentLineEnding = null;
+  // 不具合修正: C#側(OpenNewDocument)がencoding/lineEndingを送ってくればそれを使う。
+  // 送ってこない場合(ブラウザ単体検証・想定外の古い経路等)は設定由来の既定ラベルへ
+  // フォールバックし、ステータスバーの文字コード・改行コードが空欄にならないようにする。
+  currentEncoding = msg?.encoding || defaultEncodingLabel;
+  currentLineEnding = msg?.lineEnding || defaultLineEndingLabel;
+  // 新しい無題文書なので、直前の文書での「ステータスバーから明示的に変更した」状態は
+  // 引き継がない(この文書はまだユーザーが何も変更していないため)。
+  encodingSetExplicitly = false;
+  lineEndingSetExplicitly = false;
   setReadOnly(false);
   setDirty(false);
   updateCount();
@@ -1864,7 +1940,7 @@ async function handleHostMessage(msg) {
       break;
     case "new-document":
       pushClosedFile(currentPath);
-      await applyNewDocumentLocal();
+      await applyNewDocumentLocal(msg);
       break;
     case "open-in-tab":
       // タブ形式(仕様書 第2.10節 C-14): コマンドライン引数・D&D・多重起動時のパイプ・
@@ -1957,8 +2033,11 @@ async function handleHostMessage(msg) {
         smartDashes: msg.smartDashes,
         recognizeUnicodePunctuation: msg.recognizeUnicodePunctuation,
       });
-      // コードブロックのインデント幅(仕様書 codeIndentSize)。CodeMirrorのindentUnitを切り替える。
+      // コードブロックのインデント幅(仕様書 codeIndentSize)。CodeMirrorのindentUnit・tabSizeを
+      // 切り替える(タブ幅にも連動。詳細はeditor.js側のコメント参照)。
       editor.setCodeIndentSize(msg.codeIndentSize);
+      // コードモードの折りたたみ(仕様書 codeFoldingEnabled、既定true)。
+      editor.setCodeFolding(msg.codeFoldingEnabled !== false);
       // 自動ペアリング(仕様書 第2.10節 C-05、括弧・引用符)。setAutoPairing自体は既に実装済みだが
       // ここからの配線が抜けていたため、他の設定と同じ流儀で追加する。
       editor.setAutoPairing(msg.autoPairing !== false);
@@ -1975,6 +2054,28 @@ async function handleHostMessage(msg) {
       defaultCopyFormat = msg.defaultCopyFormat ?? "markdown";
       pandocAvailable = !!msg.pandocAvailable;
       recentFiles = msg.recentFiles ?? [];
+      // 文字コード・改行コードの既定値(仕様書「保存と復元」defaultEncoding/defaultLineEnding)。
+      // フォールバック用のラベルを更新したうえで、無題かつ未編集の文書には設定変更を追従させる
+      // (まだ何もタイプしていない=中身が既定値と紐付いている状態とみなせるため)。ただし
+      // ステータスバーから明示的に変更済みの項目は、その場でユーザーが選んだ値を優先し、
+      // 設定変更で勝手に上書きしない(仕様書6.1の「明示的に変更でき」を尊重する判断)。
+      defaultEncodingLabel = encodingKeyToLabel(msg.defaultEncoding);
+      defaultLineEndingLabel = lineEndingKeyToLabel(msg.defaultLineEnding);
+      if (currentPath === null && !isDirty) {
+        let metaChanged = false;
+        const tab = activeTab();
+        if (!encodingSetExplicitly && currentEncoding !== defaultEncodingLabel) {
+          currentEncoding = defaultEncodingLabel;
+          if (tab) tab.encoding = currentEncoding;
+          metaChanged = true;
+        }
+        if (!lineEndingSetExplicitly && currentLineEnding !== defaultLineEndingLabel) {
+          currentLineEnding = defaultLineEndingLabel;
+          if (tab) tab.lineEnding = currentLineEnding;
+          metaChanged = true;
+        }
+        if (metaChanged) updateStatusMeta();
+      }
       // 表示形式(仕様書 第2.10節 C-14、隠し設定)。設定画面には切替UIが無いため、
       // settings.jsonを直接編集した場合のみ"tab"になる。
       applyDisplayMode(msg.displayMode);
@@ -2366,12 +2467,10 @@ document.getElementById("btn-theme").addEventListener("click", () => {
   // タイトルバーも本文エリアと同じ色に切り替える。
   syncTitleBarColor();
 });
-// 設定画面(仕様書 第2.10節)はHTML製で、ブリッジが無いブラウザ単体動作でも開ける
-// (保存はできないが画面自体は操作できる。ctx.actions.openSettings参照)ため、常に表示する。
-const btnSettings = document.getElementById("btn-settings");
-if (btnSettings) {
-  btnSettings.addEventListener("click", () => ctx.actions.openSettings());
-}
+// 不具合修正: ステータスバーの「設定」ボタン(#btn-settings)はユーザー要望により削除した。
+// 設定を開く手段自体はメニューバー右側の歯車ボタン(#btn-menu-settings、commands.js
+// initMenuBar参照)とFile > 設定(Ctrl+,、commands.jsのfile.settingsコマンド)に残っている
+// ため、入口が失われるわけではない。
 
 window.addEventListener("beforeunload", (e) => {
   if (isDirty) {

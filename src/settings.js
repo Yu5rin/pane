@@ -130,6 +130,7 @@ const FIELD_DEFS = {
   // ---- 編集 ----
   indentSizeOnSave: { kind: "number", def: 4, values: [2, 4, 8] },
   codeIndentSize: { kind: "number", def: 4, values: [2, 4, 8] },
+  codeFoldingEnabled: { kind: "bool", def: true },
   codeAutoWrap: { kind: "bool", def: true },
   colorPreviewInCode: { kind: "bool", def: true },
   shiftTabAutoIndent: { kind: "bool", def: false },
@@ -206,7 +207,7 @@ const FIELD_DEFS = {
   // ---- 外観 ----
   theme: { kind: "enum", values: ["light", "dark", "system"], def: "system" },
   lightTheme: { kind: "enum", values: ["default", "sepia", "github", "solarized-light"], def: "default" },
-  darkTheme: { kind: "enum", values: ["default", "nord", "dracula", "solarized-dark", "typora-night"], def: "default" },
+  darkTheme: { kind: "enum", values: ["default", "nord", "dracula", "solarized-dark", "night"], def: "default" },
   useSeparateThemeInDarkMode: { kind: "bool", def: true },
   customCssPath: { kind: "nullableString", def: "" },
   editorFontFamily: { kind: "nullableString", def: "" },
@@ -397,6 +398,9 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
   let restoreFocus = null; // focusModal()の戻り値。閉じたときに開く前の要素へフォーカスを戻す。
 
   let draft = null; // 編集中の値。get-settingsの応答(またはDEFAULTS)から作る作業コピー
+  // テーマのプレビュー用に、開いた時点(=保存済みの値)のテーマ関連4項目だけを控えておく。
+  // キャンセル/×/Escで閉じるときにこの値へ戻す(下のrevertThemePreview参照)。
+  let themeBaseline = null;
   let dirty = false; // 未保存の変更があるか(閉じる際の確認に使う)
   let activeCategory = "general";
   let searchQuery = ""; // 上部の検索欄の入力値(カテゴリ絞り込み用)
@@ -496,6 +500,75 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     setMessage("", false);
   }
 
+  // ---- テーマのプレビュー(仕様書 第2.10節 C-06 / ユーザー要望「保存前でもプレビューしたい」) ----
+  // 「テーマ」「ライトテーマ」「ダークテーマ」「ダークモードでは別のテーマを使う」の4項目は、
+  // 選んだ瞬間にこの設定画面自身の配色(document.documentElement)とネイティブタイトルバーへ
+  // 即座に反映する。settings.jsonへはsave()が呼ばれるまで一切書き込まない
+  // (draftはただのメモリ上の作業コピーで、ここでは読むだけ・書き込まない)。
+  //
+  // 反映先はこの設定画面自身に限る(本文ウィンドウ=MainFormへは送らない)。理由:
+  //   ・本文ウィンドウ側の即時反映(保存時のBroadcastSettingsChanged→PostCapabilities)は
+  //     このタスクの対象外のPane/MainForm.cs・src/main.jsが持っており、そちらは編集禁止
+  //     (他エージェントが並行編集中)。保存前の値をMainForm側へ送る新しい経路を追加するには
+  //     その2ファイルの変更が要るため、今回のスコープでは行わない。
+  //   ・本文ウィンドウは従来どおり保存後にしか変わらないため、そもそも保存前に変化するものが
+  //     無い=キャンセルしても戻すべき状態が存在しない(壊れようがない)。
+  //   ・複数の本文ウィンドウが開いていても、保存時はPaneApplicationContext.BroadcastSettingsChanged
+  //     が全ウィンドウへ一律に配信するため、「一部の本文ウィンドウだけプレビューが残る」ような
+  //     不整合は起きない。
+  function resolveIsDark(theme) {
+    if (theme === "dark") return true;
+    if (theme === "light") return false;
+    try { return matchMedia("(prefers-color-scheme: dark)").matches; } catch { return false; }
+  }
+
+  // { theme, lightTheme, darkTheme, useSeparateThemeInDarkMode } を実際にdocumentへ適用する。
+  // main.jsのapply-settings受信(useSeparateThemeInDarkMode=falseならlightThemeを使う)と
+  // 全く同じロジック(src/main.js 2084-2099行参照)。previewTheme()/revertThemePreview()の
+  // 両方から呼ぶ共通処理。
+  function applyThemeValues(fields) {
+    const isDark = resolveIsDark(fields.theme);
+    document.documentElement.dataset.theme = isDark ? "dark" : "light";
+    document.documentElement.dataset.lightTheme = fields.lightTheme || "default";
+    document.documentElement.dataset.darkTheme =
+      (fields.useSeparateThemeInDarkMode === false ? fields.lightTheme : fields.darkTheme) || "default";
+    // ネイティブタイトルバー(設定ウィンドウ自身)の配色。C#側(SettingsWindow.cs)の
+    // "preview-theme"受け口がisDarkだけを見てWindowChrome.ApplyTheme(既定色)を塗り直す。
+    // modalモード(ブリッジ無しのブラウザ単体動作)ではctx.bridgeがnullなのでpostMessage自体が
+    // 呼ばれない(何もしないだけで安全)。
+    ctx.bridge?.postMessage({ type: "preview-theme", isDark });
+  }
+
+  function snapshotThemeBaseline() {
+    themeBaseline = {
+      theme: draft.theme,
+      lightTheme: draft.lightTheme,
+      darkTheme: draft.darkTheme,
+      useSeparateThemeInDarkMode: draft.useSeparateThemeInDarkMode,
+    };
+  }
+
+  function previewTheme() {
+    if (!draft) return;
+    applyThemeValues(draft);
+  }
+
+  // キャンセル/×/Escで閉じるときに、開いた時点のテーマへ戻す(保存はしない)。
+  function revertThemePreview() {
+    if (!themeBaseline) return;
+    applyThemeValues(themeBaseline);
+  }
+
+  // renderAppearance()から呼ぶ。wireCommonFields()は汎用配線(draftの更新+markDirty)しか
+  // しないため、テーマ関連の4項目にだけ追加でpreviewTheme()を呼ぶリスナーを重ねる
+  // (addEventListenerは複数リスナーを許すため、wireCommonFieldsの配線とは独立に共存できる)。
+  function wireThemePreview(container) {
+    for (const key of ["theme", "lightTheme", "darkTheme"]) {
+      container.querySelector(`[data-field="${key}"]`)?.addEventListener("change", previewTheme);
+    }
+    container.querySelector('[data-field="useSeparateThemeInDarkMode"]')?.addEventListener("change", previewTheme);
+  }
+
   function cancelActiveCapture() {
     if (activeCaptureCleanup) activeCaptureCleanup();
   }
@@ -553,6 +626,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     overlay = null;
     navEl = contentEl = msgEl = saveBtn = searchInput = null;
     draft = null;
+    themeBaseline = null;
     dirty = false;
     searchQuery = "";
     blockedExtensions = [];
@@ -582,6 +656,11 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
   async function requestClose() {
     cancelActiveCapture();
     if (dirty && !(await paneConfirm({ title: "閉じますか?", message: "保存されていない変更があります。閉じてもよろしいですか?", okLabel: "閉じる", danger: true }))) return;
+    // キャンセル/×/Esc(いずれもここを通る)で実際に閉じることが決まった時点で、
+    // プレビュー中だったテーマを開いた時点の値へ戻す(保存はしない。設定ファイルには
+    // 一度も書き込んでいないため、ここではdocumentの見た目とネイティブタイトルバーを
+    // 巻き戻すだけでよい)。
+    revertThemePreview();
     destroy();
   }
 
@@ -603,7 +682,6 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
       // 描画してしまい、応答が届いたらhandleSettingsLoadedが(触られていなければ)差分を
       // 反映する。
       ctx.bridge.postMessage({ type: "get-settings" });
-      console.log("DEBUG open() settingsCache?", !!settingsCache);
       if (settingsCache) {
         applyLoadedSettings(settingsCache);
       } else {
@@ -614,6 +692,8 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
       draft = clone(DEFAULTS);
       selectedExtensions = new Set(draft.associatedExtensions);
       fmRows = buildFmRows(draft.fileModeOverrides);
+      snapshotThemeBaseline();
+      previewTheme();
       renderContent();
     }
   }
@@ -650,6 +730,12 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     fmRows = buildFmRows(draft.fileModeOverrides);
     blockedExtensions = [];
     dirty = false;
+    // この時点のテーマ関連4項目(=保存済みの値)をキャンセル時の戻し先として控えておく
+    // (設定画面自身の初期配色は既にsettings-entry.js側の起動時処理(applyTheme)・
+    // SettingsWindow.OnHandleCreatedが適用済みのため、ここではdocumentへの反映は行わず
+    // 値の記録だけにとどめる。previewTheme()は「選んだ瞬間」=wireThemePreview経由の
+    // change時にだけ呼ぶ)。
+    snapshotThemeBaseline();
     renderNav();
     renderContent();
   }
@@ -937,7 +1023,8 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
       <div class="settings-group">
         <div class="settings-group-title">インデント・折り返し</div>
         ${fieldNumericSelect("indentSizeOnSave", "引用・リストのインデント幅")}
-        ${fieldNumericSelect("codeIndentSize", "コードブロックのインデント幅")}
+        ${fieldNumericSelect("codeIndentSize", "コードモードのインデント幅", "Tabキーで挿入するスペースの数と、タブ文字の表示幅です。半角スペースで書かれた既存のインデントの見た目は変わりません")}
+        ${fieldCheckbox("codeFoldingEnabled", "コードモードの折りたたみ", "関数・オブジェクト・配列などの行番号の左に折りたたみマーカーを表示します")}
         ${fieldCheckbox("codeAutoWrap", "コードブロックの長い行を折り返す")}
         ${fieldCheckbox("colorPreviewInCode", "コード中の色をプレビュー表示する", "16進・rgb・hsl等の色指定にスウォッチと文字色を付けます")}
         ${fieldCheckbox("shiftTabAutoIndent", "Shift+Tabでインデントを解除する")}
@@ -1226,7 +1313,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
             <option value="nord">Nord</option>
             <option value="dracula">Dracula</option>
             <option value="solarized-dark">Solarized Dark</option>
-            <option value="typora-night">Typora Night</option>
+            <option value="night">Night</option>
           </select>
         </label>
       </div>
@@ -1256,6 +1343,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
         <label class="settings-checkbox-row"><input type="checkbox" data-field="showWordCount"><span class="settings-checkbox-title">文字数カウントを常に表示</span></label>
       </div>`;
     wireCommonFields(el);
+    wireThemePreview(el); // テーマ4項目は選んだ瞬間にこの画面自身へプレビューする(上のpreviewTheme参照)
     wireFontPreviews(el);
     wireBrowseButtons(el);
     el.querySelector('[data-action="open-theme-folder"]')?.addEventListener("click", () => {

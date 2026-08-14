@@ -200,6 +200,26 @@ internal static class PaneDialog
             AcceptButton = defaultToCancel ? cancelEquivalent : buttonControls[0];
             _initialFocusButton = (Button)AcceptButton;
 
+            // 不具合修正(ラウンド3レビュー): Windows標準のMessageBox.Show(YesNo)は
+            // 「キャンセル相当のボタンが無い」構成のため、タイトルバーの×は無視される
+            // (閉じない)仕様になっている。しかしこのクラスはControlBoxが既定で常に有効
+            // かつ上でCancelButtonを「いいえ」に割り当てているため、×クリックで
+            // 「いいえ」相当の結果を返して閉じてしまい、標準ダイアログと挙動が異なる。
+            // 呼び出し側4箇所(ConfirmDiscardDirtyAsync・HandleSaveRequest・
+            // OnExternalChangeDebounceElapsed・PaneApplicationContextの復元確認)はいずれも
+            // 「はい以外はすべて安全側として扱う」設計のため、この挙動差自体にデータ損失等の
+            // 実害は無い。とはいえ標準ダイアログとの挙動差を無くすため、YesNo構成のときだけ
+            // ×自体を無効化する。
+            // (注: 本物のMessageBoxは×ボタンを「表示はするがクリックしても無反応・グレーアウト」
+            //  にするのに対し、WinFormsのControlBox=falseは×ボタン自体をタイトルバーから
+            //  取り除く点で見た目が完全には一致しない。ただし「×では閉じられない」という
+            //  利用者にとって重要な挙動は再現でき、実装もこの1行で完結するため、
+            //  見た目を厳密に合わせるための追加実装(WM_NCHITTEST等のフック)は行わない)。
+            if (buttons == MessageBoxButtons.YesNo)
+            {
+                ControlBox = false;
+            }
+
             // ---- DPIスケーリング。上のレイアウトはすべて96DPI基準の値のため、実際のDPIとの比を
             //      Control.Scale(SizeF)で一括反映する(位置・サイズ・フォントをまとめて再計算してくれる)。 ----
             double dpiScale = ResolveDpiScale(owner);

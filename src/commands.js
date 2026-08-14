@@ -18,6 +18,9 @@
 // (role="dialog" aria-modal="true"を付けているのにTabで背後のメニューバーへ抜けてしまう、
 // という不整合を無くすため)。
 import { trapTabKey, focusModal } from "./focus-trap.js";
+// F3/Shift+F3(次を検索・前を検索、グローバルショートカット経由)の実行後に検索パネルの
+// 件数表示を更新するためのフック(不具合2)。search-ui.js側の解説コメント参照。
+import { refreshOpenSearchCount } from "./search-ui.js";
 
 // Paneは仕様書上Windows専用(WinForms + WebView2)のため、修飾キーはCtrl固定でよい。
 const MOD = "Ctrl";
@@ -77,8 +80,12 @@ export function buildCommands(ctx) {
     { id: "edit.deleteTableRow", menu: "Edit", label: "表の行を削除", shortcut: `${MOD}+Shift+Backspace`, run: () => editor().applyAction("deleteTableRow"), separatorAfter: true },
     { id: "edit.jumpToSelection", menu: "Edit", label: "選択箇所へジャンプ", shortcut: `${MOD}+J`, run: () => editor().applyAction("scrollToSelection"), separatorAfter: true },
     { id: "edit.find", menu: "Edit", label: "検索", shortcut: `${MOD}+F`, run: app((c) => c.actions.openSearch()) },
-    { id: "edit.findNext", menu: "Edit", label: "次を検索", shortcut: "F3", run: () => editor().findNext() },
-    { id: "edit.findPrev", menu: "Edit", label: "前を検索", shortcut: "Shift+F3", run: () => editor().findPrevious() },
+    // ボタン(↓次を検索/↑前を検索)クリック時はsearch-ui.js内のハンドラがupdateCount()を
+    // 直接呼ぶが、ここ(グローバルショートカット経由)はそれを経由しないため、選択箇所は
+    // 進むのに「n / 総数」表示だけが古いままになっていた(不具合2)。refreshOpenSearchCount()で
+    // 検索パネルが開いていれば表示を追従させる(閉じていれば何もしない)。
+    { id: "edit.findNext", menu: "Edit", label: "次を検索", shortcut: "F3", run: () => { editor().findNext(); refreshOpenSearchCount(); } },
+    { id: "edit.findPrev", menu: "Edit", label: "前を検索", shortcut: "Shift+F3", run: () => { editor().findPrevious(); refreshOpenSearchCount(); } },
     { id: "edit.replace", menu: "Edit", label: "置換", shortcut: `${MOD}+H`, run: app((c) => c.actions.openReplace()) },
     { id: "edit.globalSearch", menu: "Edit", label: "フォルダ内を検索", shortcut: `${MOD}+Shift+F`, run: app((c) => c.actions.openGlobalSearch()), separatorAfter: true },
     // 日時の挿入(仕様書 第3章 N-14): Windowsのメモ帳と同じくF5キー、書式は YYYY/MM/DD HH:mm。
@@ -778,7 +785,6 @@ export function bindShortcuts(commands, ctx) {
       }
       e.preventDefault();
       e.stopPropagation();
-      console.log(`[shortcut] ${cmd.shortcut} -> ${cmd.id}`);
       cmd.run();
       return;
     }

@@ -33,6 +33,11 @@ internal sealed class MainForm : Form
     private const string LocalFileHostName = "pane-file.local";
     private const int AutoSaveIntervalMs = 30_000;
     private const int ExternalChangeDebounceMs = 300;
+    /// <summary>ローカル画像配信(<see cref="OnLocalFileResourceRequested"/>)・エクスポート時の
+    /// data:埋め込み(<see cref="HandleReadLocalImageRequest"/>)、双方に共通の1ファイルあたりの
+    /// サイズ上限(不具合修正: 従来は前者にだけ上限が無く非対称だった)。エクスポート側と
+    /// 同じ25MBに揃える。</summary>
+    private const long LocalFileMaxServeBytes = 25 * 1024 * 1024;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -97,6 +102,16 @@ internal sealed class MainForm : Form
     /// <summary>実行中のグローバル検索を中断するためのトークン。フォルダ走査用とは独立させ、
     /// 検索中に別のフォルダ走査(ファイルを開いた際の自動読み込み等)が走っても互いに干渉しないようにする。</summary>
     private CancellationTokenSource? _searchCts;
+
+    /// <summary><see cref="ResolveOneLevelCached"/>が使う、パス1階層ぶんのリンク解決結果キャッシュ
+    /// (不具合修正: 中間ディレクトリのシンボリックリンク対策)。キーは解決前のパス、値は解決後の
+    /// 実パスと有効期限。画像を多数含む文書では同じ祖先ディレクトリに対する判定が画像1枚ごとに
+    /// 繰り返し走るため、短時間だけ結果を使い回して都度のstatコストを避ける。
+    /// TTLを短く抑えている理由・上限を設けている理由は<see cref="ResolveOneLevelCached"/>参照。</summary>
+    private readonly Dictionary<string, (string ResolvedPath, DateTime ExpiresAtUtc)> _pathResolutionCache =
+        new(StringComparer.OrdinalIgnoreCase);
+    private const int PathResolutionCacheTtlMs = 3000;
+    private const int PathResolutionCacheMaxEntries = 4096;
 
     /// <summary>ConfirmDiscardDirtyAsyncの「保存する」選択時、JS側の保存完了(save-result)を待つための待機口。</summary>
     private TaskCompletionSource<bool>? _saveCompletionSource;
@@ -479,9 +494,20 @@ internal sealed class MainForm : Form
                 e.Response = MakeLocalFileErrorResponse(403, "Forbidden");
                 return;
             }
-            if (!File.Exists(resolved))
+            var info = new FileInfo(resolved);
+            if (!info.Exists)
             {
                 e.Response = MakeLocalFileErrorResponse(404, "Not Found");
+                return;
+            }
+            if (info.Length > LocalFileMaxServeBytes)
+            {
+                // 不具合修正: 従来はここにサイズ上限が無く、HandleReadLocalImageRequest
+                // (エクスポート用、25MB上限あり)と非対称だった。丸ごとFile.ReadAllBytesで
+                // メモリに読み込む前に弾く。範囲外アクセス(403)と同様にログへ残し、
+                // レスポンスは意味の近い413(Payload Too Large)を返す。
+                Logger.Write($"pane-file.local: サイズが大きいため配信を拒否({info.Length}バイト): {resolved}");
+                e.Response = MakeLocalFileErrorResponse(413, "Payload Too Large");
                 return;
             }
 
@@ -525,9 +551,16 @@ internal sealed class MainForm : Form
     ///
     /// シンボリックリンク対策: Path.GetFullPathはリンクを解決せず文字列上のパスを正規化する
     /// だけなので、「表面上は許可フォルダ配下に見えるが実体は外を指すリンク」を見逃してしまう
-    /// (実際のファイル読み込みはOSがリンクをそのまま辿るため)。File.ResolveLinkTargetで
-    /// リンクの実体まで解決し、その実体も許可フォルダ配下であることを別途確認する
-    /// (対象パス自体がリンクである場合のみ。リンクでなければ何もしない)。
+    /// (実際のファイル読み込みはOSがリンクをそのまま辿るため)。
+    ///
+    /// ラウンド3レビューでの指摘: File.ResolveLinkTargetは「引数に渡したパス自身」がリンクか
+    /// どうかしか見ないため、対象ファイル自体がリンクの場合は正しく拒否できる一方、
+    /// "許可フォルダ\link_dir\secret.txt" のように途中のディレクトリ(link_dir)だけが
+    /// リンクの場合を見逃してしまう(fullPathそのものはリンクではないため)。
+    /// これを塞ぐため、<see cref="ResolveRealPathAllLevels"/>でパスの各階層を根元から
+    /// 一段ずつ実体化しながら辿り、最終的な実体パスが許可フォルダ配下かを判定する
+    /// (対象ファイル自体がリンクの場合も、最後の階層としてこの中で解決されるため
+    /// 従来どおり拒否できる)。
     /// </summary>
     private string? ResolveAllowedLocalFilePath(string requestedPath)
     {
@@ -547,22 +580,11 @@ internal sealed class MainForm : Form
 
         try
         {
-            // File.ResolveLinkTargetは対象が存在しないとFileNotFoundExceptionを投げるため、
-            // 実在するときだけ呼ぶ(存在しないファイルの404判定は呼び出し元
-            // [OnLocalFileResourceRequested/HandleReadLocalImageRequest]がFile.Existsで
-            // 別途行う責務であり、ここで「存在しない」を理由に範囲判定自体を拒否してはいけない)。
-            if (File.Exists(fullPath) || Directory.Exists(fullPath))
+            string realPath = ResolveRealPathAllLevels(fullPath);
+            if (!roots.Any(root => IsWithinRoot(realPath, root)))
             {
-                FileSystemInfo? finalTarget = File.ResolveLinkTarget(fullPath, returnFinalTarget: true);
-                if (finalTarget is not null)
-                {
-                    string resolvedFullPath = Path.GetFullPath(finalTarget.FullName);
-                    if (!roots.Any(root => IsWithinRoot(resolvedFullPath, root)))
-                    {
-                        Logger.Write($"pane-file.local: シンボリックリンクの実体が範囲外のため拒否: {fullPath} -> {resolvedFullPath}");
-                        return null;
-                    }
-                }
+                Logger.Write($"pane-file.local: シンボリックリンクの実体が範囲外のため拒否: {fullPath} -> {realPath}");
+                return null;
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -571,7 +593,97 @@ internal sealed class MainForm : Form
             return null;
         }
 
+        // 呼び出し元へ返すのは(実体パスではなく)元の正規化済みパス。File.ReadAllBytes等の
+        // 実際の読み込みはOS自身が改めてリンクを辿って実体へ到達するため、ここでの実体パスは
+        // あくまで「許可範囲内かどうかの判定」だけに使う(従来の挙動を踏襲)。
         return fullPath;
+    }
+
+    /// <summary>
+    /// fullPath(<see cref="Path.GetFullPath(string)"/>済みの絶対パス)の各階層をルートから
+    /// 順に辿り、途中のディレクトリがシンボリックリンク/ジャンクションであれば都度実体へ解決した
+    /// うえで、最終的に指し示す実パスを返す。存在しない階層はリンク判定のしようがないため
+    /// そのまま素通りする(存在しないファイルの404判定は呼び出し元の責務)。
+    ///
+    /// 【採用理由】1階層ずつ実体化しながら進む方式にした。パスの各段でFileSystemInfoを見れば
+    /// 良いだけで.NET標準API(File.Exists/Directory.Exists/File.ResolveLinkTarget)のみで完結し、
+    /// Windows/Linuxどちらでも同じロジックで動く。
+    ///
+    /// 【不採用にした代替案】
+    /// ・Win32 GetFinalPathNameByHandle: カーネルが中間リンクも含めて一括で解決してくれ、
+    ///   呼び出し回数の面では本来こちらの方が有利。しかしWindows専用のP/Invokeとなり、
+    ///   今回の検証手順(ロジックを抽出しLinux上でdotnet run実行してシンボリックリンクを
+    ///   実際に張って確認する)ができなくなる。このアプリ自体はWinForms/WebView2で元々
+    ///   Windows専用だが、ロジック単体はOS非依存のまま検証・保守できる方が価値が高いと判断した。
+    /// ・都度キャッシュ無しでフル解決: 正しく動くが、画像を多数含む文書では1画像ごとに
+    ///   全階層をstatし直すことになりコストが積み上がる。<see cref="ResolveOneLevelCached"/>で
+    ///   短時間のキャッシュを挟むことで緩和する。
+    /// </summary>
+    private string ResolveRealPathAllLevels(string fullPath)
+    {
+        string? root = Path.GetPathRoot(fullPath);
+        if (string.IsNullOrEmpty(root))
+        {
+            // ルートが取れない異常なパスはここでは解決を諦め、呼び出し元のroots判定に委ねる
+            // (許可フォルダ配下と一致しなければ結局そこで拒否される)。
+            return fullPath;
+        }
+
+        string relative = fullPath[root.Length..];
+        string[] segments = relative.Split(
+            new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
+            StringSplitOptions.RemoveEmptyEntries);
+
+        string current = root;
+        foreach (string segment in segments)
+        {
+            current = ResolveOneLevelCached(Path.Combine(current, segment));
+        }
+        return current;
+    }
+
+    /// <summary>
+    /// pathがシンボリックリンク/ジャンクションであれば実体の絶対パスを、そうでなければ(または
+    /// 存在しなければ)pathそのものを返す。<see cref="ResolveRealPathAllLevels"/>から
+    /// 1階層ぶんずつ呼ばれる。
+    ///
+    /// 結果は<see cref="_pathResolutionCache"/>へ<see cref="PathResolutionCacheTtlMs"/>だけ
+    /// キャッシュする。画像を多数含む文書ではこの判定が画像1枚ごとに、しかも同じ祖先
+    /// ディレクトリに対して繰り返し走るため、都度stat/ResolveLinkTargetし直すコストが
+    /// 効いてくる(1文書の描画バーストの間だけキャッシュが効けば十分)。
+    ///
+    /// TTLをあえて短く(数秒)している理由: キャッシュが古くなって「実は範囲外を指す
+    /// リンクに張り替わっていた」場合に見逃すと安全性に関わるため、古い結果を長く
+    /// 使い回さない。ローカルの正規ユーザーがその場でリンクを張り替えるような操作を
+    /// しても数秒以内には反映される。エントリ数にも上限を設け、上限に達したら全消去する
+    /// (キャッシュはあくまで性能最適化であり、消えても次回また計算されるだけで
+    /// 安全性には影響しない)。
+    /// </summary>
+    private string ResolveOneLevelCached(string path)
+    {
+        if (_pathResolutionCache.TryGetValue(path, out var cached) && cached.ExpiresAtUtc > DateTime.UtcNow)
+        {
+            return cached.ResolvedPath;
+        }
+
+        string resolved = path;
+        // File.ResolveLinkTargetは対象が存在しないとFileNotFoundExceptionを投げるため、
+        // 実在するときだけ呼ぶ(存在しない階層はリンクのしようがなく、素通りしてよい)。
+        if (File.Exists(path) || Directory.Exists(path))
+        {
+            FileSystemInfo? finalTarget = File.ResolveLinkTarget(path, returnFinalTarget: true);
+            if (finalTarget is not null)
+            {
+                resolved = Path.GetFullPath(finalTarget.FullName);
+            }
+        }
+
+        if (_pathResolutionCache.Count >= PathResolutionCacheMaxEntries)
+        {
+            _pathResolutionCache.Clear();
+        }
+        _pathResolutionCache[path] = (resolved, DateTime.UtcNow.AddMilliseconds(PathResolutionCacheTtlMs));
+        return resolved;
     }
 
     /// <summary>許可フォルダの一覧: 現在編集中のファイルのフォルダ(タブ形式なら開いている
@@ -648,7 +760,8 @@ internal sealed class MainForm : Form
         // エクスポート結果のHTML自体に丸ごと同梱されるため、際限なく巨大なファイルを
         // 埋め込んでしまわないよう上限を設ける。超えた場合はdata:埋め込みを諦め、
         // JS側(md-to-html.js substituteImagePlaceholders)が元のパスへフォールバックする)。
-        const long maxEmbedBytes = 25 * 1024 * 1024;
+        // 上限値はOnLocalFileResourceRequestedと共通(LocalFileMaxServeBytes)。
+        const long maxEmbedBytes = LocalFileMaxServeBytes;
 
         string? resolved = ResolveAllowedLocalFilePath(path);
         if (resolved is null)
@@ -1541,17 +1654,21 @@ internal sealed class MainForm : Form
 
     /// <summary>
     /// ファイルを開いた際、その親フォルダを自動で読み込む(Typoraと同じ挙動)。
-    /// 既に同じフォルダを読み込み済みなら、ファイルを開くたびに毎回走査すると重いため
-    /// 再走査しない。
+    /// 既に読み込み済みのフォルダの配下(子孫を含む)にあるファイルなら、ファイルを開くたびに
+    /// 毎回走査すると重いうえ、サイドバーのルートが孫階層のフォルダへ意図せず変わってしまう
+    /// (ツリーの展開状態やスクロール位置も失われる)ため再走査しない。配下判定は
+    /// <see cref="ResolveAllowedLocalFilePath"/>と同じ<see cref="IsWithinRoot"/>を再利用する
+    /// (ここはセキュリティ境界ではなく再走査を省くための判定なので、シンボリックリンクの
+    /// 実体解決は行わない=<see cref="ResolveRealPathAllLevels"/>は使わない)。
     /// </summary>
     private void AutoLoadParentFolder(string filePath)
     {
         string? parentDir = Path.GetDirectoryName(Path.GetFullPath(filePath));
         if (parentDir is null) return;
 
-        if (_loadedFolderRootPath is not null && PathsEqual(_loadedFolderRootPath, parentDir))
+        if (_loadedFolderRootPath is not null && IsWithinRoot(parentDir, Path.GetFullPath(_loadedFolderRootPath)))
         {
-            Logger.Write($"AutoLoadParentFolder: 読み込み済みのため再走査をスキップ: {parentDir}");
+            Logger.Write($"AutoLoadParentFolder: 読み込み済みフォルダの配下のため再走査をスキップ: {parentDir}");
             return;
         }
 
@@ -1559,12 +1676,6 @@ internal sealed class MainForm : Form
         // わけではないためautoLoaded: trueにする(サイドバーを勝手に開いたり、見ている
         // パネルをファイルツリーへ強制的に切り替えたりしない)。
         _ = LoadFolderAsync(parentDir, autoLoaded: true);
-    }
-
-    private static bool PathsEqual(string a, string b)
-    {
-        static string Normalize(string p) => Path.GetFullPath(p).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        return string.Equals(Normalize(a), Normalize(b), StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -1850,7 +1961,15 @@ internal sealed class MainForm : Form
         _isReadOnly = false;
         StopWatching();
         SetDirty(false);
-        PostToWeb(new { type = "new-document" });
+        // 不具合修正: ここでencoding/lineEndingをPostToWebに載せていなかったため、
+        // ウィンドウ形式の新規文書だけステータスバーの文字コード・改行コードが空になっていた
+        // (OpenInNewTabは同じ値を送っており、タブ形式では発生しない)。
+        PostToWeb(new
+        {
+            type = "new-document",
+            encoding = TextFileService.EncodingLabel(_currentEncoding),
+            lineEnding = TextFileService.LineEndingLabel(_currentLineEnding),
+        });
     }
 
     /// <summary>
@@ -2276,6 +2395,7 @@ internal sealed class MainForm : Form
             // ---- 編集 ----
             indentSizeOnSave = settings.IndentSizeOnSave,
             codeIndentSize = settings.CodeIndentSize,
+            codeFoldingEnabled = settings.CodeFoldingEnabled,
             codeAutoWrap = settings.CodeAutoWrap,
             shiftTabAutoIndent = settings.ShiftTabAutoIndent,
             autoPairing = settings.AutoPairing,
