@@ -17,6 +17,7 @@ import { detectContentMode } from "./detect-mode.js";
 import { setReadingSpeedWpm } from "./text-stats.js";
 import { setOutlineMaxLevel } from "./markdown-extras.js";
 import { paneConfirm, paneAlert, paneInput } from "./dialog.js";
+import { applyTooltip, applyTooltipsIn, setCurrentLevel as setSharedTooltipLevel, TOOLTIP_LEVELS, DEFAULT_TOOLTIP_DETAIL } from "./tooltips.js";
 
 const host = document.getElementById("cm-host");
 const statusbarEl = document.getElementById("statusbar");
@@ -69,6 +70,42 @@ window.addEventListener("unhandledrejection", (e) => {
   logToHost("error", `JS未処理のPromise拒否: ${e.reason}`);
 });
 
+// ---- 起動時の白フラッシュ対策(新方式) ----
+// C#側(Pane/MainForm.cs)はWebView2コントロール自体を"initial-render-ready"を受け取るまで
+// 非表示にしている(その間はフォームの背景色=テーマ色だけが見える)。ここでは
+// 「テーマ・メニューバー・ステータスバー・本文エリアの初期描画が終わった」と判断できる
+// 2つの条件——(1)最初のapply-settings(テーマ・フォント等ここまでで確定)と、
+// (2)最初のfile-opened/new-document(本文エリアに内容が反映)——の両方が揃った時点で
+// 一度だけ通知する。以後のapply-settings再送(設定変更等)・2件目以降のfile-openedでは
+// 再送しない。C#側にも通知が来なかった場合のフォールバックタイマーがあるため、ここで
+// 万一送れなくてもウィンドウが永久に白いままにはならない(が、その保険はJS側からは
+// 検証できない。詳細はPane/MainForm.cs RevealWebView参照)。
+let initialSettingsApplied = false;
+let initialDocumentApplied = false;
+let initialRenderReadySent = false;
+function markInitialSettingsApplied() {
+  initialSettingsApplied = true;
+  trySignalInitialRenderReady();
+}
+function markInitialDocumentApplied() {
+  initialDocumentApplied = true;
+  trySignalInitialRenderReady();
+}
+function trySignalInitialRenderReady() {
+  if (initialRenderReadySent || !initialSettingsApplied || !initialDocumentApplied) return;
+  initialRenderReadySent = true;
+  // この時点でDOMの変更(テーマ属性・本文の内容)は済んでいるが、実際に画面へペイントされた
+  // 保証はまだ無い。requestAnimationFrameを2回挟むことで、直前までのDOM変更が確実に
+  // 一度ブラウザの描画パイプラインを通ってから通知する(1回だけだと、環境によっては
+  // 直前のフレームの変更がまだ反映されていないことがあるため2回にしている)。
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      logToHost("log", "initial-render-ready送信(テーマ・メニューバー・ステータスバー・本文エリアの初期描画完了)");
+      bridge?.postMessage({ type: "initial-render-ready" });
+    });
+  });
+}
+
 let currentHandle = null; // File System Access API(ブラウザ単体時のみ使用)
 let currentPath = null; // ブリッジ経由で開いた際のフルパス(最近使ったファイル・画像挿入・reopenClosedに使う)
 let currentName = "無題";
@@ -105,6 +142,34 @@ function lineEndingKeyToLabel(key) {
   return key === "lf" ? "LF" : "CRLF";
 }
 let wordWrapOn = true;
+// ツールチップの詳しさ(仕様書 依頼2「マウスカーソルを合わした時に説明を出す」機能、
+// 設定tooltipDetail、既定"standard")。文言そのものはsrc/tooltips.jsに集約してあり、
+// ここでは現在の段階を保持して、状態を持つ要素(文字コード等)のtitleを都度更新するのに使う。
+// apply-settingsで届くたび、および設定画面での即時プレビュー(未保存段階)でも更新する
+// (setTooltipLevel/ctx.setTooltipLevel参照)。
+let tooltipLevel = DEFAULT_TOOLTIP_DETAIL;
+function setTooltipLevel(level) {
+  tooltipLevel = TOOLTIP_LEVELS.includes(level) ? level : DEFAULT_TOOLTIP_DETAIL;
+  // sidebar.js/global-search.jsのように、ファイルパス等をtitleとして出す動的な一覧行
+  // (数が多く、個別にdata-tipを振るのは現実的でない箇所)が、ctxを介さず直接
+  // 「今noneかどうか」だけを読めるよう、tooltips.js側にも複製しておく。
+  setSharedTooltipLevel(tooltipLevel);
+  refreshAllTooltips();
+}
+// ページ全体([id]・[data-tip]を持つ要素すべて)へ現在の段階を再適用する。段階そのものが
+// 変わった時(setTooltipLevel)と起動直後の初期反映に使う。文字コード等の「状態」を持つ
+// 要素は、テーブルに無い動的な値(現在の値)を渡し直す必要があるため、汎用の一括適用の後で
+// 個別に上書きする(各updateXXX関数側でも同じ呼び出しを行い、値が変わるたびに追従させる)。
+function refreshAllTooltips() {
+  applyTooltipsIn(document.body, tooltipLevel);
+  applyTooltip(statusMode, tooltipLevel, { state: statusMode.textContent });
+  applyTooltip(statusPosition, tooltipLevel, { state: statusPosition.textContent });
+  applyTooltip(statusEncoding, tooltipLevel, { state: currentEncoding });
+  applyTooltip(statusLineEnding, tooltipLevel, { state: currentLineEnding });
+  applyTooltip(statusWrapBtn, tooltipLevel, { state: wordWrapOn ? "折り返しあり" : "折り返しなし" });
+  applyTooltip(statusCount, tooltipLevel, { state: statusCount.textContent });
+  applyTooltip(statusZoom, tooltipLevel, { state: statusZoom.textContent });
+}
 let defaultCopyFormat = "markdown"; // "markdown" | "html"(仕様書 第2.9.3節、設定で切替)
 let pandocAvailable = false;
 let recentFiles = [];
@@ -476,15 +541,18 @@ function updateCount() {
   const total = editor.getDocLength();
   const selLen = editor.getSelectionLength();
   setStatusFitText("count", selLen > 0 ? `${total}文字(選択 ${selLen}文字)` : `${total}文字`);
+  applyTooltip(statusCount, tooltipLevel, { state: statusCount.textContent });
 }
 // 行/列(仕様書 N-03)。カーソル位置から直接取れる軽量な情報なので、選択変更のたびに呼んでよい。
 function updatePosition() {
   const { line, col } = editor.getCursorInfo();
   setStatusFitText("position", `行 ${line}, 列 ${col}`);
+  applyTooltip(statusPosition, tooltipLevel, { state: statusPosition.textContent });
 }
 // ズーム率(仕様書 N-03)。既定サイズに対する本文フォントサイズの比率を表示する。
 function updateZoom() {
   setStatusFitText("zoom", `${Math.round((editor.getFontSize() / DEFAULT_FONT_SIZE) * 100)}%`);
+  applyTooltip(statusZoom, tooltipLevel, { state: statusZoom.textContent });
 }
 function updateWordCountVisibility() {
   // showWordCountの新しい値を見てhidden状態を更新し、表示/非表示の切り替えで空いた
@@ -568,6 +636,8 @@ function syncTitleBarColor() {
 function updateStatusMeta() {
   setStatusFitText("encoding", currentEncoding ? `文字コード: ${currentEncoding}` : "");
   setStatusFitText("lineEnding", currentLineEnding ? `改行コード: ${currentLineEnding}` : "");
+  applyTooltip(statusEncoding, tooltipLevel, { state: currentEncoding });
+  applyTooltip(statusLineEnding, tooltipLevel, { state: currentLineEnding });
 }
 // 文字コード・改行コードの選択肢(仕様書 第6.1/6.2節)。Pane/TextFileService.csの
 // EncodingLabel/LineEndingLabelが返すラベル文字列とそのまま揃える(ParseEncodingLabel/
@@ -627,6 +697,7 @@ function modeLabel(mode, language) {
 function updateStatusMode() {
   const mode = editor.getMode();
   statusMode.textContent = modeLabel(mode, editor.getCodeLanguage());
+  applyTooltip(statusMode, tooltipLevel, { state: statusMode.textContent });
   host.classList.toggle("mode-code", mode === "code");
   // 仕様書 第10.3節「本文の最大幅」はMarkdownモードのときだけ適用する(style.css側が
   // この属性で出し分ける)。コードモード・プレーンテキストモードで幅を制限すると横に長い
@@ -781,6 +852,7 @@ statusMode.addEventListener("click", () => {
 });
 function updateWrapButton() {
   setStatusFitText("wrap", wordWrapOn ? "折り返し: あり" : "折り返し: なし");
+  applyTooltip(statusWrapBtn, tooltipLevel, { state: wordWrapOn ? "折り返しあり" : "折り返しなし" });
 }
 function pushClosedFile(path) {
   if (!path) return;
@@ -1196,6 +1268,12 @@ const ctx = {
     // quickOpen生成後にctx.actionsへ追加する(下方参照)。
   },
 };
+// ツールチップの詳しさ(依頼2)。設定画面(settings.js)自身は本文ウィンドウと同じ文書に
+// 重ねて表示される(モードモード。ブリッジ有りの実機では専用ウィンドウ側になるため、
+// こちらは主にブラウザ単体動作・検証用の経路)ため、保存前でも「選んだ瞬間」に本文側の
+// ツールチップへ反映できる。テーマのプレビュー(previewTheme)と同じ考え方で、
+// ctx経由で直接この文書のsetTooltipLevel()を呼んでもらう。
+ctx.setTooltipLevel = setTooltipLevel;
 
 // サイドバー(仕様書 第2.8節・第10.4節)。ctxを引数に取るためctx構築後に生成し、
 // 開閉・パネル切替のactionsはここでctx.actionsへ追加する
@@ -2021,10 +2099,14 @@ async function handleHostMessage(msg) {
   switch (msg?.type) {
     case "file-opened":
       await applyFileOpened(msg);
+      // 起動直後の最初の1件だけ、白フラッシュ対策の「本文エリア描画済み」条件を満たす
+      // (2件目以降=ユーザーが別のファイルを開いた場合はtrySignalInitialRenderReady内で無視される)。
+      markInitialDocumentApplied();
       break;
     case "new-document":
       pushClosedFile(currentPath);
       await applyNewDocumentLocal(msg);
+      markInitialDocumentApplied();
       break;
     case "open-in-tab":
       // タブ形式(仕様書 第2.10節 C-14): コマンドライン引数・D&D・多重起動時のパイプ・
@@ -2261,6 +2343,12 @@ async function handleHostMessage(msg) {
         initialSidebarAutoOpenDone = true;
         if (msg.showOutlineByDefault) sidebar.open("outline");
       }
+      // ツールチップの詳しさ(依頼2、仕様書 tooltipDetail、既定"standard")。
+      setTooltipLevel(msg.tooltipDetail);
+      // ここまでで本文エリアの色・フォント等、テーマに関わる設定はすべて確定している。
+      // 白フラッシュ対策の「テーマ適用済み」条件を満たす(2回目以降の再送では
+      // trySignalInitialRenderReady内で無視される)。
+      markInitialSettingsApplied();
       break;
     case "image-inserted":
       // 画像挿入(仕様書 R-07)。C#側でファイルコピー・相対パス解決を終えたものが届く。
@@ -2571,3 +2659,9 @@ window.addEventListener("beforeunload", (e) => {
     e.returnValue = "";
   }
 });
+
+// ツールチップの詳しさ(依頼2)の初期反映。ブリッジ経由でapply-settingsが届けば
+// 上のcase "apply-settings"側で既定"standard"から改めて上書きされるが、ブリッジが無い
+// ブラウザ単体動作ではapply-settings自体が届かないため、ここで一度だけ既定値
+// (DEFAULT_TOOLTIP_DETAIL="standard")を明示的に適用しておく。
+refreshAllTooltips();

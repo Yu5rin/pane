@@ -45,6 +45,7 @@ internal static class SettingsBridge
             sidebarWidthPx = settings.SidebarWidthPx,
             recordRecentFiles = settings.RecordRecentFiles,
             zoomWithCtrlWheel = settings.ZoomWithCtrlWheel,
+            tooltipDetail = settings.TooltipDetail,
             displayMode = settings.DisplayMode,
 
             // ---- 保存と復元 ----
@@ -283,6 +284,7 @@ internal static class SettingsBridge
             if (TryGetInt(s, "sidebarWidthPx", out int sidebarWidthPx)) settings.SidebarWidthPx = sidebarWidthPx;
             if (TryGetBool(s, "recordRecentFiles", out bool recordRecentFiles)) settings.RecordRecentFiles = recordRecentFiles;
             if (TryGetBool(s, "zoomWithCtrlWheel", out bool zoomWithCtrlWheel)) settings.ZoomWithCtrlWheel = zoomWithCtrlWheel;
+            if (TryGetString(s, "tooltipDetail", out string tooltipDetail)) settings.TooltipDetail = tooltipDetail;
             if (TryGetString(s, "displayMode", out string displayMode)) settings.DisplayMode = displayMode;
 
             // ---- 保存と復元 ----

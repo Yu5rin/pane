@@ -26,6 +26,10 @@ import { paneConfirm, paneAlert } from "./dialog.js";
 // (role="dialog" aria-modal="true"を付けているのにTabで背後のメニューバーへ抜けてしまう、
 // という不整合を無くすため。詳細はfocus-trap.js側のコメント参照)。
 import { trapTabKey, focusModal } from "./focus-trap.js";
+// ツールチップの詳しさ(依頼2)。文言テーブル自体はsrc/tooltips.jsに集約してあり、
+// ここでは設定画面自身の各項目(チェックボックス・セレクト等)にdata-tip属性で識別子を
+// 振り、現在選んでいる段階(draft.tooltipDetail)に応じてtitleを組み立てるのに使う。
+import { resolveTooltip, DEFAULT_TOOLTIP_DETAIL, TOOLTIP_LEVELS } from "./tooltips.js";
 
 // 本文フォントサイズの既定値(src/editor.js の DEFAULT_FONT_SIZE と同じ値)。
 // editor.jsから直接importしないのは、設定画面専用ウィンドウ(settings-entry.js)の
@@ -78,7 +82,7 @@ const NAV_ITEMS = [
 // ---- 検索欄用の索引(カテゴリID → そのカテゴリ内に出てくる語)。厳密な自動生成はせず、
 // 各カテゴリの見出し・項目ラベルを手で列挙する(項目を増やしたときはここにも追記すること)。----
 const SEARCH_INDEX = {
-  general: ["起動時の動作", "前回開いていたファイルを復元", "何も開かない", "指定したフォルダを開く", "起動フォルダ", "最後のウィンドウを閉じたら終了", "常駐", "起動を速く", "ステータスバー", "アウトライン", "折りたたみ", "最近使ったファイル", "ホイールで拡大縮小"],
+  general: ["起動時の動作", "前回開いていたファイルを復元", "何も開かない", "指定したフォルダを開く", "起動フォルダ", "最後のウィンドウを閉じたら終了", "常駐", "起動を速く", "ステータスバー", "アウトライン", "折りたたみ", "最近使ったファイル", "ホイールで拡大縮小", "ツールチップ", "説明の詳しさ", "マウスカーソル", "ヘルプ"],
   file: ["自動保存", "保存の間隔", "未保存の下書き", "復元", "ファイル切替", "文字コード", "エンコード", "改行コード", "既定の拡張子"],
   edit: ["インデント幅", "コードブロック", "折り返し", "Shift", "Tab", "自動ペアリング", "括弧", "引用符", "絵文字", "自動補完", "生表示", "コピー形式", "行コピー", "タイプライター", "スペルチェック", "自動修正", "読了時間", "読了速度", "自動判定", "拡張子ごとの編集モード", "カラープレビュー", "色のプレビュー", "色", "スウォッチ", "カラーピッカー"],
   markdown: ["インライン数式", "数式", "上付き", "下付き", "ハイライト", "作図", "ダイアグラム", "自動リンク", "Callouts", "厳格モード", "見出しの記法", "箇条書き", "リスト記号", "番号付きリスト", "行番号", "自動採番", "アウトラインの階層", "コード言語", "空白", "改行", "スマート引用符", "スマートダッシュ", "句読点"],
@@ -111,6 +115,9 @@ const FIELD_DEFS = {
   sidebarWidthPx: { kind: "number", def: 240, min: 180, max: 600 },
   recordRecentFiles: { kind: "bool", def: true },
   zoomWithCtrlWheel: { kind: "bool", def: true },
+  // ツールチップの詳しさ(依頼2)。none/minimal/standard/detailedの4段階、既定はstandard。
+  // 文言そのものはsrc/tooltips.jsのTOOLTIPS(将来のF1ヘルプ/多言語対応でも共用する想定)。
+  tooltipDetail: { kind: "enum", values: TOOLTIP_LEVELS, def: DEFAULT_TOOLTIP_DETAIL },
   // 表示形式(仕様書 第2.10節 C-14)。タブ形式は実装済みだが、ユーザー指示により設定画面には
   // 切替UIを一切出さない(意図してウィンドウ形式から変更できないようにする隠し機能)。
   // settings.jsonを直接テキストエディタで編集して"tab"にした場合のみ有効になる。
@@ -323,17 +330,32 @@ function comboFromEvent(e) {
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
+// ---- 設定項目のツールチップ(依頼2) ----
+// src/tooltips.jsのTOOLTIPSに個別の文言が無い項目のフォールバックとして、
+// 「ラベル。説明」の形の文言を組み立てるための下ごしらえ。field*ヘルパーが
+// 呼ばれるたびに、その項目の(HTMLタグを除いた)ラベルと説明文をここへ登録しておく。
+const FIELD_TOOLTIP_FALLBACK = {};
+function stripHtml(s) {
+  return String(s ?? "").replace(/<[^>]*>/g, "");
+}
+function registerFieldFallback(key, label, desc) {
+  FIELD_TOOLTIP_FALLBACK[key] = { label: stripHtml(label), desc: stripHtml(desc) };
+}
 // invert: true を渡すと、チェックボックスの見た目(チェックON/OFF)と実際の設定値
 // (draft[key])を反転させる。quitOnLastWindowClosed用(依頼: 「最後のウィンドウを閉じても
 // 常駐させる」という、チェックを付けると常駐する向きのUIにしたいが、設定キー自体は
 // 既存互換のため反転させずに残す)。data-invert属性を付け、実際の反転処理はここではなく
 // wireCommonFields側で行う(値の読み書きが集約されている場所と揃えるため)。
+// data-tip: ツールチップの識別子(依頼2)。外側の<label>全体をホバー対象にする
+// (チェックボックス本体だけでなくラベル文字にカーソルを合わせても出るように)。
 function fieldCheckbox(key, title, desc, { invert = false } = {}) {
-  return `<label class="settings-checkbox-row"><input type="checkbox" data-field="${key}"${invert ? " data-invert" : ""}><span class="settings-checkbox-title">${title}${desc ? `<span class="settings-field-desc">${desc}</span>` : ""}</span></label>`;
+  registerFieldFallback(key, title, desc);
+  return `<label class="settings-checkbox-row" data-tip="${key}"><input type="checkbox" data-field="${key}"${invert ? " data-invert" : ""}><span class="settings-checkbox-title">${title}${desc ? `<span class="settings-field-desc">${desc}</span>` : ""}</span></label>`;
 }
 function fieldSelect(key, label, options, desc) {
+  registerFieldFallback(key, label, desc);
   const opts = options.map(([v, t]) => `<option value="${escapeHtml(v)}">${escapeHtml(t)}</option>`).join("");
-  return `<label class="settings-select-row">${label}
+  return `<label class="settings-select-row" data-tip="${key}">${label}
       <select data-field="${key}">${opts}</select>
       ${desc ? `<span class="settings-field-desc">${desc}</span>` : ""}
     </label>`;
@@ -341,34 +363,38 @@ function fieldSelect(key, label, options, desc) {
 // indentSizeOnSave/codeIndentSizeのような離散数値(2|4|8)をセレクトで扱う。
 // data-numericを付け、wireCommonFields側でNumber変換させる。
 function fieldNumericSelect(key, label, desc) {
+  registerFieldFallback(key, label, desc);
   const def = FIELD_DEFS[key];
   const opts = def.values.map((v) => `<option value="${v}">${v}</option>`).join("");
-  return `<label class="settings-select-row">${label}
+  return `<label class="settings-select-row" data-tip="${key}">${label}
       <select data-field="${key}" data-numeric>${opts}</select>
       ${desc ? `<span class="settings-field-desc">${desc}</span>` : ""}
     </label>`;
 }
 function fieldNumber(key, label, desc) {
+  registerFieldFallback(key, label, desc);
   const def = FIELD_DEFS[key] ?? {};
   const attrs = [];
   if (Number.isFinite(def.min)) attrs.push(`min="${def.min}"`);
   if (Number.isFinite(def.max)) attrs.push(`max="${def.max}"`);
   attrs.push(`step="${def.step ?? 1}"`);
-  return `<label class="settings-text-row">${label}
+  return `<label class="settings-text-row" data-tip="${key}">${label}
       <input type="number" data-field="${key}" ${attrs.join(" ")}>
       ${desc ? `<span class="settings-field-desc">${desc}</span>` : ""}
     </label>`;
 }
 function fieldText(key, label, placeholder, desc) {
-  return `<label class="settings-text-row">${label}
+  registerFieldFallback(key, label, desc);
+  return `<label class="settings-text-row" data-tip="${key}">${label}
       <input type="text" data-field="${key}" placeholder="${escapeHtml(placeholder || "")}">
       ${desc ? `<span class="settings-field-desc">${desc}</span>` : ""}
     </label>`;
 }
 function fieldTextarea(key, label, desc, opts) {
+  registerFieldFallback(key, label, desc);
   const lines = opts && opts.lines;
   const rows = (opts && opts.rows) || 3;
-  return `<label class="settings-text-row">${label}
+  return `<label class="settings-text-row" data-tip="${key}">${label}
       <textarea data-field="${key}"${lines ? " data-lines" : ""} rows="${rows}"></textarea>
       ${desc ? `<span class="settings-field-desc">${desc}</span>` : ""}
     </label>`;
@@ -377,8 +403,9 @@ function fieldTextarea(key, label, desc, opts) {
 // customCssPath)。テキスト入力+「参照…」ボタン。ボタンはbridgeへbrowse-pathを送るだけで、
 // 返信(browse-path-result)が来なくても崩れない(ブリッジが無ければボタン自体を無効化する)。
 function fieldPath(ctx, key, kind, label, placeholder, desc) {
+  registerFieldFallback(key, label, desc);
   const disabledAttr = ctx.bridge ? "" : " disabled";
-  return `<label class="settings-path-row">${label}
+  return `<label class="settings-path-row" data-tip="${key}">${label}
       <span class="settings-path-input-row">
         <input type="text" data-field="${key}" placeholder="${escapeHtml(placeholder || "")}">
         <button type="button" class="btn tiny settings-path-browse-btn" data-browse-field="${key}" data-browse-kind="${kind}"${disabledAttr}>参照…</button>
@@ -406,6 +433,9 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
   // テーマのプレビュー用に、開いた時点(=保存済みの値)のテーマ関連4項目だけを控えておく。
   // キャンセル/×/Escで閉じるときにこの値へ戻す(下のrevertThemePreview参照)。
   let themeBaseline = null;
+  // ツールチップの詳しさ(依頼2)も、テーマと同じく「保存前でも選んだ瞬間にプレビューしたい」
+  // 項目。開いた時点(=保存済みの値)を控えておき、キャンセル/×/Escで閉じるときに戻す。
+  let tooltipBaseline = null;
   let dirty = false; // 未保存の変更があるか(閉じる際の確認に使う)
   let activeCategory = "general";
   let searchQuery = ""; // 上部の検索欄の入力値(カテゴリ絞り込み用)
@@ -574,6 +604,35 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     container.querySelector('[data-field="useSeparateThemeInDarkMode"]')?.addEventListener("change", previewTheme);
   }
 
+  // ---- ツールチップの詳しさのプレビュー(依頼2) ----
+  // テーマと同じ考え方: 選んだ瞬間に反映し、settings.jsonへの書き込みはsave()まで待たない。
+  // 反映先は2つ:
+  //   (1) この設定画面自身が持つ各項目のtitle(applySettingsTooltips、renderContent経由で
+  //       カテゴリを切り替えるたびにも再適用される)。
+  //   (2) 本文側(ctx.setTooltipLevel)。modalモード(本文と同じ文書にオーバーレイで重ねる)
+  //       ではこれだけで本文のメニューバー・ステータスバー等のtitleが即座に変わる。
+  //       pageモード(専用ウィンドウ)ではctxが本文ウィンドウの物ではないため、
+  //       ここでの即時プレビューは専用ウィンドウ自身の項目(1)にとどまり、本文側は
+  //       従来の設定と同様「保存後にapply-settingsが届いた時点」で反映される
+  //       (テーマプレビューが本文ウィンドウへは反映されないのと同じ制約。上のapplyThemeValues
+  //       のコメント参照)。
+  function snapshotTooltipBaseline() {
+    tooltipBaseline = draft.tooltipDetail;
+  }
+  function previewTooltipDetail() {
+    if (!draft || !contentEl) return;
+    applySettingsTooltips(contentEl); // このカテゴリ内の各項目のtitleを新しい段階で再計算する
+    ctx.setTooltipLevel?.(draft.tooltipDetail);
+  }
+  function revertTooltipPreview() {
+    if (tooltipBaseline == null || !draft) return;
+    draft.tooltipDetail = tooltipBaseline;
+    ctx.setTooltipLevel?.(tooltipBaseline);
+  }
+  function wireTooltipPreview(container) {
+    container.querySelector('[data-field="tooltipDetail"]')?.addEventListener("change", previewTooltipDetail);
+  }
+
   function cancelActiveCapture() {
     if (activeCaptureCleanup) activeCaptureCleanup();
   }
@@ -590,11 +649,11 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
       <div class="settings-modal${isPage ? " settings-modal-page" : ""}"${dialogAttrs}>
         <div class="settings-modal-head">
           <div class="settings-modal-title">設定</div>
-          ${mode === "page" ? "" : `<button type="button" class="settings-modal-close" aria-label="閉じる">${ICON_CLOSE}</button>`}
+          ${mode === "page" ? "" : `<button type="button" class="settings-modal-close" data-tip="settings-modal-close" aria-label="閉じる">${ICON_CLOSE}</button>`}
         </div>
         <div class="settings-search-row">
           ${ICON_SEARCH}
-          <input type="search" class="settings-search-input" placeholder="設定を検索…" aria-label="設定を検索">
+          <input type="search" class="settings-search-input" data-tip="settings-search" placeholder="設定を検索…" aria-label="設定を検索">
         </div>
         <div class="settings-modal-body">
           <nav class="settings-nav"></nav>
@@ -603,8 +662,8 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
         <div class="settings-modal-foot">
           <div class="settings-modal-msg"></div>
           <div class="settings-modal-actions">
-            <button type="button" class="btn" data-act="cancel">キャンセル</button>
-            <button type="button" class="btn primary" data-act="save">保存</button>
+            <button type="button" class="btn" data-act="cancel" data-tip="settings-cancel">キャンセル</button>
+            <button type="button" class="btn primary" data-act="save" data-tip="settings-save">保存</button>
           </div>
         </div>
       </div>`;
@@ -632,6 +691,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     navEl = contentEl = msgEl = saveBtn = searchInput = null;
     draft = null;
     themeBaseline = null;
+    tooltipBaseline = null;
     dirty = false;
     searchQuery = "";
     blockedExtensions = [];
@@ -666,6 +726,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     // 一度も書き込んでいないため、ここではdocumentの見た目とネイティブタイトルバーを
     // 巻き戻すだけでよい)。
     revertThemePreview();
+    revertTooltipPreview();
     destroy();
   }
 
@@ -699,6 +760,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
       fmRows = buildFmRows(draft.fileModeOverrides);
       snapshotThemeBaseline();
       previewTheme();
+      snapshotTooltipBaseline();
       renderContent();
     }
   }
@@ -741,6 +803,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     // 値の記録だけにとどめる。previewTheme()は「選んだ瞬間」=wireThemePreview経由の
     // change時にだけ呼ぶ)。
     snapshotThemeBaseline();
+    snapshotTooltipBaseline();
     renderNav();
     renderContent();
   }
@@ -948,6 +1011,30 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
         markDirty();
       });
     }
+    applySettingsTooltips(container);
+  }
+
+  // ---- 設定画面の各項目自体のツールチップ(依頼2) ----
+  // data-tip="設定キー"を持つ要素(field*ヘルパーが生成する各行の<label>)へ、現在の
+  // draft.tooltipDetailに応じたtitleを設定する。wireCommonFields()の末尾から毎回呼ばれる
+  // ため、カテゴリを切り替えるたびに常に最新の段階が反映される。
+  //   ・none/minimal: 出さない(設定画面はラベル自体で何の項目か分かるため、
+  //     「最低限」でも状態以外の説明は不要という依頼2の解釈をさらに進め、
+  //     状態を示す情報を持たない設定項目では常に抑制する)。
+  //   ・standard/detailed: src/tooltips.jsのTOOLTIPSに専用の文言があればそれを使い、
+  //     無ければ「ラベル。説明文(desc)」から自動で組み立てたフォールバックを使う
+  //     (FIELD_TOOLTIP_FALLBACK、上のfield*ヘルパー参照)。descが無い項目はラベルのみになる。
+  function applySettingsTooltips(container) {
+    const level = draft?.tooltipDetail ?? DEFAULT_TOOLTIP_DETAIL;
+    for (const el of container.querySelectorAll("[data-tip]")) {
+      if (level === "none" || level === "minimal") { el.title = ""; continue; }
+      const key = el.dataset.tip;
+      const fb = FIELD_TOOLTIP_FALLBACK[key];
+      const fallbackText = fb ? (fb.desc ? `${fb.label}。${fb.desc}` : fb.label) : "";
+      const fallback = fallbackText ? { standard: fallbackText, detailed: fallbackText } : null;
+      const text = resolveTooltip(key, level, { fallback });
+      if (text !== null) el.title = text;
+    }
   }
 
   // 「参照…」ボタン。押すとbrowse-pathを送るだけ(結果はhandleBrowsePathResultで受ける)。
@@ -970,23 +1057,23 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     el.innerHTML = `
       <div class="settings-group">
         <div class="settings-group-title">起動時の動作</div>
-        <label class="settings-radio"><input type="radio" name="startupBehavior" value="restoreSession"><span>前回開いていたファイルを復元する</span></label>
+        <label class="settings-radio"><input type="radio" name="startupBehavior" value="restoreSession"><span>前回開いていたファイルを復元</span></label>
         <label class="settings-radio"><input type="radio" name="startupBehavior" value="blank"><span>何も開かない</span></label>
         <label class="settings-radio"><input type="radio" name="startupBehavior" value="customFolder"><span>指定したフォルダを開く</span></label>
         ${fieldPath(ctx, "startupFolderPath", "folder", "起動時に開くフォルダ", "(未設定)")}
       </div>
       <div class="settings-group">
         <div class="settings-group-title">画面の表示</div>
-        ${fieldCheckbox("showStatusBar", "ステータスバーを表示する")}
-        ${fieldCheckbox("showOutlineByDefault", "アウトラインを既定で表示する")}
-        ${fieldCheckbox("collapsibleOutline", "アウトラインの見出しを折りたためるようにする")}
-        ${fieldCheckbox("zoomWithCtrlWheel", "Ctrl+マウスホイールで文字サイズを拡大縮小する")}
+        ${fieldCheckbox("showStatusBar", "ステータスバーを表示")}
+        ${fieldCheckbox("showOutlineByDefault", "アウトラインを既定で表示")}
+        ${fieldCheckbox("collapsibleOutline", "アウトラインの折りたたみ")}
+        ${fieldCheckbox("zoomWithCtrlWheel", "Ctrl+マウスホイールで文字サイズを拡大縮小")}
       </div>
       <!-- 表示形式(displayMode)の切替UIはここには置かない(ユーザー指示: ウィンドウ形式から
            変更できないようにする隠し機能。docs/設定項目一覧.md参照)。 -->
       <div class="settings-group">
         <div class="settings-group-title">ファイル履歴</div>
-        ${fieldCheckbox("recordRecentFiles", "最近使ったファイルを記録する")}
+        ${fieldCheckbox("recordRecentFiles", "最近使ったファイルを記録")}
       </div>
       <div class="settings-group">
         <div class="settings-group-title">起動・終了</div>
@@ -997,25 +1084,35 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
              (PaneApplicationContext.OnWindowClosed)は変更しない(互換性優先。判断の理由は
              docs/設定項目一覧.md側の注記を参照)。fieldCheckboxのinvert:trueにより、
              このチェックボックスだけ「チェックON = 常駐する(draft.quitOnLastWindowClosed
-             = false)」という向きで表示・保存する。 -->
+             = false)」という向きで表示・保存する。
+             文言の体言止め統一(依頼1)でもこの2つの文言だけは意図的に変えない
+             (ユーザー指示。チェックの意味が反転した経緯があり、動詞まで含めて丁寧に
+             説明する現状の言い回しが必要なため)。 -->
         ${fieldCheckbox("quitOnLastWindowClosed", "最後のウィンドウを閉じても常駐させる(次回の起動が速くなります)",
           "オフにすると、最後のウィンドウを閉じたときにPaneごと終了します。下の項目とは独立していて、こちらは「ウィンドウを閉じたときに常駐し続けるか」の設定です。",
           { invert: true })}
         ${fieldCheckbox("preloadOnStartup", "PCの起動時からあらかじめ常駐しておく(起動が速くなります)",
           "こちらは「PCの起動直後から常駐するか」の設定です(上の項目とは独立して動作します)。")}
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title">ヘルプ</div>
+        ${fieldSelect("tooltipDetail", "ツールチップの詳しさ", [
+          ["none", "表示しない"], ["minimal", "最低限"], ["standard", "標準"], ["detailed", "詳しい"],
+        ], "設定画面やメニューバー・ステータスバーのボタンにカーソルを合わせたときに出る説明の詳しさです。")}
       </div>`;
     wireCommonFields(el);
     wireBrowseButtons(el);
+    wireTooltipPreview(el);
   }
 
   function renderFile(el) {
     el.innerHTML = `
       <div class="settings-group">
         <div class="settings-group-title">自動保存</div>
-        ${fieldCheckbox("autoSaveEnabled", "自動保存を有効にする")}
+        ${fieldCheckbox("autoSaveEnabled", "自動保存")}
         ${fieldNumber("autoSaveIntervalSeconds", "自動保存の間隔(秒)")}
-        ${fieldCheckbox("recoverUnsavedDrafts", "未保存の下書きを次回起動時に復元する")}
-        ${fieldCheckbox("saveWithoutAskingOnSwitch", "サイドバーからファイルを切り替えるとき、確認せずに保存する")}
+        ${fieldCheckbox("recoverUnsavedDrafts", "未保存の下書きを次回起動時に復元")}
+        ${fieldCheckbox("saveWithoutAskingOnSwitch", "サイドバーでのファイル切り替え時、確認せず保存")}
       </div>
       <div class="settings-group">
         <div class="settings-group-title">保存形式の既定値</div>
@@ -1035,20 +1132,20 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     el.innerHTML = `
       <div class="settings-group">
         <div class="settings-group-title">入力補助</div>
-        <label class="settings-checkbox-row"><input type="checkbox" data-field="autoPairing"><span class="settings-checkbox-title">自動ペアリング<span class="settings-field-desc">括弧・引用符を入力すると自動的に閉じます</span></span></label>
+        <label class="settings-checkbox-row" data-tip="autoPairing"><input type="checkbox" data-field="autoPairing"><span class="settings-checkbox-title">自動ペアリング<span class="settings-field-desc">括弧・引用符を入力すると自動的に閉じます</span></span></label>
         ${fieldCheckbox("autoPairMarkdown", "Markdown記法の自動ペアリング", "例: <code>**</code> <code>_</code> などを自動的に閉じます")}
         ${fieldSelect("emojiAutocomplete", "絵文字の自動補完", [["off", "オフ"], ["esc", "Escで確定"], ["auto", "自動確定"]])}
-        ${fieldCheckbox("liveRenderingShowSourceOnFocus", "カーソル行の記法を生表示する")}
+        ${fieldCheckbox("liveRenderingShowSourceOnFocus", "カーソル行の記法を生表示")}
       </div>
       <div class="settings-group">
         <div class="settings-group-title">インデント・折り返し</div>
         ${fieldNumericSelect("indentSizeOnSave", "引用・リストのインデント幅")}
         ${fieldNumericSelect("codeIndentSize", "コードモードのインデント幅", "Tabキーで挿入するスペースの数と、タブ文字の表示幅です。半角スペースで書かれた既存のインデントの見た目は変わりません")}
         ${fieldCheckbox("codeFoldingEnabled", "コードモードの折りたたみ", "関数・オブジェクト・配列などの行番号の左に折りたたみマーカーを表示します")}
-        ${fieldCheckbox("codeAutoWrap", "コードブロックの長い行を折り返す")}
-        ${fieldCheckbox("colorPreviewInCode", "コード中の色をプレビュー表示する", "16進・rgb・hsl等の色指定にスウォッチと文字色を付けます")}
-        ${fieldCheckbox("shiftTabAutoIndent", "Shift+Tabでインデントを解除する")}
-        <label class="settings-checkbox-row"><input type="checkbox" data-field="strictMode"><span class="settings-checkbox-title">厳格モード<span class="settings-field-desc">見出しやリスト記号の記法を厳密に解釈します</span></span></label>
+        ${fieldCheckbox("codeAutoWrap", "コードブロックの長い行を折り返し")}
+        ${fieldCheckbox("colorPreviewInCode", "コード中の色をプレビュー表示", "16進・rgb・hsl等の色指定にスウォッチと文字色を付けます")}
+        ${fieldCheckbox("shiftTabAutoIndent", "Shift+Tabでインデントを解除")}
+        <label class="settings-checkbox-row" data-tip="strictMode"><input type="checkbox" data-field="strictMode"><span class="settings-checkbox-title">厳格モード<span class="settings-field-desc">見出しやリスト記号の記法を厳密に解釈します</span></span></label>
       </div>
       <div class="settings-group">
         <div class="settings-group-title">コピー・カーソル</div>
@@ -1059,14 +1156,14 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
           </select>
           <span class="settings-field-desc">他アプリへ貼り付けるときに書式を保つか</span>
         </label>
-        ${fieldCheckbox("copyWholeLineWhenNoSelection", "選択が無いときはCtrl+C/Xで行全体をコピーする")}
+        ${fieldCheckbox("copyWholeLineWhenNoSelection", "選択が無いときはCtrl+C/Xで行全体をコピー")}
         ${fieldCheckbox("typewriterKeepCaretCentered", "タイプライターモード(カーソル行を画面中央に保つ)")}
         ${fieldNumber("readingSpeedWpm", "読了速度(分あたりの文字数)", "0を指定すると自動計算します")}
       </div>
       <div class="settings-group">
         <div class="settings-group-title">スペルチェック</div>
-        ${fieldCheckbox("spellCheckEnabled", "スペルチェックを有効にする")}
-        <label class="settings-checkbox-row"><input type="checkbox" data-field="spellCheckAutoCorrect"><span class="settings-checkbox-title">スペルチェックの自動修正を有効にする<span class="settings-field-desc">WebView2の制約により、この項目からは制御できません。Windowsの入力設定に従います</span></span></label>
+        ${fieldCheckbox("spellCheckEnabled", "スペルチェック")}
+        <label class="settings-checkbox-row" data-tip="spellCheckAutoCorrect"><input type="checkbox" data-field="spellCheckAutoCorrect"><span class="settings-checkbox-title">スペルチェックの自動修正を有効にする<span class="settings-field-desc">WebView2の制約により、この項目からは制御できません。Windowsの入力設定に従います</span></span></label>
       </div>
       <div class="settings-group">
         <div class="settings-group-title">編集モードの自動判定</div>
@@ -1160,20 +1257,20 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
       <div class="settings-group">
         <div class="settings-group-title">記法サポート</div>
         ${fieldCheckbox("autoLinksEnabled", "URLの自動リンク化")}
-        <label class="settings-checkbox-row"><input type="checkbox" data-field="highlightEnabled"><span class="settings-checkbox-title">ハイライト<span class="settings-field-desc">例: <code>==ハイライト==</code></span></span></label>
-        <label class="settings-checkbox-row"><input type="checkbox" data-field="calloutsEnabled"><span class="settings-checkbox-title">Callouts<span class="settings-field-desc">例: <code>&gt; [!NOTE]</code></span></span></label>
+        <label class="settings-checkbox-row" data-tip="highlightEnabled"><input type="checkbox" data-field="highlightEnabled"><span class="settings-checkbox-title">ハイライト<span class="settings-field-desc">例: <code>==ハイライト==</code></span></span></label>
+        <label class="settings-checkbox-row" data-tip="calloutsEnabled"><input type="checkbox" data-field="calloutsEnabled"><span class="settings-checkbox-title">Callouts<span class="settings-field-desc">例: <code>&gt; [!NOTE]</code></span></span></label>
         ${fieldCheckbox("diagramsEnabled", "作図(Mermaidなどのダイアグラム)")}
-        <label class="settings-checkbox-row"><input type="checkbox" data-field="superSubscriptEnabled"><span class="settings-checkbox-title">上付き・下付き<span class="settings-field-desc">例: <code>x^2^</code>、<code>H~2~O</code></span></span></label>
-        <label class="settings-checkbox-row"><input type="checkbox" data-field="inlineMathEnabled"><span class="settings-checkbox-title">インライン数式<span class="settings-field-desc">例: <code>$E=mc^2$</code></span></span></label>
+        <label class="settings-checkbox-row" data-tip="superSubscriptEnabled"><input type="checkbox" data-field="superSubscriptEnabled"><span class="settings-checkbox-title">上付き・下付き<span class="settings-field-desc">例: <code>x^2^</code>、<code>H~2~O</code></span></span></label>
+        <label class="settings-checkbox-row" data-tip="inlineMathEnabled"><input type="checkbox" data-field="inlineMathEnabled"><span class="settings-checkbox-title">インライン数式<span class="settings-field-desc">例: <code>$E=mc^2$</code></span></span></label>
         ${fieldCheckbox("codeBlockMathEnabled", "コードブロック内の数式記法")}
       </div>
       <div class="settings-group">
         <div class="settings-group-title">記法の書き方</div>
-        <label class="settings-checkbox-row"><input type="checkbox" data-field="strictMode"><span class="settings-checkbox-title">厳格モード(再掲)<span class="settings-field-desc">「編集」カテゴリと同じ項目です</span></span></label>
+        <label class="settings-checkbox-row" data-tip="strictMode"><input type="checkbox" data-field="strictMode"><span class="settings-checkbox-title">厳格モード(再掲)<span class="settings-field-desc">「編集」カテゴリと同じ項目です</span></span></label>
         ${fieldSelect("headingStyle", "見出しの記法", [["atx", "ATX形式(# 見出し)"], ["setext", "Setext形式(下線)"]])}
         ${fieldSelect("unorderedListMarker", "箇条書きの記号", [["-", "-"], ["*", "*"], ["+", "+"]])}
         ${fieldSelect("orderedListMarker", "番号付きリストの記号", [[".", "1."], [")", "1)"]])}
-        <label class="settings-checkbox-row"><input type="checkbox" data-field="codeBlockLineNumbers"><span class="settings-checkbox-title">コードブロックの行番号<span class="settings-field-desc">フェンス付きコードブロックの左に行番号を表示します</span></span></label>
+        <label class="settings-checkbox-row" data-tip="codeBlockLineNumbers"><input type="checkbox" data-field="codeBlockLineNumbers"><span class="settings-checkbox-title">コードブロックの行番号<span class="settings-field-desc">フェンス付きコードブロックの左に行番号を表示します</span></span></label>
         ${fieldSelect("mathAutoNumber", "数式の自動採番", [["off", "しない"], ["ams", "amsmath形式のみ"], ["all", "すべて"]])}
         ${fieldNumber("chapterLevelInOutline", "アウトラインに含める見出しの階層")}
         ${fieldText("defaultCodeLanguage", "既定のコード言語", "(なし)", "コードブロックを挿入するときの既定の言語ID")}
@@ -1188,7 +1285,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
         <div class="settings-group-title">スマート置換</div>
         ${fieldSelect("smartQuotes", "スマート引用符", [["off", "オフ"], ["input", "入力時に変換"], ["render", "表示時のみ変換"]])}
         ${fieldSelect("smartDashes", "スマートダッシュ", [["off", "オフ"], ["endash", "-- を – に変換"], ["emdash", "-- を — に変換"]])}
-        ${fieldCheckbox("recognizeUnicodePunctuation", "全角句読点をMarkdown記法として認識する")}
+        ${fieldCheckbox("recognizeUnicodePunctuation", "全角句読点をMarkdown記法として認識")}
       </div>`;
     wireCommonFields(el);
   }
@@ -1202,14 +1299,14 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
         <div class="settings-group-title">保存先</div>
         ${fieldSelect("imageInsertAction", "画像を挿入したときの動作", [["none", "何もしない"], ["currentFolder", "現在のフォルダにコピー"], ["assets", "assetsフォルダにコピー"], ["filenameAssets", "ファイル名.assetsフォルダにコピー"], ["custom", "指定したフォルダにコピー"]])}
         ${fieldPath(ctx, "imageCustomFolder", "folder", "画像のコピー先フォルダ", "./assets", "<code>./</code> <code>../</code> で始まる相対パスか絶対パス。<code>${filename}</code>は現在のファイル名(拡張子なし)に展開します")}
-        ${fieldCheckbox("imageApplyToLocal", "ローカルの画像に適用する")}
-        ${fieldCheckbox("imageApplyToOnline", "オンライン(URL)の画像にも適用する")}
+        ${fieldCheckbox("imageApplyToLocal", "ローカルの画像に適用")}
+        ${fieldCheckbox("imageApplyToOnline", "オンライン(URL)の画像にも適用")}
       </div>
       <div class="settings-group">
         <div class="settings-group-title">パスの書き方</div>
-        ${fieldCheckbox("imagePreferRelativePath", "できるだけ相対パスで記述する")}
-        ${fieldCheckbox("imageAddDotSlash", "相対パスの先頭に ./ を付ける")}
-        ${fieldCheckbox("imageAutoEscapeUrl", "画像URLの空白などを自動的にエスケープする")}
+        ${fieldCheckbox("imagePreferRelativePath", "できるだけ相対パスで記述")}
+        ${fieldCheckbox("imageAddDotSlash", "相対パスの先頭に ./ を付加")}
+        ${fieldCheckbox("imageAutoEscapeUrl", "画像URLの空白などを自動的にエスケープ")}
       </div>`;
     wireCommonFields(el);
     wireBrowseButtons(el);
@@ -1235,7 +1332,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
         <div class="settings-group-title">ヘッダー・フッター</div>
         ${fieldText("exportHeaderText", "ヘッダー", "", REPLACEMENT_TOKENS_DESC)}
         ${fieldText("exportFooterText", "フッター", "", REPLACEMENT_TOKENS_DESC)}
-        ${fieldCheckbox("exportPageBreakBetweenTopHeadings", "最上位見出しの前でページを区切る")}
+        ${fieldCheckbox("exportPageBreakBetweenTopHeadings", "最上位見出しの前でページ区切り")}
         ${fieldCheckbox("exportIncludeOutline", "アウトラインを含める")}
         ${fieldNumber("exportOutlineWidthPx", "アウトラインの幅(px)")}
       </div>
@@ -1249,9 +1346,9 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
         ${fieldSelect("exportDefaultFolder", "書き出し先フォルダ", [["sameAsFile", "ファイルと同じフォルダ"], ["custom", "指定したフォルダ"]])}
         ${fieldPath(ctx, "exportCustomFolder", "folder", "書き出し先の指定フォルダ", "(未設定)")}
         ${fieldSelect("exportAfter", "書き出し後の動作", [["none", "何もしない"], ["openFile", "ファイルを開く"], ["openFolder", "フォルダを開く"]])}
-        ${fieldCheckbox("exportShowSaveDialog", "書き出し時に保存ダイアログを表示する")}
+        ${fieldCheckbox("exportShowSaveDialog", "書き出し時に保存ダイアログを表示")}
         ${fieldSelect("exportMathAs", "数式の書き出し形式", [["svg", "SVG画像"], ["latex", "LaTeXソース"]])}
-        ${fieldCheckbox("exportReadYamlFrontMatter", "YAMLフロントマターを読み取る")}
+        ${fieldCheckbox("exportReadYamlFrontMatter", "YAMLフロントマターを読み取り")}
       </div>`;
     wireCommonFields(el);
     wireBrowseButtons(el);
@@ -1326,7 +1423,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
             <option value="solarized-light">Solarized Light</option>
           </select>
         </label>
-        ${fieldCheckbox("useSeparateThemeInDarkMode", "ダークモードでは別のテーマを使う")}
+        ${fieldCheckbox("useSeparateThemeInDarkMode", "ダークモードで別のテーマを使用")}
         <label class="settings-select-row">ダークテーマ
           <select data-field="darkTheme">
             <option value="default">標準</option>
@@ -1360,7 +1457,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
         </div>
       </div>
       <div class="settings-group">
-        <label class="settings-checkbox-row"><input type="checkbox" data-field="showWordCount"><span class="settings-checkbox-title">文字数カウントを常に表示</span></label>
+        <label class="settings-checkbox-row" data-tip="showWordCount"><input type="checkbox" data-field="showWordCount"><span class="settings-checkbox-title">文字数カウントを常に表示</span></label>
       </div>`;
     wireCommonFields(el);
     wireThemePreview(el); // テーマ4項目は選んだ瞬間にこの画面自身へプレビューする(上のpreviewTheme参照)
@@ -1430,7 +1527,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
       </div>
       <div class="ft-tree" data-field="associatedExtensions">${catBlocks}</div>
       <div class="settings-group">
-        ${fieldCheckbox("explorerNewMenuEnabled", "エクスプローラーの右クリック→「新規作成」にMarkdownファイルを追加する")}
+        ${fieldCheckbox("explorerNewMenuEnabled", "エクスプローラーの右クリック→「新規作成」にMarkdownファイルを追加")}
       </div>`;
 
     wireCommonFields(el);
@@ -1640,13 +1737,13 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     el.innerHTML = `
       <div class="settings-group">
         ${fieldCheckbox("enableDebug", "デバッグモード", "開発者向けの詳細ログを有効にします")}
-        ${fieldCheckbox("showHiddenFilesInTree", "隠しファイルをファイルツリーに表示する")}
+        ${fieldCheckbox("showHiddenFilesInTree", "隠しファイルを表示")}
       </div>
       <div class="settings-group">
         ${fieldTextarea("fileTreePatterns", "ファイルツリーの除外パターン", "1行に1パターン(glob)。<code>!</code>で始めると除外の否定になります。", { lines: true, rows: 4 })}
       </div>
       <div class="settings-group">
-        ${fieldCheckbox("addToPath", "コマンドラインからPaneを開けるようにする", "exeのあるフォルダをユーザー環境変数PATHへ追加します(管理者権限は不要)。インストーラは使わない方針のため、この設定からのみ登録・解除します。")}
+        ${fieldCheckbox("addToPath", "コマンドラインからのPane起動を有効化", "exeのあるフォルダをユーザー環境変数PATHへ追加します(管理者権限は不要)。インストーラは使わない方針のため、この設定からのみ登録・解除します。")}
       </div>
       <div class="settings-group">
         <div class="settings-group-title">操作</div>

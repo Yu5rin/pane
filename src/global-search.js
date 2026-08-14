@@ -4,6 +4,11 @@
 // 必ずcancel-searchを送る」という仕様書の指示どおりに振る舞う(それ以上の凝った
 // 排他制御はプロトコル上できないため行わない)。
 
+// ツールチップの詳しさ(依頼2)。ヒット行ごとにファイルパス:行番号をtitleとして出しており、
+// 件数が多く個別に識別子を振れないため、sidebar.jsのsetDynamicTitleと同じく
+// 「noneのときだけ出さない」というルールだけをここで直接守る。
+import { getCurrentLevel } from "./tooltips.js";
+
 // 入力のたびにフォルダ全体を検索させないためのデバウンス幅(仕様書の指示どおり300ms)。
 const DEBOUNCE_MS = 300;
 
@@ -152,7 +157,7 @@ export function createGlobalSearch(ctx) {
         const row = document.createElement("button");
         row.type = "button";
         row.className = "search-result-hit";
-        row.title = `${hit.relativePath}:${hit.line}`;
+        row.title = getCurrentLevel() === "none" ? "" : `${hit.relativePath}:${hit.line}`;
         const lineEl = document.createElement("span");
         lineEl.className = "search-result-line";
         lineEl.textContent = String(hit.line);
