@@ -18,9 +18,12 @@ import { renderMarkdownToHtml, renderStandaloneHtml } from "./md-to-html.js";
 import { charClass, computeTextStats } from "./text-stats.js";
 import { sanitizeHtml, isSafeUrl } from "./html-sanitize.js";
 import {
-  CSS_COLOR_LANGS, findColorMatches, parseColorLiteral, formatColorLiteral,
-  readableTextColor, openColorPickerPanel,
+  CSS_COLOR_LANGS, findColorMatches, parseColorLiteral, readableTextColor,
 } from "./color-picker.js";
+// formatColorLiteral・openColorPickerPanel(カラーピッカーパネル本体)は、本文の色プレビュー
+// 表示(常時の装飾)には要らず、「色を変更…」で実際にパネルを開いたときにしか使わない。
+// 初期ロードJS削減(仕様書 第8.4節)のため、openColorPicker()の中で動的importする
+// (math.js/mermaid-render.jsと同じ作法)。
 
 // コードのハイライト配色(仕様書 第5章・第10.2節)。色は単独で決め打ちせず、
 // style.cssで定義した--code-*トークン(--ink/--ink-mute/--accentから派生)を参照する。
@@ -1434,16 +1437,39 @@ class TableWidget extends WidgetType {
 const focusEffect = StateEffect.define();
 const focusField = StateField.define({ create: () => false, update: (v, tr) => { for (const ef of tr.effects) if (ef.is(focusEffect)) v = ef.value; return v; } });
 const focusNotifier = EditorView.focusChangeEffect.of((state, focusing) => focusEffect.of(focusing));
+// 表の一覧(findAllTables、構文木の全走査)は、表と無関係な変更(表の範囲に触れず"|"も
+// 挿入されない)では再計算しない。表を1つも含まない/編集箇所から離れた大きな文書で
+// 入力のたびに全木を辿るコストを避ける(仕様書 第8.2節・第8.4節)。
+// startLine/endLine(表ウィジェットの行挿入・削除操作が使う)は位置remap後の行番号に
+// 作り直す(その他のフィールド=header/aligns/bodyは内容が変わっていないためそのまま)。
+function remapTableBlocks(tables, tr) {
+  return tables.map((t) => {
+    const from = tr.changes.mapPos(t.from);
+    const to = tr.changes.mapPos(t.to, 1);
+    const startLine = tr.state.doc.lineAt(from).number;
+    const endLine = tr.state.doc.lineAt(Math.max(from, to - 1)).number;
+    return { ...t, from, to, startLine, endLine };
+  });
+}
+const tableBlocksField = StateField.define({
+  create: (state) => findAllTables(state),
+  update: (v, tr) => {
+    if (!tr.docChanged) return v;
+    return blockListNeedsRecompute(v, tr, ["|"]) ? findAllTables(tr.state) : remapTableBlocks(v, tr);
+  },
+});
 const tableField = StateField.define({
-  create: buildTableDeco,
-  update: (v, tr) => (tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect))) ? buildTableDeco(tr.state) : v,
+  create: (state) => buildTableDeco(state, state.field(tableBlocksField)),
+  update: (v, tr) => (tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect)))
+    ? buildTableDeco(tr.state, tr.state.field(tableBlocksField))
+    : v,
   provide: (f) => EditorView.decorations.from(f),
 });
-function buildTableDeco(state) {
+function buildTableDeco(state, tables) {
   const decos = [];
   const focused = state.field(focusField, false) ?? false;
   const sel = state.selection.main;
-  for (const t of findAllTables(state)) {
+  for (const t of tables) {
     if (focused && sel.from <= t.to && sel.to >= t.from) continue; // 編集モード(生テキスト)
     decos.push(Decoration.replace({ widget: new TableWidget(t), block: true }).range(t.from, t.to));
   }
@@ -1452,6 +1478,10 @@ function buildTableDeco(state) {
 // ---- 目次 [toc](仕様書 M-12) ----
 // [toc] だけの段落を見出し一覧ウィジェットに置換する。見出しの追加・削除・レベル変更は
 // docChangedのたびに extractHeadings() を呼び直すため自動的に反映される。
+// [toc]段落一覧そのもの(構文木の全Paragraph走査)は、多くの文書では1つも存在しないため
+// blockListNeedsRecompute経由で差分更新する([toc]を使わない文書での入力毎の全木走査を避ける。
+// 仕様書 第8.2節・第8.4節)。[toc]を実際に使っている場合はparas.length>0の間、従来どおり
+// docChangedのたびにextractHeadings()を呼ぶ(見出しの変化を確実に拾うため、そこは変更しない)。
 function findTocParagraphs(state) {
   const paras = [];
   syntaxTree(state).iterate({
@@ -1464,8 +1494,14 @@ function findTocParagraphs(state) {
   });
   return paras;
 }
-function buildTocDeco(state) {
-  const paras = findTocParagraphs(state);
+const tocParasField = StateField.define({
+  create: (state) => findTocParagraphs(state),
+  update: (v, tr) => {
+    if (!tr.docChanged) return v;
+    return blockListNeedsRecompute(v, tr, ["toc"]) ? findTocParagraphs(tr.state) : remapBlockRanges(v, tr.changes);
+  },
+});
+function buildTocDeco(state, paras) {
   if (!paras.length) return Decoration.none;
   const focused = state.field(focusField, false) ?? false;
   const sel = state.selection.main;
@@ -1478,10 +1514,40 @@ function buildTocDeco(state) {
   return Decoration.set(decos);
 }
 const tocField = StateField.define({
-  create: buildTocDeco,
-  update: (v, tr) => (tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect))) ? buildTocDeco(tr.state) : v,
+  create: (state) => buildTocDeco(state, state.field(tocParasField)),
+  update: (v, tr) => (tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect)))
+    ? buildTocDeco(tr.state, tr.state.field(tocParasField))
+    : v,
   provide: (f) => EditorView.decorations.from(f),
 });
+
+// ---- ブロック一覧系StateFieldの差分更新ヘルパー(表・[toc]・Mermaid/mathフェンス・生HTML共通) ----
+// 仕様書 第8.2節の是正対象(表・hangingIndent)に加え、同種の構文木全走査(syntaxTree().iterate())が
+// 表以外の複数箇所(目次・Mermaid・コードブロック内数式・生HTML)にも残っていたため、
+// mathBlocksField(直下、既存)と同じ考え方をここへ切り出して横展開する。
+// 「変更が対象になりうる兆候(トリガー文字列を含む挿入、または既存ブロックの範囲に触れる変更)」
+// が無ければ、構文木を辿り直さずtr.changesで位置をずらすだけにする。
+// triggersは小文字化した部分文字列の配列(挿入テキストを小文字化して部分一致で見る。
+// 大文字小文字を問わない記法(例: [TOC])も拾えるように)。
+// 判定はやや粗く倒してある(例: "|"を含む挿入は表と無関係でも再計算する)が、見落とし
+// (再計算すべきなのにしない)より誤検知(不要な再計算)の方が安全なため、意図的にこちらへ倒す。
+function blockListNeedsRecompute(existing, tr, triggers) {
+  let needs = false;
+  tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+    if (needs) return;
+    if (triggers.length) {
+      const ins = inserted.toString().toLowerCase();
+      if (triggers.some((s) => ins.includes(s))) { needs = true; return; }
+    }
+    for (const b of existing) { if (fromA <= b.to && toA >= b.from) { needs = true; return; } }
+  });
+  return needs;
+}
+// 位置だけをtr.changesで移動させる(内容は変更範囲に触れていないことがblockListNeedsRecompute側で
+// 保証済みなので、from/to以外のフィールド(code/text等)はそのまま使い回してよい)。
+function remapBlockRanges(blocks, changes) {
+  return blocks.map((b) => ({ ...b, from: changes.mapPos(b.from), to: changes.mapPos(b.to, 1) }));
+}
 
 // ---- 数式ブロック $$...$$(仕様書 M-07・第5章) ----
 // "$$"だけの行から次の"$$"だけの行までを1ブロックとする。構文木に数式ノードは
@@ -1581,9 +1647,13 @@ function findMermaidBlocks(state) {
 }
 const mermaidBlocksField = StateField.define({
   create: (state) => findMermaidBlocks(state),
-  // HTMLBlockと同様、構文木は既にインクリメンタル解析されているため文書変更のたびに
-  // 辿り直すだけでよい(全文字列を毎回正規表現走査するわけではない)。
-  update: (v, tr) => (tr.docChanged ? findMermaidBlocks(tr.state) : v),
+  // 構文木は既にインクリメンタル解析されているが、辿り直す(syntaxTree().iterate())こと自体は
+  // 文書サイズに比例するコストがかかるため、Mermaidフェンスと無関係な変更(既存ブロックに
+  // 触れず"```"も"mermaid"も挿入されない)では辿り直さない(§8.2・第8.4節、mathBlocksFieldと同じ考え方)。
+  update: (v, tr) => {
+    if (!tr.docChanged) return v;
+    return blockListNeedsRecompute(v, tr, ["```", "mermaid"]) ? findMermaidBlocks(tr.state) : remapBlockRanges(v, tr.changes);
+  },
 });
 function buildMermaidBlockDeco(state, blocks) {
   // 仕様書 diagramsEnabled: falseなら図として描画せず、通常のフェンスコードのまま
@@ -1637,7 +1707,12 @@ function findCodeMathBlocks(state) {
 }
 const codeMathBlocksField = StateField.define({
   create: (state) => findCodeMathBlocks(state),
-  update: (v, tr) => (tr.docChanged ? findCodeMathBlocks(tr.state) : v),
+  // mermaidBlocksFieldと同じ考え方(§8.2・第8.4節): ```mathフェンスと無関係な変更では
+  // 構文木を辿り直さない。
+  update: (v, tr) => {
+    if (!tr.docChanged) return v;
+    return blockListNeedsRecompute(v, tr, ["```", "math"]) ? findCodeMathBlocks(tr.state) : remapBlockRanges(v, tr.changes);
+  },
 });
 function buildCodeMathBlockDeco(state, blocks) {
   const toggles = state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
@@ -1920,10 +1995,13 @@ function findHtmlBlocks(state) {
 }
 const htmlBlocksField = StateField.define({
   create: (state) => findHtmlBlocks(state),
-  // HTMLBlockは構文木のノードであり(数式ブロックのような自前の行走査ではなく)構文木が
-  // 既にインクリメンタル解析を行っているため、tableField/tocFieldと同様に文書変更のたびに
-  // 構文木を辿るだけでよい(全文字列を毎回正規表現走査するわけではない)。
-  update: (v, tr) => (tr.docChanged ? findHtmlBlocks(tr.state) : v),
+  // mermaidBlocksField/codeMathBlocksFieldと同じ考え方(§8.2・第8.4節)。生HTMLブロックの
+  // 開始行は必ず"<"を含むため、それが挿入されず既存ブロックにも触れない変更では
+  // 構文木を辿り直さない。
+  update: (v, tr) => {
+    if (!tr.docChanged) return v;
+    return blockListNeedsRecompute(v, tr, ["<"]) ? findHtmlBlocks(tr.state) : remapBlockRanges(v, tr.changes);
+  },
 });
 function buildHtmlBlockDeco(state, blocks) {
   const focused = state.field(focusField, false) ?? false;
@@ -2160,8 +2238,8 @@ const markdownLanguageExt = () => markdown({ extensions: [Strikethrough, Table, 
 // buildExtensions()側に移した。理由はfocusField定義部・emojiCompletionSource定義部の
 // コメント参照)。
 const livePreviewExt = () => [
-  livePreview, tableField, tableAutoFormat,
-  frontmatterField, tocField, extTogglesField,
+  livePreview, tableBlocksField, tableField, tableAutoFormat,
+  frontmatterField, tocParasField, tocField, extTogglesField,
   mathBlocksField, mathBlockDecoField,
   mermaidBlocksField, mermaidBlockDecoField, // Mermaid図(仕様書 第4.2節・第8.3節)
   codeMathBlocksField, codeMathBlockDecoField, // ```mathフェンス(仕様書 codeBlockMathEnabled)
@@ -2626,14 +2704,22 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
         view.dispatch({ effects: setColorPickerHighlight.of(null) });
         view.focus();
       };
-      panelHandle = openColorPickerPanel({
-        anchorRect,
-        initialColor: parsed,
-        hasAlpha,
-        formatColor: (rgba) => formatColorLiteral(rgba, parsed.notation),
-        onChange: (rgba) => writeLive(formatColorLiteral(rgba, parsed.notation)),
-        onCommit: (rgba) => finish(formatColorLiteral(rgba, parsed.notation)),
-        onCancel: () => finish(colorText), // 開いた時の色に戻す。履歴には何も残らない
+      // パネル本体(color-picker-panel.js)は動的importで必要になった瞬間にだけ読み込む。
+      // 呼び出し自体は同期でtrueを返す(枠線ハイライトも上でdispatch済み)ため、
+      // ここでのわずかな遅延は「パネルの表示が一瞬遅れる」以上の影響を持たない。
+      // importが解決するまでの間にabandon()/finish()で既に閉じていたら(ended===true)、
+      // パネルは作らない(対象喪失後に今さら開いても無意味なため)。
+      import("./color-picker-panel.js").then(({ formatColorLiteral, openColorPickerPanel }) => {
+        if (ended) return;
+        panelHandle = openColorPickerPanel({
+          anchorRect,
+          initialColor: parsed,
+          hasAlpha,
+          formatColor: (rgba) => formatColorLiteral(rgba, parsed.notation),
+          onChange: (rgba) => writeLive(formatColorLiteral(rgba, parsed.notation)),
+          onCommit: (rgba) => finish(formatColorLiteral(rgba, parsed.notation)),
+          onCancel: () => finish(colorText), // 開いた時の色に戻す。履歴には何も残らない
+        });
       });
       return true;
     },
