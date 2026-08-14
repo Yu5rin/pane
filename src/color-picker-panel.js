@@ -451,9 +451,13 @@ export function openColorPickerPanel(opts) {
       redoColorHistory();
     }
   }
-  function onDocMouseDown(e) { if (!root.contains(e.target)) cancel(); }
+  // パネルの外をクリックしたときは「適用」として扱う(ユーザー要望)。
+  // 操作中の色は既に本文へリアルタイムで反映されているため、外をクリックしただけで
+  // 元の色へ戻されると「せっかく選んだ色が消えた」と受け取られてしまう。
+  // 取り消したいときはEscか「キャンセル」ボタンという、明示的な操作の方に寄せる。
+  function onDocMouseDown(e) { if (!root.contains(e.target)) commit(); }
   document.addEventListener("keydown", onKeyDown, true);
-  // クリック直後(パネルを開いた右クリック由来のclick等)で即キャンセルされないよう、
+  // クリック直後(パネルを開いた右クリック由来のclick等)で即座に閉じられないよう、
   // 外側クリック監視は次のイベントループから有効にする。
   setTimeout(() => document.addEventListener("mousedown", onDocMouseDown, true), 0);
   function cleanup() {
