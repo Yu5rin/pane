@@ -45,6 +45,14 @@
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.3 9.2a2.7 2.7 0 1 1 4.4 2.1c-.9.7-1.7 1.2-1.7 2.4"/><circle cx="12" cy="17" r="1" fill="currentColor" stroke="none"/></svg>
     </button>
   </div>
+  <!-- タブバー(仕様書 第2.10節 C-14、隠し設定): displayMode==="tab"のときだけmain.js側が
+       hiddenを外して表示する。既定(window形式)では常に非表示・空のまま(main.js参照)。 -->
+  <div id="tabbar" class="tabbar" role="tablist" hidden>
+    <div id="tabbar-list" class="tabbar-list"></div>
+    <button id="tabbar-new" class="tabbar-new-btn" type="button" title="新しいタブ" aria-label="新しいタブ">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+  </div>
   <div id="main-area">
     <div id="sidebar" class="collapsed">
       <div class="sidebar-tabs">

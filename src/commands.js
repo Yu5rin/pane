@@ -26,7 +26,11 @@ export function buildCommands(ctx) {
     // ---- File(第2.1節) ----
     { id: "file.new", menu: "File", label: "新規作成", shortcut: `${MOD}+N`, run: app((c) => c.actions.newDocument()) },
     { id: "file.newWindow", menu: "File", label: "新しいウィンドウ", shortcut: `${MOD}+Shift+N`, run: app((c) => c.actions.newWindow()) },
-    { id: "file.newTab", menu: "File", label: "新しいタブ", grayed: () => true, note: "準備中(Phase 8)" },
+    // タブ形式(仕様書 第2.10節 C-14)。設定画面には切替UIを出さない隠し機能のため、
+    // 有効になるのはsettings.jsonを直接編集してdisplayMode:"tab"にした場合のみ
+    // (既定のウィンドウ形式では常に無効表示のまま)。
+    // ショートカットは割り当てない(Ctrl+Tは既に「表を挿入」para.tableが使用済み)。
+    { id: "file.newTab", menu: "File", label: "新しいタブ", grayed: (c) => c.getState().displayMode !== "tab", run: app((c) => c.actions.newTab()) },
     { id: "file.open", menu: "File", label: "開く", shortcut: `${MOD}+O`, run: app((c) => c.actions.openFile()) },
     { id: "file.openFolder", menu: "File", label: "フォルダを開く", run: app((c) => c.actions.openFolder()) },
     { id: "file.quickOpen", menu: "File", label: "クイックオープン", shortcut: `${MOD}+P`, run: app((c) => c.actions.openQuickOpen()), enabled: () => ctx.getState().folderLoaded },

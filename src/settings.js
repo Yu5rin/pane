@@ -73,7 +73,7 @@ const NAV_ITEMS = [
 // ---- 検索欄用の索引(カテゴリID → そのカテゴリ内に出てくる語)。厳密な自動生成はせず、
 // 各カテゴリの見出し・項目ラベルを手で列挙する(項目を増やしたときはここにも追記すること)。----
 const SEARCH_INDEX = {
-  general: ["起動時の動作", "前回開いていたファイルを復元", "何も開かない", "指定したフォルダを開く", "起動フォルダ", "最後のウィンドウを閉じたら終了", "常駐", "起動を速く", "ステータスバー", "アウトライン", "折りたたみ", "最近使ったファイル", "ホイールで拡大縮小", "表示形式", "ウィンドウ形式", "タブ形式"],
+  general: ["起動時の動作", "前回開いていたファイルを復元", "何も開かない", "指定したフォルダを開く", "起動フォルダ", "最後のウィンドウを閉じたら終了", "常駐", "起動を速く", "ステータスバー", "アウトライン", "折りたたみ", "最近使ったファイル", "ホイールで拡大縮小"],
   file: ["自動保存", "保存の間隔", "未保存の下書き", "復元", "ファイル切替", "文字コード", "エンコード", "改行コード", "既定の拡張子"],
   edit: ["インデント幅", "コードブロック", "折り返し", "Shift", "Tab", "自動ペアリング", "括弧", "引用符", "絵文字", "自動補完", "生表示", "コピー形式", "行コピー", "タイプライター", "スペルチェック", "自動修正", "読了時間", "読了速度", "自動判定", "拡張子ごとの編集モード", "カラープレビュー", "色のプレビュー", "色", "スウォッチ", "カラーピッカー"],
   markdown: ["インライン数式", "数式", "上付き", "下付き", "ハイライト", "作図", "ダイアグラム", "自動リンク", "Callouts", "厳格モード", "見出しの記法", "箇条書き", "リスト記号", "番号付きリスト", "行番号", "自動採番", "アウトラインの階層", "コード言語", "空白", "改行", "スマート引用符", "スマートダッシュ", "句読点"],
@@ -101,6 +101,11 @@ const FIELD_DEFS = {
   collapsibleOutline: { kind: "bool", def: true },
   recordRecentFiles: { kind: "bool", def: true },
   zoomWithCtrlWheel: { kind: "bool", def: true },
+  // 表示形式(仕様書 第2.10節 C-14)。タブ形式は実装済みだが、ユーザー指示により設定画面には
+  // 切替UIを一切出さない(意図してウィンドウ形式から変更できないようにする隠し機能)。
+  // settings.jsonを直接テキストエディタで編集して"tab"にした場合のみ有効になる。
+  // FIELD_DEFS自体は残しておく(UIが無くても、直接編集された値をdraftが保持・保存できるように
+  // するため。UIが無い=保存もしない、にはしない)。
   displayMode: { kind: "enum", values: ["window", "tab"], def: "window" },
 
   // ---- ファイル(保存と復元) ----
@@ -851,9 +856,9 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
         ${fieldCheckbox("showOutlineByDefault", "アウトラインを既定で表示する")}
         ${fieldCheckbox("collapsibleOutline", "アウトラインの見出しを折りたためるようにする")}
         ${fieldCheckbox("zoomWithCtrlWheel", "Ctrl+マウスホイールで文字サイズを拡大縮小する")}
-        <label class="settings-radio"><input type="radio" name="displayMode" value="window"><span>ウィンドウ形式</span></label>
-        <label class="settings-radio settings-radio-disabled"><input type="radio" name="displayMode" value="tab" disabled><span>タブ形式<span class="settings-badge">準備中</span></span></label>
       </div>
+      <!-- 表示形式(displayMode)の切替UIはここには置かない(ユーザー指示: ウィンドウ形式から
+           変更できないようにする隠し機能。docs/設定項目一覧.md参照)。 -->
       <div class="settings-group">
         <div class="settings-group-title">ファイル履歴</div>
         ${fieldCheckbox("recordRecentFiles", "最近使ったファイルを記録する")}

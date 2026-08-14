@@ -253,6 +253,33 @@ internal static class TextFileService
     };
 
     /// <summary>
+    /// <see cref="EncodingLabel"/>の逆変換。タブ形式(仕様書 第2.10節 C-14)でJS側から届く
+    /// 表示ラベル文字列("UTF-8 (BOM付き)"等)を自動保存スナップショット用に戻すのに使う。
+    /// 未知の値はUtf8として扱う。
+    /// </summary>
+    internal static FileEncodingKind ParseEncodingLabel(string label) => label switch
+    {
+        "UTF-8 (BOM付き)" => FileEncodingKind.Utf8Bom,
+        "UTF-16 LE" => FileEncodingKind.Utf16Le,
+        "UTF-16 BE" => FileEncodingKind.Utf16Be,
+        "Shift_JIS" => FileEncodingKind.ShiftJis,
+        _ => FileEncodingKind.Utf8,
+    };
+
+    /// <summary>
+    /// <see cref="LineEndingLabel"/>の逆変換。タブ形式(仕様書 第2.10節 C-14)でJS側から届く
+    /// 表示ラベル文字列("CRLF"等)を自動保存スナップショット用に戻すのに使う。
+    /// 未知の値はCrlfとして扱う。
+    /// </summary>
+    internal static LineEndingKind ParseLineEndingLabel(string label) => label switch
+    {
+        "LF" => LineEndingKind.Lf,
+        "CR" => LineEndingKind.Cr,
+        "混在" => LineEndingKind.Mixed,
+        _ => LineEndingKind.Crlf,
+    };
+
+    /// <summary>
     /// AppSettings.DefaultEncoding("utf8"|"utf8bom"|"shiftjis"|"utf16le")をFileEncodingKindへ変換する。
     /// 未知の値はUtf8として扱う(AppSettings側のsetterで既に正規化されているはずだが、念のため)。
     /// 新規文書作成時の既定エンコーディングに使う(仕様書 保存と復元 defaultEncoding)。

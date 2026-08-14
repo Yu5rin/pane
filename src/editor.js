@@ -2161,11 +2161,14 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
     });
   };
 
-  const view = new EditorView({
-    parent,
-    state: EditorState.create({
-      doc: "",
-      extensions: [
+  // タブ形式(仕様書 第2.10節 C-14、隠し設定)用: view構築時に使うextensionsの一覧を
+  // 関数として持っておく。CompartmentのofはEditorState.create()の呼び出し時点での
+  // クロージャ変数(autoPairingOn/spellCheck等)を評価するため、関数化しておけば
+  // createFreshState()が呼ばれるたびに「その時点のアプリ全体設定」を反映した新規タブ用の
+  // EditorStateを作れる(タブ切替でCompartmentの構成そのものを含めstateごと入れ替わるため、
+  // 新規タブもここで一度だけ現在の設定を継承すれば以後は個別に切り替わっていく)。
+  function buildExtensions() {
+    return [
         history(),
         keymap.of([
           // Shift+Enterのソフトブレーク(仕様書 M-01)はEnter(リスト継続のhandleEnter)より
@@ -2257,7 +2260,14 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
           },
         }),
         themeComp.of(makeTheme()),
-      ],
+    ];
+  }
+
+  const view = new EditorView({
+    parent,
+    state: EditorState.create({
+      doc: "",
+      extensions: buildExtensions(),
     }),
   });
 
@@ -2559,6 +2569,28 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
         view.dispatch({ effects: themeComp.reconfigure(makeTheme()) });
       }
       return fontSize;
+    },
+    // ---- タブ形式(仕様書 第2.10節 C-14、隠し設定)用API ----
+    // 単一のview/エディタインスタンスを使い回し、タブ切替のたびEditorStateを丸ごと
+    // 差し替える(タブごとにエディタを作らない。メモリと初期化コストのため)。
+    // Compartmentの構成(言語モード・ライブプレビュー等)はEditorState自体に含まれるため
+    // stateごと切り替われば自動的に復元されるが、createEditor内部のクロージャ変数
+    // (currentMode/currentCodeLanguage/sourceMode)はstate外の付随情報のため、
+    // 呼び出し側がgetModeSnapshot/applyModeSnapshotで別途同期する必要がある。
+    getEditorState: () => view.state,
+    setEditorState: (state) => {
+      view.setState(state);
+      if (onRender) requestAnimationFrame(() => onRender());
+    },
+    // 新規タブ用のまっさらなEditorState(履歴を含め何も持たない状態)を作る。
+    // 現在のview構築に使ったCompartmentインスタンスをそのまま使うため、この戻り値は
+    // 同じcreateEditor()のview(=同じエディタインスタンス)へのみsetEditorStateできる。
+    createFreshState: (text) => EditorState.create({ doc: text || "", extensions: buildExtensions() }),
+    getModeSnapshot: () => ({ mode: currentMode, codeLanguage: currentCodeLanguage, sourceMode }),
+    applyModeSnapshot: (snap) => {
+      currentMode = snap?.mode ?? "markdown";
+      currentCodeLanguage = snap?.codeLanguage ?? null;
+      sourceMode = !!snap?.sourceMode;
     },
     destroy: () => view.destroy(),
   };
