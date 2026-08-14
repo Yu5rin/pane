@@ -206,8 +206,8 @@ function openOrJumpLink(view, href, modifierKey) {
 }
 
 // 外部サイトを開く前の確認(Graftと同じ考え方)。誤クリックで意図しないサイトが
-// 既定のブラウザで開くのを防ぐ。window.confirm はWebView2側の設定でブロックされる
-// ことがあるため使わず、自前のダイアログを出す。文書内リンク(#見出し)は確認しない。
+// 既定のブラウザで開くのを防ぐ。ブラウザ標準の確認ダイアログはWebView2側の設定で
+// ブロックされることがあるため使わず、自前のダイアログを出す。文書内リンク(#見出し)は確認しない。
 let externalLinkDialog = null;
 function confirmOpenExternal(url, onConfirm) {
   externalLinkDialog?.remove();
