@@ -192,6 +192,13 @@ let displayMode = "window";
 let tabs = [];
 let activeTabId = null;
 let tabIdSeq = 1;
+// 不具合4の修正: 「文書を開く」系の要求(applyFileOpened/applyNewDocumentLocal/applyOpenInTab)の
+// 世代番号。これらはeditor.setFileMode(...)の完了をawaitしてから currentPath/doc/ステータス表示
+// 等を書き換えるが、その待機中により新しい「開く」要求が届くと、後から解決した古い要求の
+// 続きが新しい要求の結果を上書きしてしまう(ファイル名・パス・本文が古い方に巻き戻る)。
+// 各関数は開始時にこれをインクリメントして自分の世代を取得し、awaitから戻った後に
+// 「まだ自分が最新か」を確認してから状態を書き換える。
+let fileOpenGen = 0;
 // ドラッグ中のタブID(ドラッグ&ドロップ並べ替え用)。
 let draggingTabId = null;
 function makeTabGuid() {
@@ -1437,7 +1444,37 @@ function makeEmptyTab() {
     sourceMode: false,
     scrollTop: 0,
     scrollLeft: 0,
+    // 不具合3の修正: このタブのmode/codeLanguageがまだ「本来あるべき値(拡張子等からの
+    // 判定結果)」に確定していないことを示すフラグ。applyOpenInTabがsetFileMode()の
+    // 完了を待っている間にタブが切り替わってしまい適用を見送った場合にtrueにする
+    // (詳しくはresolveTabFileMode参照)。
+    modePending: false,
   };
+}
+// 不具合3の修正: タブ(tab)のmode/codeLanguageを「本来あるべき値」に確定させる。
+// applyOpenInTabの初回と、modePending中のタブが再びアクティブになった時の再試行の
+// 両方から呼ぶ共通処理。
+//
+// editor.setFileMode()はいつでも「現在アクティブなview」に対して作用する(タブ専用の
+// 引数を取らない)ため、このタブが呼び出し中に非アクティブになった場合、結果を
+// view.dispatchしてはいけない(=別タブを誤って書き換えてしまう。不具合3そのもの)。
+// editor.setFileMode自身がその場合false(適用しなかった)を返す。しかしこれでは
+// 「この呼び出しが返ってきた後もこのタブがまだアクティブか」までは分からない
+// (editor.setFileMode内部ではeditor.js側のタブ非依存の世代でしか判定していないため)。
+// そこでfileOpenGen(main.js側の「開く要求」世代)とactiveTabId(今アクティブなタブそのもの)の
+// 両方をここで確認し、どちらも一致する場合だけこのタブへ反映する。一致しない場合は
+// modePendingをtrueのままにしておき、次にこのタブへ切り替わった時点で再試行する
+// (何度切り替えを挟んでも、最終的にタブがアクティブなまま留まればそこで確定する)。
+async function resolveTabFileMode(tab) {
+  const myGen = ++fileOpenGen;
+  tab.modePending = false;
+  await editor.setFileMode(tab.fileName, decideFileMode(tab.path, tab.fileName));
+  if (myGen !== fileOpenGen || activeTabId !== tab.id) {
+    tab.modePending = true; // 割り込まれた・非アクティブになった → 未確定のまま次回に持ち越す
+    return;
+  }
+  Object.assign(tab, editor.getModeSnapshot());
+  updateStatusMode();
 }
 // タブ切替。skipSaveCurrent:trueは、閉じた直後の補充など「もう現在の内容を保存する意味がない」
 // 場合に使う(閉じたタブの内容をうっかり別タブへ上書きしないようにするため)。
@@ -1471,6 +1508,9 @@ function switchToTab(id, { skipSaveCurrent = false } = {}) {
   // Ctrl+Z等のショートカット(CodeMirrorのkeymapはcontentDOMへフォーカスがある時だけ働く)が
   // 効かなくなるため、切替のたび本文へフォーカスを戻す。
   editor.focus();
+  // 不具合3の修正: 前回アクティブだった間にモード確定を最後まで待てなかったタブなら、
+  // ここで再試行する(結果を待たずに次の操作へ進んでよいのでawaitしない)。
+  if (next.modePending) resolveTabFileMode(next);
 }
 // 新しいタブ(File > 新しいタブ、"+"ボタン)。空のMarkdown文書を追加してそこへ切り替える。
 async function newTab() {
@@ -1557,13 +1597,13 @@ async function applyOpenInTab(msg) {
   tab.lineEnding = msg.lineEnding;
   tab.readOnly = !!msg.readOnly;
   tab.dirty = false;
+  // createFreshStateは常にMarkdown初期状態のため、拡張子・記憶に基づく実際のモードを
+  // 改めて適用する必要がある(applyFileOpenedと同じ決定ロジック)。modePending:trueにしておくと、
+  // これから行うswitchToTab(このタブへの切替)が自動的にresolveTabFileMode()を呼んで
+  // くれる(不具合3の修正。詳しくはresolveTabFileMode/switchToTabのコメント参照)。
+  tab.modePending = true;
   tabs.push(tab);
   switchToTab(tab.id, { skipSaveCurrent: true });
-  // createFreshStateは常にMarkdown初期状態のため、拡張子・記憶に基づく実際のモードを
-  // 改めて適用する(applyFileOpenedと同じ決定ロジック)。
-  await editor.setFileMode(msg.fileName, decideFileMode(msg.path ?? null, msg.fileName));
-  Object.assign(tab, editor.getModeSnapshot());
-  updateStatusMode();
 }
 // 自動保存(仕様書 N-06)のタブ全件対応。C#側から"request-all-tabs-text"が届いたら、
 // 全タブの本文をまとめて返す(request-text/text-responseの単一文書版と同じ役割)。
@@ -1584,10 +1624,16 @@ function respondAllTabsText() {
 tabbarNewBtn?.addEventListener("click", () => newTab());
 
 async function applyFileOpened(msg) {
+  const myGen = ++fileOpenGen; // 不具合4の修正: このapplyFileOpened呼び出し自身の世代を確保
   pushClosedFile(currentPath);
   resetAutoDetectState(); // 文書が変わるので内容からの自動判定の状態(仕様書 第1章の拡張)もリセット
   // 拡張子だけでなく、拡張子ごとの既定モード上書き・ファイル単位の手動記憶も考慮する(仕様書 第1章)。
   await editor.setFileMode(msg.fileName, decideFileMode(msg.path ?? null, msg.fileName));
+  // 不具合4の修正: awaitで待っている間により新しい「開く」要求(file-opened/open-in-tab/
+  // new-document)が届いていたら、この呼び出しの結果はもう古い。currentPath/本文/ステータス
+  // 表示を書き換えると、新しい要求で既に表示している内容を後から上書きして消してしまう
+  // (症状: 後着のファイルが一瞬正しく表示された後、先着していた方の内容に巻き戻る)。
+  if (myGen !== fileOpenGen) return;
   // 「.LOG」の自動追記(仕様書 第3章 N-15、メモ帳互換): 1行目が".LOG"だけのファイルを
   // 開いた直後、末尾へ日時を追記してdirty状態にする。読み取り専用ファイルは対象外
   // (保存できないものをdirty扱いにしても混乱を招くだけのため)。
@@ -1625,9 +1671,15 @@ async function applyFileOpened(msg) {
   }
 }
 async function applyNewDocumentLocal() {
+  // 不具合4の修正: 自分の世代を進めておく。これにより、先行して実行中の遅い
+  // applyFileOpened等がawaitから戻ってきたときに「自分は割り込まれた(=もう最新ではない)」と
+  // 正しく判定できる(この関数自体はdecideFileMode(null,null)が常にmarkdownを返すため
+  // 実質的に待機は発生しないが、対称性のため同じ仕組みに乗せておく)。
+  const myGen = ++fileOpenGen;
   resetAutoDetectState(); // 文書が変わるので内容からの自動判定の状態(仕様書 第1章の拡張)もリセット
   // 無題の新規文書はパス・ファイル名とも無いため、decideFileMode(null, null)は常にmarkdownを返す。
   await editor.setFileMode(null, decideFileMode(null, null));
+  if (myGen !== fileOpenGen) return;
   setEditorValueQuiet("");
   setName("無題");
   currentPath = null;
