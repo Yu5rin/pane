@@ -133,16 +133,79 @@ function frontmatterRootUrl(state, fm) {
   const v = m[1].trim().replace(/^["']|["']$/g, "");
   return v || null;
 }
+// ローカル画像配信用の専用ホスト(不具合修正: 本文はhttps://pane.local/index.htmlとして
+// 表示されており、そこ(pane.local)に割り当てられているのはアプリのdist/フォルダだけのため、
+// "![](image-1.png)"のような相対パスはhttps://pane.local/image-1.pngと解決されdist/の中を
+// 探して必ず404になっていた。実ファイルは編集中の.mdと同じフォルダにあるが、WebView2から
+// そこは一切見えていなかった。C#側(Pane/MainForm.cs OnLocalFileResourceRequested)が
+// pane-file.localホストへのリクエストごとに実ファイルを読んで返す(範囲外は403)。
+const LOCAL_IMAGE_HOST = "https://pane-file.local/";
+
+// 現在アクティブな文書のフォルダ(ローカル画像の相対パス解決の基準)。main.js側が
+// setDocumentPath()で同期する。タブ形式でも「表示を切り替える直前」に呼ばれるため
+// (main.js switchToTab/applyFileOpened参照)、その後に起きるライブプレビューの
+// 装飾再構築(このモジュール内で同期的に走る)では常に切替後の値を参照できる。
+let currentDocDir = null;
+
+// Windowsのドライブレター(C:\...)絶対パス・UNC(\\server\share\...)かどうか。
+function isAbsoluteLocalPath(p) {
+  return /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith("\\\\");
+}
+
+// 失敗しても例外を投げず元の文字列を返すdecodeURIComponent。
+// 画像挿入(Pane/ImageInsertService.cs、imageAutoEscapeUrl既定true)が生成するMarkdownの
+// 画像パスはURLエスケープ済み(例: "./%E7%84%A1%E9%A1%8C-1.png")のことがあるため、
+// 実ファイルパスとして扱う前に元の文字列へ戻す必要がある。手書きの普通のパス(%を含まない)は
+// 変化しない。"%"を含むが正規のエスケープでない場合(malformed)は例外を握りつぶし元の文字列を使う。
+function safeDecodeURIComponent(s) {
+  try { return decodeURIComponent(s); } catch { return s; }
+}
+
+// pane-file.localホストへのURLを組み立てる。実パスはクエリ文字列(?path=)に載せる
+// (パスの区切り"/"やWindowsのドライブレター":"をURLのパスセグメントとして表現しようとすると
+// UNC("\\server\share")や区切り文字自体を含む値の解釈が曖昧になるため、単一のクエリ値として
+// まるごとencodeURIComponentする方が単純で確実)。
+function toLocalImageUrl(fsPath) {
+  return LOCAL_IMAGE_HOST + "?path=" + encodeURIComponent(fsPath);
+}
+
 // 画像パスの解決(仕様書 2.9.2)。typora-root-urlが指定されていれば"/"始まりのパスの
-// 基準をそこにする。スキーム付き(https:, data: 等)や"//"始まりは外部/プロトコル相対と
-// みなしそのまま使う。それ以外(通常の相対パス)はブラウザの既定解決に委ねる(従来どおり)。
+// 基準をそこにする(未指定時は文書フォルダを基準とみなす。妥当な既定値: ブラウザの
+// オリジンに実体が無いWebView2内では「ページルート相対」に意味が無いため)。
+// スキーム付き(https:, data: 等)や"//"始まりは外部/プロトコル相対とみなしそのまま使う
+// (外部通信は行わない方針のため、pane-file.local経由にはしない=従来どおり素通しする)。
+// それ以外(相対パス・Windows絶対パス)はpane-file.local経由のURLへ書き換える
+// (基準フォルダが無い=無題文書等でまだ解決できない場合のみ、従来どおり未解決のまま返す)。
 function resolveImageSrc(rawSrc, rootUrl) {
   if (!rawSrc) return rawSrc;
+  // Windows絶対パス(例: "C:\..." "C:/...")は、一般的なURIスキーム判定の正規表現
+  // (/^[a-zA-Z][\w+.-]*:/)にも「1文字のスキーム(c:)」として誤って一致してしまうため、
+  // スキーム判定より先に見る(先にスキーム判定してしまうと、絶対パス画像がpane-file.local
+  // 経由にならず未解決のまま渡り、ブラウザ側がERR_UNKNOWN_URL_SCHEMEで読み込みに失敗する)。
+  if (isAbsoluteLocalPath(rawSrc)) return toLocalImageUrl(rawSrc);
   if (/^[a-zA-Z][\w+.-]*:/.test(rawSrc) || rawSrc.startsWith("//")) return rawSrc;
+
+  // "/"始まりでtypora-root-urlが指定されている場合は、その配下として解決する。
+  // ここだけは基準フォルダ(currentDocDir)の有無に関わらず効かせる。Front Matterで
+  // 明示された基準は、文書がまだ無題(保存前)でも尊重されるべきものだからである
+  // (この分岐を下の「基準フォルダが無ければ諦める」に巻き込むと、無題文書では
+  // typora-root-urlの指定がまるごと無視されてしまう)。
   if (rawSrc.startsWith("/") && rootUrl) {
-    return rootUrl.replace(/\/+$/, "") + "/" + rawSrc.replace(/^\/+/, "");
+    const joined = safeDecodeURIComponent(rootUrl.replace(/\/+$/, "") + "/" + rawSrc.replace(/^\/+/, ""));
+    // typora-root-url自体が絶対パス("C:\..." や "/...")ならそれをそのまま基準にできる。
+    // 相対("./assets" 等)の場合は、さらに文書フォルダからの相対として解決する。
+    if (isAbsoluteLocalPath(joined) || joined.startsWith("/")) return toLocalImageUrl(joined);
+    if (currentDocDir) return toLocalImageUrl(currentDocDir.replace(/[\\/]+$/, "") + "/" + joined);
+    return toLocalImageUrl(joined);
   }
-  return rawSrc;
+
+  // typora-root-urlが無い"/"始まりは、WebView2内のオリジンに実体が無く
+  // 「ページルート相対」に意味が無いため、文書フォルダからの相対とみなす。
+  let effective = safeDecodeURIComponent(rawSrc.startsWith("/") ? rawSrc.replace(/^\/+/, "") : rawSrc);
+
+  if (isAbsoluteLocalPath(effective)) return toLocalImageUrl(effective);
+  if (!currentDocDir) return rawSrc; // 基準フォルダが無ければ解決できない(従来どおり)
+  return toLocalImageUrl(currentDocDir.replace(/[\\/]+$/, "") + "/" + effective);
 }
 // 自動リンク(仕様書 M-17)のリンク先を決める。スキームが既に付いていればそのまま、
 // "www."始まりはhttps://を補い、"@"を含む(スキーム無し)ものはメールアドレスとみなし
@@ -404,7 +467,10 @@ class ImageWidget extends WidgetType {
     img.addEventListener("error", () => {
       img.remove();
       wrap.classList.add("cm-image-error");
-      wrap.textContent = `画像を読み込めません: ${this.src}`;
+      // this.srcはMarkdown中の生のパスで、画像挿入時にURLエスケープ済みのことがある
+      // (Pane/ImageInsertService.cs imageAutoEscapeUrl既定true。例: "%E7%84%A1%E9%A1%8C-1.png")。
+      // そのまま表示すると読めない文字列になるため、表示用にデコードする(失敗時は元の文字列のまま)。
+      wrap.textContent = `画像を読み込めません: ${safeDecodeURIComponent(this.src)}`;
     }, { once: true });
     wrap.appendChild(img);
     // クリックすると記法を展開して編集できる(仕様書 2.9.2)。posAtDOMで現在のドキュメント上の
@@ -2687,6 +2753,9 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
       return renderStandaloneHtml(view.state, {
         css: EXPORT_CSS,
         preserveWhitespace: toggles.whitespaceOnExport === "preserve",
+        // ローカル画像のdata:埋め込み(md-to-html.js resolveLocalImageFsPath参照)の基準フォルダ。
+        // main.js側のresolveLocalImage(config側)と組み合わせて使う。
+        docDir: currentDocDir,
         ...config,
       });
     },
@@ -2722,6 +2791,13 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
     // (currentMode/currentCodeLanguage/sourceMode)はstate外の付随情報のため、
     // 呼び出し側がgetModeSnapshot/applyModeSnapshotで別途同期する必要がある。
     getEditorState: () => view.state,
+    // ローカル画像の相対パス解決の基準(resolveImageSrc参照)。main.js側で「表示する文書」が
+    // 変わるたび(file-opened・タブ切替・新規文書等)に、その文書のパス(無題文書ならnull)で
+    // 呼ぶこと。ライブプレビューの装飾再構築より前に同期させる必要があるため、
+    // setEditorState/内容の書き換えより先に呼ぶ(main.js側の各呼び出し箇所を参照)。
+    setDocumentPath: (path) => {
+      currentDocDir = path ? path.replace(/[\\/][^\\/]*$/, "") : null;
+    },
     setEditorState: (state) => {
       // 不具合3の修正: タブ切替でviewの中身がまるごと差し替わるため、その時点で
       // 実行中のsetFileMode/setCodeLanguageの世代を進めておく。これにより、待機中だった

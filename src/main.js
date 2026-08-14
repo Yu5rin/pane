@@ -173,6 +173,13 @@ let initialSidebarAutoOpenDone = false;
 // switchFileFromSidebar()がbridge経由の保存完了("save-result")を待つためのresolve関数群。
 let pendingSaveResolvers = [];
 
+// HTMLエクスポート(画像のdata:埋め込み、Pane/MainForm.cs HandleReadLocalImageRequest参照)用の
+// 「読み取り要求id → resolve関数」対応表。1回のエクスポートで複数の画像を並行して要求しうる
+// (md-to-html.js substituteImagePlaceholdersがPromise.allでまとめて呼ぶ)ため、
+// save-result等と違いFIFOでは対応が付けられず、要求ごとに採番したidで突き合わせる。
+let localImageRequestSeq = 0;
+const pendingLocalImageResolvers = new Map();
+
 // ---- タブ形式(仕様書 第2.10節 C-14・第3章「表示形式」、隠し設定) ----
 // 既定は"window"(無効)。apply-settingsのmsg.displayModeでのみ更新する。設定画面には
 // 切替UIを一切置かない(ユーザー指示。docs/設定項目一覧.mdの隠し設定の注記を参照)。
@@ -781,6 +788,10 @@ const ctx = {
           appendHead: exportSettings.exportAppendHead,
           appendBody: exportSettings.exportAppendBody,
           rootUrl: fm.rootUrl ?? null,
+          // エクスポートしたHTMLは単体のファイルとして開かれ、pane-file.localホスト
+          // (実行中のPaneアプリ内でのみ有効)は使えないため、ローカル画像はここでdata:として
+          // 埋め込む(md-to-html.js resolveLocalImageFsPath/substituteImagePlaceholders参照)。
+          resolveLocalImage: requestLocalImageDataUri,
         });
       } else {
         text = editor.getValue(); // pdfは本文を使わない。docx/epubはMarkdown原文をPandocへ渡す。
@@ -1195,16 +1206,46 @@ async function pasteRichFromContextMenu() {
   await ctx.actions.pasteAsPlainText();
 }
 
+// 失敗しても例外を投げず元の文字列を返すdecodeURIComponent(editor.js/md-to-html.jsの
+// 同名関数と同じ理由。画像挿入時にURLエスケープされたパスを実ファイル名へ戻すため)。
+function safeDecodeURIComponent(s) {
+  try { return decodeURIComponent(s); } catch { return s; }
+}
+
 // 画像を既定のビューアで開く(docs/コンテキストメニュー仕様.md 2.4)。ライブプレビューの<img>の
-// srcはWebView2内で表示するための解決(resolveImageSrc、typora-root-url対応)であって実際の
+// srcはWebView2内で表示するための解決(resolveImageSrc、pane-file.local経由)であって実際の
 // ファイルシステム上のパスではないため、ここでは現在の文書のフォルダを基準に別途解決する
 // (front matterのtypora-root-urlまでは追わない簡易実装)。
 function resolveImageFsPath(rawSrc) {
-  if (!rawSrc || /^[a-zA-Z][\w+.-]*:/.test(rawSrc) || rawSrc.startsWith("//")) return null; // オンライン画像等
-  if (/^[a-zA-Z]:[\\/]/.test(rawSrc) || rawSrc.startsWith("\\\\")) return rawSrc; // 既に絶対パス
+  if (!rawSrc) return null;
+  // Windows絶対パス(例: "C:\..." "C:/...")は、次の行の一般的なURIスキーム判定
+  // (/^[a-zA-Z][\w+.-]*:/)にも「1文字のスキーム(c:)」として誤って一致してしまうため、
+  // スキーム判定より先に見る(editor.js resolveImageSrcと同じ理由。これを怠ると
+  // 絶対パスで画像挿入した文書の「既定のビューアで開く」がオンライン画像扱いされ失敗する)。
+  if (/^[a-zA-Z]:[\\/]/.test(rawSrc) || rawSrc.startsWith("\\\\")) return rawSrc;
+  if (/^[a-zA-Z][\w+.-]*:/.test(rawSrc) || rawSrc.startsWith("//")) return null; // オンライン画像等
+  // 画像挿入(imageAutoEscapeUrl既定true、Pane/ImageInsertService.cs)でURLエスケープ済みの
+  // ことがあるため、実ファイル名へ戻してから使う(手書きの普通のパスは変化しない)。
+  const decoded = safeDecodeURIComponent(rawSrc);
+  if (/^[a-zA-Z]:[\\/]/.test(decoded) || decoded.startsWith("\\\\")) return decoded; // 既に絶対パス(エスケープ済みだった場合)
   if (!currentPath) return null; // 無題文書では相対パスの基準が無い
   const dir = currentPath.replace(/[\\/][^\\/]*$/, "");
-  return dir + "\\" + rawSrc.replace(/\//g, "\\");
+  return dir + "\\" + decoded.replace(/\//g, "\\");
+}
+
+// HTMLエクスポートでのローカル画像のdata:埋め込み(md-to-html.js substituteImagePlaceholders
+// から呼ばれる)。C#(Pane/MainForm.cs HandleReadLocalImageRequest)へ絶対パスを渡し、
+// 範囲チェック済みで読み込めたファイルだけbase64のdata:として返してもらう
+// (任意のローカルファイルを読めてはいけないため、判定はC#側のResolveAllowedLocalFilePathに
+// 一本化してあり、ここでは何も検証しない)。ブリッジが無い(ブラウザ単体動作)場合や
+// 応答が無かった場合はnullを返し、呼び出し側は元のMarkdown記法のパスへフォールバックする。
+function requestLocalImageDataUri(fsPath) {
+  if (!bridge) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const requestId = ++localImageRequestSeq;
+    pendingLocalImageResolvers.set(requestId, resolve);
+    bridge.postMessage({ type: "read-local-image", requestId, path: fsPath });
+  });
 }
 
 // コマンドパレット(Ctrl+Shift+P、仕様書 第10.1節)。5つのメニューのどれにも属さないため
@@ -1484,6 +1525,10 @@ function switchToTab(id, { skipSaveCurrent = false } = {}) {
   if (!next) return;
   if (!skipSaveCurrent) saveActiveTabSnapshot();
   activeTabId = id;
+  // ローカル画像の基準フォルダ(editor.js resolveImageSrc)は、setEditorState()による
+  // ライブプレビュー再構築が起きる"前"に切り替える(タブごとに文書のフォルダが違うため。
+  // 後で切り替えるとタブ切替直後の最初の描画が古いタブの基準フォルダを使ってしまう)。
+  editor.setDocumentPath(next.path);
   editor.setEditorState(next.editorState);
   editor.applyModeSnapshot({ mode: next.mode, codeLanguage: next.codeLanguage, sourceMode: next.sourceMode });
   resetAutoDetectState(); // 文書が変わるので内容からの自動判定の状態もタブごとにリセットする
@@ -1639,6 +1684,10 @@ async function applyFileOpened(msg) {
   // (保存できないものをdirty扱いにしても混乱を招くだけのため)。
   const firstLine = (msg.text ?? "").split(/\r?\n/, 1)[0];
   const isLogFile = firstLine === ".LOG" && !msg.readOnly;
+  // ローカル画像の基準フォルダ(editor.js resolveImageSrc)を、本文を差し替える前に
+  // 同期させる(switchToTabと同じ理由。setEditorValueQuietによる装飾再構築が
+  // 新しい文書の内容に対して行われる時点で、既に新しいパスを参照できるようにする)。
+  editor.setDocumentPath(msg.path ?? null);
   setEditorValueQuiet(msg.text);
   setName(msg.fileName);
   currentPath = msg.path ?? null;
@@ -1680,6 +1729,7 @@ async function applyNewDocumentLocal() {
   // 無題の新規文書はパス・ファイル名とも無いため、decideFileMode(null, null)は常にmarkdownを返す。
   await editor.setFileMode(null, decideFileMode(null, null));
   if (myGen !== fileOpenGen) return;
+  editor.setDocumentPath(null); // 無題文書には基準フォルダが無い(相対パスの画像は解決できない)
   setEditorValueQuiet("");
   setName("無題");
   currentPath = null;
@@ -1916,6 +1966,15 @@ async function handleHostMessage(msg) {
     case "export-done":
       // PNGエクスポート完了(成功・失敗いずれでも届く)。enterExportLayout()での展開を復元する。
       exitExportLayout();
+      break;
+    case "read-local-image-result":
+      // HTMLエクスポートでのローカル画像data:埋め込み(requestLocalImageDataUri参照)の応答。
+      // requestIdで対応するPromiseだけを解決する(複数画像を並行して要求しうるため)。
+      if (typeof msg.requestId === "number") {
+        const resolve = pendingLocalImageResolvers.get(msg.requestId);
+        pendingLocalImageResolvers.delete(msg.requestId);
+        resolve?.(msg.dataUri ?? null);
+      }
       break;
     case "folder-loaded":
       // フォルダ読み込み結果(仕様書 第2.8節 S-02/S-03)。"open-folder"/"load-folder"に加え、

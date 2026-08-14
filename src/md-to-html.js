@@ -58,14 +58,82 @@ function linkTarget(doc, node) {
 
 // 画像パスの解決(仕様書 2.9.2 typora-root-url相当、exportReadYamlFrontMatter経由でここへ渡る)。
 // editor.js内の同名関数と同じ規則: スキーム付き(https:, data: 等)や"//"始まりはそのまま、
-// "/"始まりのパスはrootUrlが指定されていればその基準に付け替える。それ以外は変更しない。
+// "/"始まりのパスはrootUrlが指定されていればその基準に付け替える。それ以外は変更しない
+// (このファイルはHTMLエクスポート/クリップボードコピー用で、実行中のPaneアプリ内でしか
+// 使えないpane-file.localホストへは書き換えない。ローカル画像のエクスポート対応は
+// resolveLocalImageFsPath/substituteImagePlaceholders側でdata:として埋め込む)。
+// Windows絶対パス(例: "C:\..." "C:/...")・UNC("\\server\share\...")かどうか。
+function isAbsoluteLocalPath(p) {
+  return /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith("\\\\");
+}
+
 function resolveImageSrc(rawSrc, rootUrl) {
   if (!rawSrc) return rawSrc;
+  // Windows絶対パスは、一般的なURIスキーム判定の正規表現(/^[a-zA-Z][\w+.-]*:/)にも
+  // 「1文字のスキーム(c:)」として誤って一致してしまうため、スキーム判定より先に見る
+  // (editor.js resolveImageSrcと同じ理由)。この関数自体はどちらでも同じrawSrcを返すため
+  // 挙動は変わらないが、resolveLocalImageFsPathとの一貫性のためここでも明示的に扱う。
+  if (isAbsoluteLocalPath(rawSrc)) return rawSrc;
   if (/^[a-zA-Z][\w+.-]*:/.test(rawSrc) || rawSrc.startsWith("//")) return rawSrc;
   if (rawSrc.startsWith("/") && rootUrl) {
     return rootUrl.replace(/\/+$/, "") + "/" + rawSrc.replace(/^\/+/, "");
   }
   return rawSrc;
+}
+
+// 失敗しても例外を投げず元の文字列を返すdecodeURIComponent(editor.jsの同名関数と同じ理由。
+// 画像挿入時にURLエスケープされたパスを実ファイル名へ戻すため)。
+function safeDecodeURIComponent(s) {
+  try { return decodeURIComponent(s); } catch { return s; }
+}
+
+// ローカル画像ファイルの実パスを求める(HTMLエクスポートでdata:として埋め込むための下調べ)。
+// editor.js resolveImageSrcと同じ規則(typora-root-url・URLエスケープ・Windows絶対パス/UNC・
+// 文書フォルダ基準の相対パス)で解決するが、戻り値はURLではなくファイルシステムパスそのもの
+// (存在確認・実際の読み込みはC#側、Pane/MainForm.cs ResolveAllowedLocalFilePathが行う)。
+// スキーム付き・"//"始まり(外部/データURL、埋め込み不要)や、基準フォルダ(docDir)が無い
+// 相対パス(無題文書のエクスポート等)はnullを返す。
+function resolveLocalImageFsPath(rawSrc, rootUrl, docDir) {
+  if (!rawSrc) return null;
+  // Windows絶対パスをスキーム判定より先に見る理由はresolveImageSrc参照。ここを先にしないと
+  // "C:\..."が「スキーム付きURL」と誤判定され、埋め込み対象から漏れてしまう。
+  if (isAbsoluteLocalPath(rawSrc)) return rawSrc;
+  if (/^[a-zA-Z][\w+.-]*:/.test(rawSrc) || rawSrc.startsWith("//")) return null;
+  let effective = rawSrc;
+  if (rawSrc.startsWith("/")) {
+    effective = rootUrl
+      ? rootUrl.replace(/\/+$/, "") + "/" + rawSrc.replace(/^\/+/, "")
+      : rawSrc.replace(/^\/+/, "");
+  }
+  effective = safeDecodeURIComponent(effective);
+  if (isAbsoluteLocalPath(effective)) return effective; // typora-root-urlが絶対パスだった場合
+  if (!docDir) return null;
+  return docDir.replace(/[\\/]+$/, "") + "/" + effective;
+}
+
+// ローカル画像のdata:埋め込み(HTMLエクスポート、opts.resolveLocalImageが渡された場合のみ)。
+// imagePlaceholders各要素のfsPathをresolveLocalImage(main.js側、C#へブリッジ経由で読み取りを
+// 依頼する関数。Pane/MainForm.cs HandleReadLocalImageRequest参照)で解決し、プレースホルダを
+// 実際の<img>タグへ差し替える。読み込めなかった(範囲外・存在しない・サイズ超過等)画像は
+// data URIの代わりに元のMarkdown記法どおりの相対/絶対パスへフォールバックする
+// (エクスポート先が元の文書と同じフォルダなら、それでも表示できる場合があるため。
+// 仕様: エクスポートしたHTMLはpane-file.localホストが存在しない環境で単体のファイルとして
+// 開かれるので、pane-file.local経由のURLは使わない)。
+export async function substituteImagePlaceholders(html, imagePlaceholders, resolveLocalImage) {
+  if (!imagePlaceholders.length) return html;
+  const results = await Promise.all(
+    imagePlaceholders.map((p) => Promise.resolve(resolveLocalImage(p.fsPath)).catch(() => null))
+  );
+  let out = html;
+  imagePlaceholders.forEach((p, idx) => {
+    const placeholder = `<span class="pane-img-ph" data-i="${idx}"></span>`;
+    const src = results[idx] || p.fallbackSrc;
+    const replacement = src && isSafeUrl(src, { allowDataImage: true })
+      ? `<img src="${escText(src)}" alt="${escText(p.alt)}">`
+      : "";
+    out = out.split(placeholder).join(replacement);
+  });
+  return out;
 }
 
 // 範囲[from,to)内のインライン装飾を子ノードだけ辿って変換する(孫ノードは再帰呼び出しで処理)。
@@ -99,7 +167,20 @@ function inlineHtml(doc, tree, from, to, opts) {
           const textFrom = marks[0] ? marks[0].to : c.from;
           const textTo = marks[1] ? marks[1].from : textFrom;
           const altText = doc.sliceString(textFrom, textTo);
-          const src = resolveImageSrc(linkTarget(doc, c), opts?.rootUrl);
+          const rawTarget = linkTarget(doc, c);
+          // ローカル画像はdata:として埋め込む(opts.resolveLocalImageが渡されている=
+          // HTMLエクスポート時のみ試みる。E-05のHTMLとしてコピー等では従来どおり未解決のまま)。
+          const fsPath = opts?.resolveLocalImage
+            ? resolveLocalImageFsPath(rawTarget, opts?.rootUrl, opts?.docDir)
+            : null;
+          if (fsPath) {
+            const idx = opts.imagePlaceholders.length;
+            opts.imagePlaceholders.push({ fsPath, alt: altText, fallbackSrc: rawTarget });
+            html += `<span class="pane-img-ph" data-i="${idx}"></span>`;
+            pos = c.to;
+            break;
+          }
+          const src = resolveImageSrc(rawTarget, opts?.rootUrl);
           if (src && isSafeUrl(src, { allowDataImage: true })) {
             html += `<img src="${escText(src)}" alt="${escText(altText)}">`;
           } else {
@@ -389,6 +470,8 @@ export async function renderStandaloneHtml(state, config = {}) {
     appendHead = "",
     appendBody = "",
     rootUrl = null,
+    docDir = null,
+    resolveLocalImage = null,
   } = config;
 
   const headings = extractHeadings(state, 6);
@@ -404,12 +487,17 @@ export async function renderStandaloneHtml(state, config = {}) {
   }
 
   const mathPlaceholders = [];
+  const imagePlaceholders = [];
   const collectMath = mathAs === "svg";
   let body = renderMarkdownToHtml(state, undefined, {
     preserveWhitespace, headingIds, pageBreakFroms, rootUrl, collectMath, mathPlaceholders,
+    docDir, resolveLocalImage, imagePlaceholders,
   });
   if (collectMath && mathPlaceholders.length) {
     body = await substituteMathPlaceholders(body, mathPlaceholders);
+  }
+  if (resolveLocalImage && imagePlaceholders.length) {
+    body = await substituteImagePlaceholders(body, imagePlaceholders, resolveLocalImage);
   }
 
   const contentHtml = styled ? `<div class="pane-export">${body}</div>` : body;
