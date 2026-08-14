@@ -31,6 +31,25 @@ window.addEventListener("unhandledrejection", (e) => {
   logToHost("error", `JS未処理のPromise拒否: ${e.reason}`);
 });
 
+// ---- 起動時の白フラッシュ対策(新方式) ----
+// C#側(Pane/SettingsWindow.cs)はWebView2コントロール自体を"initial-render-ready"を受け取るまで
+// 非表示にしている(main.js側の同名の仕組みと同じ考え方)。設定画面は"settings"応答
+// (get-settingsの応答、下のbridgeリスナー参照)を受けてapplyTheme+handleSettingsLoadedで
+// 初めてテーマ・内容を確定させるため、そこを「初期描画完了」の合図とする。
+let initialRenderReadySent = false;
+function signalInitialRenderReady() {
+  if (initialRenderReadySent) return;
+  initialRenderReadySent = true;
+  // main.js側と同じ理由でrequestAnimationFrameを2回挟む(直前のDOM変更が確実に
+  // 一度ペイントされてから通知する)。
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      logToHost("log", "initial-render-ready送信(設定画面の初期描画完了)");
+      bridge?.postMessage({ type: "initial-render-ready" });
+    });
+  });
+}
+
 // キーバインドタブ(「キーボード」カテゴリのコマンド一覧)専用の最小ctx。
 // buildCommands()はコマンド配列を組み立てるだけで、run(実際の実行)はこのウィンドウからは
 // 一度も呼ばれない(メニューバー・ショートカット待受けを持たないため)。
@@ -83,6 +102,8 @@ if (bridge) {
     if (msg.type === "settings") {
       applyTheme(msg);
       settingsUI.handleSettingsLoaded(msg);
+      // テーマ・設定画面の内容がここで確定する(=初期描画完了)。
+      signalInitialRenderReady();
     } else if (msg.type === "save-settings-result") {
       settingsUI.handleSaveResult(msg);
     } else if (msg.type === "menu-command") {

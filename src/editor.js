@@ -2367,9 +2367,16 @@ const foldKeymapSafe = [
 
 // 折りたたみガターのマーカー(依頼: 「Graftと同じく+-で折りたたみできるようにして」)。
 // @codemirror/language標準のfoldGutter()は既定で"⌄"(展開中)/"›"(畳み中)という山形の
-// マーカーだが、参考画像(Graft=VS Code系)では行番号の左に四角い枠で囲んだ「+」(畳み中)/
-// 「−」(展開中)が出る。foldGutter()のmarkerDOMオプションに独自のDOM生成関数を渡すことで
-// 差し替える。
+// マーカーだが、参考画像(Graft=VS Code系)では行番号の右・本文の直前に四角い枠で囲んだ
+// 「+」(畳み中)/「−」(展開中)が出る。foldGutter()のmarkerDOMオプションに独自のDOM生成
+// 関数を渡すことで差し替える。
+//
+// 不具合修正(ユーザー報告「折りたたみマーカーはGraftと同じく本文の左に表示してください」):
+// 実機比較の結果、当初はfoldGutter()をlineNumbers()より先に登録しており、マーカーが
+// 行番号のさらに左(ガターの一番外側)に出てしまっていた。Graftは[行番号][折りたたみ][本文]
+// の並び(マーカーは行番号の右・本文の直前)のため、codeModeExtras()側でfoldGutter()と
+// lineNumbers()の登録順を入れ替えた(CodeMirrorのガター表示順は、gutter()を登録した拡張の
+// 並び順に一致するため、順序を変えるだけで見た目の並びが変わる)。
 // 注意: markerDOMを指定すると、@codemirror/language既定のtitle付与(FoldMarker.toDOM内で
 // state.phrase()経由で"Fold line"/"Unfold line"を設定する処理)がスキップされる
 // (markerDOMがあれば即returnするため)。Paneはこのフレーズを未ローカライズ(既定の英語文言の
@@ -2384,7 +2391,7 @@ function foldMarkerDOM(open) {
   span.title = open ? "Fold line" : "Unfold line";
   return span;
 }
-// マーカーの見た目(四角い枠)。色はテーマのCSS変数(--ink-mute/--rule/--accent-soft等)を
+// マーカーの見た目(四角い枠)。色はテーマのCSS変数(--ink-sub/--rule/--accent-soft等)を
 // var()で参照するだけなので、getComputedStyleでの再構築なしに9テーマすべてへ自動で追従する
 // (indentGuideThemeが--ruleを使っているのと同じ作法)。src/style.css・src/themes.cssは
 // 他エージェントが編集中のため触れず、ここ(EditorView.theme())だけで完結させる。
@@ -2393,6 +2400,24 @@ function foldMarkerDOM(open) {
 // マーカーの見た目サイズに制限されることはない。とはいえ見た目でも押せることが伝わるよう、
 // ガター行セル自体にもcursor:pointerを与え、ホバー時はマーカーの枠・文字色を強めて
 // 目立たせる。
+//
+// 不具合修正(ユーザー報告「Graftより見にくい」): 実機比較のスクリーンショットで、Graft
+// (VS Code系)のマーカーは枠が細く記号自体のコントラストが高いのに対し、Paneは記号の色に
+// --ink-mute(本文の副次テキスト用、控えめな色)を使っており見劣りする、との指摘を受けた。
+// 実測(.verify-codefold.mjsの相対輝度によるコントラスト比計算)したところ、night/
+// solarized-darkの2テーマで--ink-mute使用時のコントラスト比が2.3〜2.8とWCAGの下限
+// (3.0、UIコンポーネントに対する目安)を下回っていた。前任は「枠線付きのため視認は問題ない」
+// と判断していたが、実際のユーザー評価は「見にくい」だったため、その判断基準(枠があれば
+// 十分)自体が甘かったとみなし、数値目標をコントラスト比3.0以上に引き上げたうえで色を
+// 選び直す。
+//   - 記号の色: --ink-mute → --ink-sub(本文の見出し等に使う、より濃い副次色)に変更。
+//     実測(9テーマ全数、.verify-codefold.mjs (K)参照)でnight=3.24、solarized-dark=4.76と
+//     いずれも3.0を上回ることを確認済み(他7テーマはいずれも4以上でさらに余裕がある)。
+//   - 記号の太さ: fontWeight 700(太字)にして、色のコントラストに加えて画線自体の存在感を
+//     上げる(Graftの記号が「はっきりしている」という指摘に対応。数値コントラストだけでなく
+//     視覚的な判断でも実際にスクリーンショットを見て決めた)。
+//   - 枠: Graftは「枠が細く」目立ちすぎない、との指摘のため、太さは変えず(1px)そのまま
+//     維持する(記号だけを強めることで、枠に頼らなくても視認できるようにする狙い)。
 const foldGutterTheme = EditorView.theme({
   ".cm-foldGutter .cm-gutterElement": { display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" },
   ".cm-fold-marker": {
@@ -2400,12 +2425,13 @@ const foldGutterTheme = EditorView.theme({
     alignItems: "center",
     justifyContent: "center",
     boxSizing: "border-box",
-    width: "13px",
-    height: "13px",
+    width: "14px",
+    height: "14px",
     lineHeight: "1",
-    fontSize: "10px",
+    fontSize: "11px",
+    fontWeight: "700",
     fontFamily: "var(--font-mono, ui-monospace, monospace)",
-    color: "var(--ink-mute)",
+    color: "var(--ink-sub)",
     border: "1px solid var(--rule)",
     borderRadius: "3px",
     userSelect: "none",
@@ -2433,6 +2459,33 @@ const foldGutterTheme = EditorView.theme({
 // 「コードモードの範囲：…インデントガイド・折り返し切替まで」と明記されており、実装が
 // 仕様書と食い違っていた。今回のユーザー報告を機に、仕様書どおりインデントガイドを実装する
 // (詳細な経緯は今回の対応報告を参照)。
+//
+// 不具合修正(ユーザー報告「インデントガイドが｜をつなげただけでチープです。Graftと同じく
+// きちんと繋がった線にしてください」): 実機のスクリーンショットを拡大して確認したところ、
+// ネストしたブロックの中に空行が挟まると、その空行の区間だけガイドが完全に消えて見えており
+// (VS Code/Graftはブロックの開き〜閉じの間、空行もまたいで1本の線が通ったまま)、これが
+// 「バラバラの短い棒を並べただけ」に見える主因だった。原因はmark decorationの性質: mark
+// decorationは実在する文字(行頭の空白文字列)にしか付けられないため、文字数0の空行には
+// 装飾のしようがなく、そこだけガイドの描画が完全に途切れていた(非空白行同士の間は、行の
+// 高さぶん隙間なく背景が続くため実際には繋がっており、途切れの原因は「空行」だけだった)。
+// 対策として、空行だけは別経路(widget decoration)で埋める: その空行の直前・直後にある
+// 最も近い非空白行それぞれの行頭空白幅を求め、小さいほう(=空行の前後どちらのブロックも
+// まだ閉じていない、共通して開いたままの深さ)をそのままガイドの本数として使い、実際の
+// 文字を持たない空行にも同じ縦線パターンの背景を持つ幅固定のダミーspanを差し込むことで、
+// 上下の非空白行のガイドと同じx位置・同じ見た目で繋がって見えるようにする(min()を使う
+// 理由: 空行の前後でブロックの深さが違う場合、より浅いほう=開いたままの範囲だけを描けば、
+// まだ閉じていないブロックの外まで線がはみ出すことがない)。
+class IndentGuideBlankWidget extends WidgetType {
+  constructor(chars) { super(); this.chars = chars; }
+  eq(o) { return o.chars === this.chars; }
+  toDOM() {
+    const span = document.createElement("span");
+    span.className = "cm-indent-guide cm-indent-guide-blank";
+    span.style.width = `${this.chars}ch`;
+    return span;
+  }
+  ignoreEvent() { return true; }
+}
 const indentGuideMarks = ViewPlugin.fromClass(class {
   constructor(view) { this.decorations = this.build(view); }
   update(u) {
@@ -2441,12 +2494,48 @@ const indentGuideMarks = ViewPlugin.fromClass(class {
   build(view) {
     const marks = [];
     const { state } = view;
+    const doc = state.doc;
+    // 空行の前後にある直近の非空白行の行頭空白幅を求めるための小さなキャッシュ・探索。
+    // 空行が連続する箇所(例: 大きなコメントアウト跡)で毎回ゼロから数え直さないよう、
+    // 一度求めた行の幅は使い回す。探索は上限を設け(病的に長い空行の連続への対策)、
+    // 見つからなければガイド無し(0)扱いにする。
+    const widthCache = new Map();
+    const SCAN_CAP = 200;
+    function leadingWidth(lineNo) {
+      let w = widthCache.get(lineNo);
+      if (w !== undefined) return w;
+      const text = doc.line(lineNo).text;
+      const m = /^[ \t]+/.exec(text);
+      w = m ? m[0].length : (text.length === 0 ? null : 0); // null = この行自身も空行(さらに外へ探索)
+      widthCache.set(lineNo, w);
+      return w;
+    }
+    function prevNonBlankWidth(lineNo) {
+      for (let n = lineNo - 1, i = 0; n >= 1 && i < SCAN_CAP; n--, i++) {
+        const w = leadingWidth(n);
+        if (w !== null) return w;
+      }
+      return 0;
+    }
+    function nextNonBlankWidth(lineNo) {
+      for (let n = lineNo + 1, i = 0; n <= doc.lines && i < SCAN_CAP; n++, i++) {
+        const w = leadingWidth(n);
+        if (w !== null) return w;
+      }
+      return 0;
+    }
     for (const { from, to } of view.visibleRanges) {
       let pos = from;
       while (pos <= to) {
         const line = state.doc.lineAt(pos);
-        const m = /^[ \t]+/.exec(line.text);
-        if (m && m[0].length > 0) marks.push(Decoration.mark({ class: "cm-indent-guide" }).range(line.from, line.from + m[0].length));
+        if (line.length === 0) {
+          // 空行: 前後の非空白行のインデント幅のうち小さいほうをガイド幅として埋める
+          const w = Math.min(prevNonBlankWidth(line.number), nextNonBlankWidth(line.number));
+          if (w > 0) marks.push(Decoration.widget({ widget: new IndentGuideBlankWidget(w), side: -1 }).range(line.from));
+        } else {
+          const m = /^[ \t]+/.exec(line.text);
+          if (m && m[0].length > 0) marks.push(Decoration.mark({ class: "cm-indent-guide" }).range(line.from, line.from + m[0].length));
+        }
         if (line.to + 1 > to) break;
         pos = line.to + 1;
       }
@@ -2463,6 +2552,17 @@ function indentGuideTheme(size) {
       backgroundRepeat: "repeat-x",
       backgroundSize: `calc(${size} * 1ch) 100%`,
     },
+    // 空行を埋めるダミーspan(IndentGuideBlankWidget)専用。mark decoration版(上の
+    // .cm-indent-guide、幅は実際の空白文字数で自然に決まる)と違い、こちらは中身が無い
+    // widgetのためwidthをJS側でインライン指定している。widthをCSSとして効かせるには
+    // 非置換インライン要素のままではだめ(width指定が無視される)なため、inline-blockに
+    // する。高さは行の高さいっぱいに広げ、非空白行のガイド(行の高さぶん背景が続く)と
+    // すきまなく繋がるようにする。
+    ".cm-indent-guide-blank": {
+      display: "inline-block",
+      height: "100%",
+      verticalAlign: "top",
+    },
   });
 }
 
@@ -2471,8 +2571,9 @@ function indentGuideTheme(size) {
 // createEditor()の中(該当state変数の宣言以降)で定義する。ここでは仕様のメモだけ残す。
 // 仕様書 決定済み事項: 行番号・括弧の対応表示・インデントガイド・折りたたみまで。
 // 矩形選択・コード補完・LSP連携・エラー診断は搭載しない。
-// 折りたたみマーカーは行番号の左に出す(依頼画像どおり)ため、lineNumbers()より先に置く
-// (CodeMirrorのgutter表示順は、gutter()を登録した拡張の並び順に一致する)。
+// 折りたたみマーカーは行番号の右・本文の直前に出す(依頼画像どおりGraftと同じ並び)ため、
+// lineNumbers()を先に、foldGutter()を後に置く(CodeMirrorのgutter表示順は、gutter()を
+// 登録した拡張の並び順に一致する)。
 
 // 選択が無いときのコピー・切り取り(仕様書 copyWholeLineWhenNoSelection、既定true)。
 // カーソル行(末尾の改行含む。最終行など次行が無ければ改行なし)を対象にする。
@@ -2555,13 +2656,14 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
   let codeIndentGuidesOn = true;
   // コードモード限定の拡張(仕様書 決定済み事項: 行番号・括弧の対応表示・インデントガイド・
   // 折りたたみまで。矩形選択・コード補完・LSP連携・エラー診断は搭載しない)。
-  // 折りたたみマーカーは行番号の左に出す(依頼画像どおり)ため、lineNumbers()より先に置く
-  // (CodeMirrorのgutter表示順は、gutter()を登録した拡張の並び順に一致する)。
+  // 折りたたみマーカーは行番号の右・本文の直前に出す(依頼画像どおりGraftと同じ並び)ため、
+  // lineNumbers()を先に、foldGutter()を後に置く(CodeMirrorのgutter表示順は、gutter()を
+  // 登録した拡張の並び順に一致する)。
   // codeFoldingOn/codeIndentGuidesOn/codeIndentSizeValueはこのcreateEditor()インスタンス
   // (ウィンドウ/タブ)ごとの状態のため、この関数自体もここ(createEditor内)で定義する。
   const codeModeExtras = () => [
-    ...(codeFoldingOn ? [foldGutter({ markerDOM: foldMarkerDOM }), foldGutterTheme, keymap.of(foldKeymapSafe)] : []),
     lineNumbers(),
+    ...(codeFoldingOn ? [foldGutter({ markerDOM: foldMarkerDOM }), foldGutterTheme, keymap.of(foldKeymapSafe)] : []),
     bracketMatching(),
     ...(codeIndentGuidesOn ? [indentGuideMarks, indentGuideTheme(codeIndentSizeValue)] : []),
   ];

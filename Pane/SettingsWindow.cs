@@ -31,6 +31,9 @@ namespace Pane;
 internal sealed class SettingsWindow : Form
 {
     private const string VirtualHostName = "pane.local";
+    /// <summary>起動時の白フラッシュ対策(新方式)のフォールバック猶予。MainForm側と
+    /// 同じ値・同じ考え方(<see cref="MainForm"/> WebViewRevealFallbackMs参照)。</summary>
+    private const int WebViewRevealFallbackMs = 3000;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -41,6 +44,10 @@ internal sealed class SettingsWindow : Form
     /// (<see cref="PaneApplicationContext.BroadcastSettingsChanged"/>)。MainFormの
     /// _requestBroadcastSettingsと同じ役割。</summary>
     private readonly Action _broadcastSettingsChanged;
+    /// <summary>起動時の白フラッシュ対策(新方式)のフォールバックタイマー。MainForm.RevealWebViewと
+    /// 同じ役割(このクラスにはタブ・複数ウィンドウの概念が無いぶん単純)。</summary>
+    private readonly System.Windows.Forms.Timer _webViewRevealFallbackTimer;
+    private bool _webViewRevealed;
 
     public SettingsWindow(Form owner, Action broadcastSettingsChanged)
     {
@@ -61,11 +68,49 @@ internal sealed class SettingsWindow : Form
             // 仮アイコンが見つからなくても起動は継続する(実行ファイル埋め込みアイコンが使われる)
         }
 
+        // 起動時の白フラッシュ対策(実機不具合の修正): MainFormと同じ問題(WebView2が
+        // HTML/CSSを読み込み終える前は既定のライト配色、あるいは白が一瞬見える)がこの
+        // ウィンドウにもあった(ユーザー報告: 「設定も白で立ち上がってからテーマ色に変更」)。
+        // 従来MainFormにしか無かった対策(背景色を先に塗る+WebView2を非表示のまま
+        // 初期描画を進める新方式)をこちらにも適用する。色はMainFormと共有の
+        // ResolveThemeBackgroundColorを使い、2箇所で値がずれないようにする。
+        AppSettings initialSettings = SettingsService.Load();
+        bool initialIsDark = MainForm.ResolveIsDarkTheme(initialSettings.Theme);
+        Color initialBackground = MainForm.ResolveThemeBackgroundColor(initialIsDark);
+        BackColor = initialBackground;
+        _webView.DefaultBackgroundColor = initialBackground;
+
         _webView.Dock = DockStyle.Fill;
         Controls.Add(_webView);
 
+        // WebView2コントロール自体を、JS側(settings-entry.js)から"initial-render-ready"が
+        // 届くまで非表示にする(MainFormと同じ新方式)。非表示の間はこのフォームの
+        // BackColor(直上でテーマ色に塗り済み)だけが見えるため、白は原理的に出ない。
+        _webView.Visible = false;
+        Logger.Write("SettingsWindow: WebView2を非表示で生成(initial-render-ready受信まで表示しない)");
+        _webViewRevealFallbackTimer = new System.Windows.Forms.Timer { Interval = WebViewRevealFallbackMs };
+        _webViewRevealFallbackTimer.Tick += (_, _) => RevealWebView(viaFallback: true);
+
         Load += OnLoadAsync;
-        FormClosed += (_, _) => Logger.Write("SettingsWindow.FormClosed");
+        FormClosed += (_, _) =>
+        {
+            Logger.Write("SettingsWindow.FormClosed");
+            _webViewRevealFallbackTimer.Stop();
+            _webViewRevealFallbackTimer.Dispose();
+        };
+    }
+
+    /// <summary>MainForm.RevealWebViewと同じ役割・同じ二重防御(JS側の正常な通知と
+    /// フォールバックタイマーのどちらが先に来ても1回だけ表示する)。詳細はそちらのコメント参照。</summary>
+    private void RevealWebView(bool viaFallback)
+    {
+        if (_webViewRevealed) return;
+        _webViewRevealed = true;
+        _webViewRevealFallbackTimer.Stop();
+        _webView.Visible = true;
+        Logger.Write(viaFallback
+            ? $"SettingsWindow: WebView2を表示(フォールバック: {WebViewRevealFallbackMs}ms以内にinitial-render-readyが届かなかったため強制表示)"
+            : "SettingsWindow: WebView2を表示(JS側からinitial-render-ready受信)");
     }
 
     /// <summary>既定サイズ960x760。呼び出し元(owner)が表示されている画面より大きい場合は
@@ -132,6 +177,8 @@ internal sealed class SettingsWindow : Form
     private async void OnLoadAsync(object? sender, EventArgs e)
     {
         Logger.Write("SettingsWindow.OnLoadAsync開始");
+        // フォールバックタイマーはここから数える(MainForm.OnLoadAsyncと同じ考え方)。
+        _webViewRevealFallbackTimer.Start();
 
         // WebView2環境はMainForm側で生成・キャッシュされたものを再利用する(プロセス全体で1つ)。
         CoreWebView2Environment env = await MainForm.EnsureEnvironmentAsync();
@@ -145,6 +192,16 @@ internal sealed class SettingsWindow : Form
         // 経由で表示する(MainFormと同じ受け口。下のOnWebMessageReceived参照)。
         _webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
         _webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
+
+        // 起動時の白フラッシュ対策の3層目(MainForm.OnLoadAsyncと同じ、多層防御のうちの1つ)。
+        // WebView2が非表示の間は表に出ない対策なので必須ではないが、表示に切り替わった
+        // 直後の一瞬までカバーしておく。Navigate前に注入することで、settings-window.html
+        // 冒頭のOS設定フォールバックより先にdata-theme属性を確定させる。
+        AppSettings navigateSettings = SettingsService.Load();
+        bool navigateIsDark = MainForm.ResolveIsDarkTheme(navigateSettings.Theme);
+        string initialThemeAttr = navigateIsDark ? "dark" : "light";
+        await _webView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(
+            $"document.documentElement.dataset.theme = '{initialThemeAttr}';");
 
         string distPath = MainForm.ResolveDistPath();
         _webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
@@ -162,6 +219,12 @@ internal sealed class SettingsWindow : Form
 
         switch (type)
         {
+            case "initial-render-ready":
+                // 起動時の白フラッシュ対策(新方式)の本体。JS側(src/settings-entry.js)が
+                // 設定画面の初期描画(テーマ適用・内容の描画)を終えた時点で送ってくる。
+                Logger.Write("SettingsWindow: initial-render-ready受信(JS側の初期描画完了通知)");
+                RevealWebView(viaFallback: false);
+                break;
             case "get-settings":
                 SettingsBridge.PostSettingsSnapshot(PostToWeb);
                 break;

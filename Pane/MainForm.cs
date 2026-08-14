@@ -33,6 +33,13 @@ internal sealed class MainForm : Form
     private const string LocalFileHostName = "pane-file.local";
     private const int AutoSaveIntervalMs = 30_000;
     private const int ExternalChangeDebounceMs = 300;
+    /// <summary>起動時の白フラッシュ対策(新方式)のフォールバック猶予(ミリ秒)。
+    /// JS側("initial-render-ready")からの通知を待たずにこれだけ経過したら、
+    /// <see cref="RevealWebView"/>がWebView2を強制的に表示する。JS側が例外で止まる等
+    /// 通知が永久に来ない場合の保険であり、実機でしか再現しないシナリオのため
+    /// (このリポジトリのヘッドレス環境ではWebView2自体が動かせず検証できない)、
+    /// 長すぎず短すぎない値として3秒を選んだ。</summary>
+    private const int WebViewRevealFallbackMs = 3000;
     /// <summary>ローカル画像配信(<see cref="OnLocalFileResourceRequested"/>)・エクスポート時の
     /// data:埋め込み(<see cref="HandleReadLocalImageRequest"/>)、双方に共通の1ファイルあたりの
     /// サイズ上限(不具合修正: 従来は前者にだけ上限が無く非対称だった)。エクスポート側と
@@ -64,6 +71,11 @@ internal sealed class MainForm : Form
     private readonly Action<MainForm>? _requestOpenSettingsWindow;
     private readonly System.Windows.Forms.Timer _autoSaveTimer;
     private readonly System.Windows.Forms.Timer _externalChangeDebounceTimer;
+    /// <summary>起動時の白フラッシュ対策(新方式)のフォールバックタイマー。<see cref="RevealWebView"/>参照。</summary>
+    private readonly System.Windows.Forms.Timer _webViewRevealFallbackTimer;
+    /// <summary>WebView2を既に表示済みかどうか。JS側の通知とフォールバックタイマーの
+    /// どちらが先に来ても二重に処理しないためのガード(<see cref="RevealWebView"/>参照)。</summary>
+    private bool _webViewRevealed;
 
     // ---- 全画面表示(仕様書 第2.5節 V-08)。解除時に元のスタイル・状態へ正確に戻すため退避しておく。 ----
     private bool _isFullscreen;
@@ -217,6 +229,20 @@ internal sealed class MainForm : Form
         // ファイルのD&DはJavaScript側で受け取り、open-dropped-fileメッセージでC#へ渡す。
         Controls.Add(_webView);
 
+        // 起動時の白フラッシュ対策(新方式、実機不具合の再修正): 従来の「背景色を先に塗る
+        // +HTML側のタイミング調整」だけでは実機で直らなかった(ヘッドレス環境では実機の
+        // タイミングを再現できず、この2層だけでは不十分だった)。そこで、原理的に白が
+        // 出ようがない方式に切り替える——WebView2コントロール自体を、JS側の初期描画が
+        // 完了したと分かるまで非表示のままにする。非表示の間はこのフォーム自体の背景色
+        // (BackColor、直前でテーマ色に塗り済み。ApplyInitialWebViewBackground参照)だけが
+        // 見えるため、WebView2の既定背景色やHTMLの初期表示色が何であっても画面に出ない。
+        // 表示に切り替えるのはRevealWebView(JS側の"initial-render-ready"、または
+        // フォールバックタイマー)。
+        _webView.Visible = false;
+        Logger.Write("WebView2を非表示で生成(initial-render-ready受信まで表示しない)");
+        _webViewRevealFallbackTimer = new System.Windows.Forms.Timer { Interval = WebViewRevealFallbackMs };
+        _webViewRevealFallbackTimer.Tick += (_, _) => RevealWebView(viaFallback: true);
+
         // 起動直後・ウィンドウ切替後の初回キー入力がWebView2内のコンテンツへ届かない
         // (フォーカスがネイティブのフォーム側に留まる)ことがあるため、明示的にフォーカスを移す。
         Shown += (_, _) => { Logger.Write("Form.Shown: _webView.Focus()"); _webView.Focus(); };
@@ -246,6 +272,8 @@ internal sealed class MainForm : Form
             _autoSaveTimer.Dispose();
             _externalChangeDebounceTimer.Stop();
             _externalChangeDebounceTimer.Dispose();
+            _webViewRevealFallbackTimer.Stop();
+            _webViewRevealFallbackTimer.Dispose();
             _watcher?.Dispose();
             // フォルダ走査・グローバル検索は非同期のfire-and-forgetで、ウィンドウを閉じても
             // キャンセルしなければ走り続け、完了後にPostToWeb/BeginInvokeで(既に閉じた)
@@ -332,26 +360,63 @@ internal sealed class MainForm : Form
     };
 
     /// <summary>
-    /// 起動時の白フラッシュ対策(実機不具合の修正)。保存されているテーマ設定に応じて、
-    /// WebView2がHTML/CSSを読み込み終える前に見えうる2つの背景(WinFormsコントロール自体の
+    /// 起動時の白フラッシュ対策(実機不具合の修正、新方式での位置づけ): 保存されているテーマ
+    /// 設定に応じて、WebView2に覆われる前に見えうる2つの背景(WinFormsコントロール自体の
     /// BackColorと、CoreWebView2ControllerのDefaultBackgroundColor)を先に塗っておく。
-    /// 色はsrc/style.cssの:root(ライト既定)・html[data-theme="dark"]それぞれの--paperと
-    /// 揃える(CSSファイル自体を読めないのでここでは値を決め打ちにする。style.cssには
-    /// 同じセレクタ(:root / html[data-theme="dark"])のブロックが複数あり、後方のブロックが
-    /// カスケードで--paperを上書きしているため、値は実際にブラウザで解決される最終値
-    /// (Playwrightでcomputed styleを実測して確認済み)を使うこと。既定テーマの色が
-    /// style.css側で変わった場合はここも合わせて直すこと。テーマプリセット(lightTheme/
-    /// darkTheme)による上書きまでは反映していない(近似値で十分なため)。
+    ///
+    /// 新方式(WebView2を"initial-render-ready"受信まで非表示にする、コンストラクタ・
+    /// RevealWebView参照)では、ここで塗るBackColorが主役になる——WebView2が非表示の間、
+    /// ユーザーに実際に見えているのはこの色そのものだからである(白が出ないことの直接の
+    /// 根拠)。DefaultBackgroundColorは、表示に切り替わった直後・まだCSSが完全に反映しきる
+    /// 前の一瞬の保険として引き続き塗っておく(多層防御。無くても新方式の正しさには
+    /// 影響しないが、あって困る理由も無い)。
     /// </summary>
     private void ApplyInitialWebViewBackground()
     {
         AppSettings settings = SettingsService.Load();
         bool isDark = ResolveIsDarkTheme(settings.Theme);
-        Color background = isDark
-            ? Color.FromArgb(0x14, 0x17, 0x1A) // src/style.css: html[data-theme="dark"] --paper(最終値)
-            : Color.FromArgb(0xFB, 0xFB, 0xFA); // src/style.css: :root --paper(最終値)
+        Color background = ResolveThemeBackgroundColor(isDark);
         BackColor = background;
         _webView.DefaultBackgroundColor = background;
+        Logger.Write($"ApplyInitialWebViewBackground: isDark={isDark}, color={ColorTranslator.ToHtml(background)}");
+    }
+
+    /// <summary>
+    /// テーマ(ダーク/ライト)に対応する、起動直後の背景色。src/style.cssの:root(ライト既定)・
+    /// html[data-theme="dark"]それぞれの--paperと揃える(CSSファイル自体を読めないので
+    /// ここでは値を決め打ちにする。style.cssには同じセレクタ(:root / html[data-theme="dark"])の
+    /// ブロックが複数あり、後方のブロックがカスケードで--paperを上書きしているため、値は
+    /// 実際にブラウザで解決される最終値(Playwrightでcomputed styleを実測して確認済み)を
+    /// 使うこと。既定テーマの色がstyle.css側で変わった場合はここも合わせて直すこと。
+    /// テーマプリセット(lightTheme/darkTheme)による上書きまでは反映していない(近似値で十分なため)。
+    /// <see cref="MainForm"/>・<see cref="SettingsWindow"/>の双方が同じ色を使う必要があるため
+    /// (どちらも起動時に同じ白フラッシュ対策を行う)、internal staticとして共有する。
+    /// </summary>
+    internal static Color ResolveThemeBackgroundColor(bool isDark) => isDark
+        ? Color.FromArgb(0x14, 0x17, 0x1A) // src/style.css: html[data-theme="dark"] --paper(最終値)
+        : Color.FromArgb(0xFB, 0xFB, 0xFA); // src/style.css: :root --paper(最終値)
+
+    /// <summary>
+    /// 起動時の白フラッシュ対策(新方式)の要: WebView2コントロールを実際に表示する。
+    /// 呼び出し経路は2つ:
+    ///   (1) JS側("initial-render-ready")からの正常な通知。テーマ・メニューバー・
+    ///       ステータスバー・本文エリアの初期描画が完了した時点で送られてくる
+    ///       (src/main.js trySignalInitialRenderReady参照)。
+    ///   (2) フォールバックタイマー(<see cref="_webViewRevealFallbackTimer"/>)が
+    ///       <see cref="WebViewRevealFallbackMs"/>だけ待っても(1)が来なかった場合の保険。
+    ///       JS側が例外で止まる等、通知が永久に来ないケースに備える(無いと、非表示のまま
+    ///       ウィンドウがテーマ色一色で固まって見えてしまう)。
+    /// どちらが先に来ても、2回目以降は<see cref="_webViewRevealed"/>で二重処理を防ぐ。
+    /// </summary>
+    private void RevealWebView(bool viaFallback)
+    {
+        if (_webViewRevealed) return;
+        _webViewRevealed = true;
+        _webViewRevealFallbackTimer.Stop();
+        _webView.Visible = true;
+        Logger.Write(viaFallback
+            ? $"WebView2を表示(フォールバック: {WebViewRevealFallbackMs}ms以内にinitial-render-readyが届かなかったため強制表示)"
+            : "WebView2を表示(JS側からinitial-render-ready受信)");
     }
 
     /// <summary>
@@ -396,6 +461,10 @@ internal sealed class MainForm : Form
     private async void OnLoadAsync(object? sender, EventArgs e)
     {
         Logger.Write("OnLoadAsync開始");
+        // フォールバックタイマーはここ(WebView2初期化・Navigateを含む一連の起動処理の起点)から
+        // 数える。JS側からのinitial-render-ready通知が無くても、この時点からWebViewRevealFallbackMsが
+        // 過ぎれば強制的に表示する(RevealWebView参照)。
+        _webViewRevealFallbackTimer.Start();
 
         CoreWebView2Environment env = await EnsureEnvironmentAsync();
         await _webView.EnsureCoreWebView2Async(env);
@@ -880,6 +949,13 @@ internal sealed class MainForm : Form
                 // サイドバーへ読み込む(仕様書 一般 startupFolderPath)。自動保存タイマーの起動可否・間隔は
                 // PostCapabilities内のApplyAutoSaveSettingsで設定済み(autoSaveEnabled=falseなら動かさない)。
                 if (_initialFolderPath is not null) _ = LoadFolderAsync(_initialFolderPath);
+                break;
+            case "initial-render-ready":
+                // 起動時の白フラッシュ対策(新方式)の本体。JS側(src/main.js)がテーマ・
+                // メニューバー・ステータスバー・本文エリアの初期描画を終えた時点で送ってくる。
+                // これを受けて初めてWebView2コントロールを表示する(RevealWebView参照)。
+                Logger.Write("initial-render-ready受信(JS側の初期描画完了通知)");
+                RevealWebView(viaFallback: false);
                 break;
             case "open":
                 // 新規作成・開くは現在のウィンドウを置き換えず、常に新しいウィンドウで開く。
@@ -2440,6 +2516,7 @@ internal sealed class MainForm : Form
             collapsibleOutline = settings.CollapsibleOutline,
             sidebarWidthPx = settings.SidebarWidthPx,
             zoomWithCtrlWheel = settings.ZoomWithCtrlWheel,
+            tooltipDetail = settings.TooltipDetail,
             displayMode = settings.DisplayMode,
             recentFiles = settings.RecentFiles,
             theme = settings.Theme,

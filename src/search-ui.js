@@ -23,9 +23,9 @@ export function createSearchUI(editor, container) {
       <span id="search-count" class="search-count"></span>
       <button id="search-prev" type="button" title="前を検索(Shift+F3)">&#x2191;</button>
       <button id="search-next" type="button" title="次を検索(F3)">&#x2193;</button>
-      <label class="search-toggle"><input id="search-case" type="checkbox">Aa</label>
-      <label class="search-toggle"><input id="search-word" type="checkbox">単語</label>
-      <label class="search-toggle"><input id="search-regex" type="checkbox">.*</label>
+      <label class="search-toggle" data-tip="search-case"><input id="search-case" type="checkbox">Aa</label>
+      <label class="search-toggle" data-tip="search-word"><input id="search-word" type="checkbox">単語</label>
+      <label class="search-toggle" data-tip="search-regex"><input id="search-regex" type="checkbox">.*</label>
       <button id="search-toggle-replace" type="button" title="置換を表示">置換</button>
       <button id="search-close" type="button" title="閉じる(Esc)">&#x2715;</button>
     </div>

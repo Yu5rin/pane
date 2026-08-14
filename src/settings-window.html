@@ -6,13 +6,18 @@
 <title>Pane の設定</title>
 <link rel="icon" type="image/svg+xml" href="icon.svg">
 <script>
-  // index.htmlと同じ起動時スクリプト: OSのダーク/ライト設定を即座に反映しておき、
-  // 「settings」応答(実際の保存済みテーマ)が届くまでの一瞬だけ違う配色が出る
-  // ちらつきを防ぐ。実際のテーマ(手動選択・プリセット)はsettings-entry.jsが
+  // index.htmlと同じ起動時スクリプト(起動時の白フラッシュ対策、実機不具合の修正):
+  // C#側(Pane/SettingsWindow.cs OnLoadAsync)がAddScriptToExecuteOnDocumentCreatedAsyncで、
+  // 保存されているテーマ設定に基づくdata-theme属性をこのスクリプトより先に設定している
+  // (ブリッジ経由でPaneアプリとして動いている場合)。それが既に付いていればOS設定より
+  // 優先して尊重し、無い場合(ブラウザ単体検証時など)だけOS設定(prefers-color-scheme)へ
+  // フォールバックする。実際のテーマ(手動選択・プリセット)はsettings-entry.jsが
   // ブリッジからの応答を受けて上書きする。
   try {
-    var dark = matchMedia("(prefers-color-scheme: dark)").matches;
-    document.documentElement.dataset.theme = dark ? "dark" : "light";
+    if (!document.documentElement.dataset.theme) {
+      var dark = matchMedia("(prefers-color-scheme: dark)").matches;
+      document.documentElement.dataset.theme = dark ? "dark" : "light";
+    }
   } catch (e) {}
 </script>
 <link rel="stylesheet" href="style.css">

@@ -204,7 +204,7 @@ export function openColorPickerPanel(opts) {
       <label class="cp-num-field">B<input type="number" min="0" max="255" step="1" data-ch="b"></label>
       <label class="cp-num-field cp-num-hex">#<input type="text" maxlength="9" data-ch="hex"></label>
     </div>
-    <button type="button" class="cp-eyedropper" hidden title="スポイト">
+    <button type="button" class="cp-eyedropper" data-tip="cp-eyedropper" hidden title="スポイト">
       <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m2 22 1-4 12-12"/><path d="M14.5 4.5 17 2l5 5-2.5 2.5"/><path d="m13 8 3 3"/></svg>
       スポイトで取得
     </button>

@@ -170,6 +170,19 @@ internal sealed class AppSettings
     /// <summary>Ctrl+マウスホイールで本文の文字サイズを変更できるようにするか。既定true。JS側で効かせる。</summary>
     public bool ZoomWithCtrlWheel { get; set; } = true;
 
+    private string _tooltipDetail = "standard";
+
+    /// <summary>マウスカーソルを合わせたときに出るツールチップの詳しさ(依頼2)。
+    /// "none"(表示しない) | "minimal"(最低限。現在の状態を示す情報のみ) |
+    /// "standard"(既定。ネットリテラシーのある人が見て分かる程度) |
+    /// "detailed"(詳しい。何ができてどうなるかを具体的に説明)。
+    /// 文言そのものはC#側では持たず、JS側(src/tooltips.js)に集約する。既定"standard"。</summary>
+    public string TooltipDetail
+    {
+        get => _tooltipDetail;
+        set => _tooltipDetail = ValidateEnum(value, "standard", "none", "minimal", "standard", "detailed");
+    }
+
     // ================= 保存と復元 (save) =================
 
     /// <summary>自動保存を行うか。既定true。<see cref="AutoSaveService"/>・MainFormの自動保存タイマー。</summary>

@@ -6,6 +6,10 @@ import { extractHeadings } from "./markdown-extras.js";
 import { createGlobalSearch } from "./global-search.js";
 import { showContextMenu } from "./commands.js";
 import { paneConfirm, paneInput } from "./dialog.js";
+// ツールチップの詳しさ(依頼2)。見出し・ファイルパスなどを表示するtitleは項目ごとに
+// 文言テーブルへ登録するには数が多すぎるため、識別子ベースの仕組み(tooltips.jsの
+// TOOLTIPS)には乗せず、「noneのときだけ出さない」という最低限のルールだけをここで直接守る。
+import { getCurrentLevel } from "./tooltips.js";
 
 // 入力のたびに構文木を全走査(extractHeadings)しないためのデバウンス幅(仕様書 性能要件)。
 // 第10.5節の「パネルとタブの切替:160ms」はCSSトランジションの値であり、これとは別。
@@ -36,6 +40,13 @@ const WINDOWS_RESERVED_NAMES = new Set([
   "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
   "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ]);
+// 見出しの全文・ファイルパス等、項目ごとに異なる動的なtitleを設定する共通ヘルパー。
+// 文言テーブル(tooltips.js)には乗せず、「none」のときだけ出さないというルールだけを守る
+// (ファイル一覧・ファイルツリーは数百件になりうるため、1件ずつ識別子を振るのは現実的でない)。
+function setDynamicTitle(el, text) {
+  el.title = getCurrentLevel() === "none" ? "" : text;
+}
+
 function validateEntryName(name) {
   if (!name || !name.trim()) return "名前を入力してください。";
   if (/[\\/]/.test(name)) return "名前に \\ や / を含めることはできません。";
@@ -69,9 +80,9 @@ export function createSidebar(editor, ctx) {
   searchBarEl.className = "sidebar-search";
   searchBarEl.innerHTML = `
     <input id="sidebar-search-input" class="sidebar-search-input" type="text" placeholder="フォルダ内を検索" autocomplete="off">
-    <label class="search-toggle" title="大文字・小文字を区別"><input id="sidebar-search-case" type="checkbox">Aa</label>
-    <label class="search-toggle" title="単語単位"><input id="sidebar-search-word" type="checkbox">単語</label>
-    <label class="search-toggle" title="正規表現"><input id="sidebar-search-regex" type="checkbox">.*</label>`;
+    <label class="search-toggle" data-tip="search-case" title="大文字・小文字を区別"><input id="sidebar-search-case" type="checkbox">Aa</label>
+    <label class="search-toggle" data-tip="search-word" title="単語単位"><input id="sidebar-search-word" type="checkbox">単語</label>
+    <label class="search-toggle" data-tip="search-regex" title="正規表現"><input id="sidebar-search-regex" type="checkbox">.*</label>`;
   sidebarEl.insertBefore(searchBarEl, bodyEl);
   const searchInputEl = searchBarEl.querySelector("#sidebar-search-input");
   const searchCaseEl = searchBarEl.querySelector("#sidebar-search-case");
@@ -321,7 +332,7 @@ export function createSidebar(editor, ctx) {
         item.className = "outline-item";
         item.dataset.level = String(heading.level);
         item.textContent = heading.text;
-        item.title = heading.text;
+        setDynamicTitle(item, heading.text);
         item.addEventListener("click", () => editor.jumpToHeading(heading));
         item.addEventListener("contextmenu", (e) => { e.preventDefault(); showContextMenu(ctx, e.clientX, e.clientY, buildOutlineMenu(heading)); });
         bodyEl.appendChild(item);
@@ -346,7 +357,7 @@ export function createSidebar(editor, ctx) {
       item.type = "button";
       item.className = "outline-item";
       item.dataset.level = String(heading.level);
-      item.title = heading.text;
+      setDynamicTitle(item, heading.text);
 
       if (hasChildren) {
         // 下位見出しを持つ項目だけ、折りたたみシェブロン付きの行にする(index.htmlを触らず、
@@ -359,7 +370,7 @@ export function createSidebar(editor, ctx) {
         chevronWrap.innerHTML = TREE_CHEVRON_SVG;
         chevronWrap.style.display = "inline-flex";
         chevronWrap.style.flex = "none";
-        chevronWrap.title = collapsed ? "展開" : "折りたたみ";
+        setDynamicTitle(chevronWrap, collapsed ? "展開" : "折りたたみ");
         const svgEl = chevronWrap.firstElementChild;
         if (svgEl) svgEl.style.transform = collapsed ? "rotate(0deg)" : "rotate(90deg)";
         // シェブロンのクリックは見出しへのジャンプではなく折りたたみ操作にする(親のクリックへ伝播させない)。
@@ -414,7 +425,7 @@ export function createSidebar(editor, ctx) {
       const item = document.createElement("button");
       item.type = "button";
       item.className = "file-item" + (entry.path === openFilePath ? " current" : "");
-      item.title = entry.relativePath;
+      setDynamicTitle(item, entry.relativePath);
       const nameEl = document.createElement("span");
       nameEl.className = "file-item-name";
       nameEl.textContent = entry.name;
@@ -478,7 +489,7 @@ export function createSidebar(editor, ctx) {
         const row = document.createElement("button");
         row.type = "button";
         row.className = "tree-item tree-item-folder" + (expanded ? " expanded" : "");
-        row.title = child.entry.relativePath;
+        setDynamicTitle(row, child.entry.relativePath);
         row.innerHTML = TREE_CHEVRON_SVG + TREE_FOLDER_SVG + '<span class="tree-item-name"></span>';
         row.querySelector(".tree-item-name").textContent = child.entry.name;
         row.addEventListener("click", () => {
@@ -499,7 +510,7 @@ export function createSidebar(editor, ctx) {
         const row = document.createElement("button");
         row.type = "button";
         row.className = "tree-item tree-item-file" + (child.entry.path === openFilePath ? " current" : "");
-        row.title = child.entry.relativePath;
+        setDynamicTitle(row, child.entry.relativePath);
         row.innerHTML = TREE_SPACER_HTML + TREE_FILE_SVG + '<span class="tree-item-name"></span>';
         row.querySelector(".tree-item-name").textContent = child.entry.name;
         // ファイルツリーからの切替も同様にswitchFileFromSidebarを通す。
@@ -520,7 +531,7 @@ export function createSidebar(editor, ctx) {
     const header = document.createElement("div");
     header.className = "tree-root-label";
     header.textContent = folder.rootName;
-    header.title = folder.rootPath;
+    setDynamicTitle(header, folder.rootPath);
     bodyEl.appendChild(header);
 
     const root = buildTree();
