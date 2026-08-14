@@ -60,6 +60,20 @@ html[data-theme="dark"] {
   --accent: #2F6F68;
   --accent-soft: #E1EFED;
 
+  /* ===== 画面の各部で色を分けるためのトークン(ユーザー要望: Typora Nightのように
+     本文・サイドバー・メニューバー/ステータスバー・タイトルバーそれぞれに違う色を
+     持たせたい)。テーマプリセット(themes.css)側がこれらを個別に上書きできるようにする。
+     未指定のときは必ず以下へ倒し、既存テーマの見た目を変えない:
+       --chrome-bg  … 従来#menubar/#statusbarには専用の背景指定が無くbodyの--paperが
+                      そのまま透けていたため、その見た目のまま--paperへ倒す。
+       --sidebar-bg … #sidebarは元々 background: var(--surface) だったため、
+                      その見た目のまま--surfaceへ倒す。
+     --titlebar-bg / --titlebar-fg はここでは定義しない(未指定のままにする)。
+     main.jsのsyncTitleBarColor()がこの2つを最優先で読みにいき、定義されていない
+     ときだけ従来どおり本文エリアの実描画色をタイトルバーへ送る。 */
+  --chrome-bg: var(--paper);
+  --sidebar-bg: var(--surface);
+
   --font-heading: "Source Serif 4", "Noto Serif JP", serif;
   --font-body: "Inter", "Noto Sans JP", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "BIZ UDゴシック", ui-monospace, monospace;
@@ -222,7 +236,7 @@ html[data-theme="dark"] #theme-moon { display: none; }
 
 /* ===== メニューバー(仕様書 第10.1節・第10.4節) ===== */
 /* 既定で表示。高さ28px前後、罫線1本でタイトルバー・本文から区切る。Altキーで表示/非表示切替。 */
-#menubar { display: flex; align-items: center; height: 28px; padding: 0 6px; border-bottom: 1px solid var(--rule); flex: none; font-size: 12.5px; }
+#menubar { display: flex; align-items: center; height: 28px; padding: 0 6px; border-bottom: 1px solid var(--rule); flex: none; font-size: 12.5px; background: var(--chrome-bg); }
 #menubar.hidden { display: none; }
 .menu-top { border: none; background: transparent; color: var(--ink); font: inherit; padding: 3px 10px; border-radius: 6px; cursor: pointer; }
 .menu-top:hover, .menu-top.open { background: var(--accent-soft); color: var(--accent); }
@@ -278,7 +292,7 @@ html[data-theme="dark"] #theme-moon { display: none; }
 #status-sidebar { display: inline-flex; align-items: center; }
 #sidebar {
   width: 240px; flex: none; display: flex; flex-direction: column; overflow: hidden;
-  background: var(--surface); border-right: 1px solid var(--rule);
+  background: var(--sidebar-bg); border-right: 1px solid var(--rule);
   transition: width 160ms ease;
 }
 #sidebar.collapsed { width: 0; border-right: none; }

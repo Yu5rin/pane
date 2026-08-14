@@ -24,7 +24,16 @@
      サイドバーの開閉スタイル自体はstyle.css側にまとめる。 */
   #main-area { flex: 1; min-height: 0; display: flex; }
   #cm-host { flex: 1; min-height: 0; overflow: hidden; position: relative; }
-  #statusbar { display: flex; gap: 16px; padding: 0 10px; height: 24px; align-items: center; border-top: 1px solid var(--rule); font-size: 11px; color: var(--ink-mute); flex: none; font-family: var(--font-mono); }
+  /* overflow: hidden は、幅が狭くて全項目が収まらないとき(main.js側のResizeObserverが
+     優先度の低い項目から短縮・非表示にする前の一瞬や、フォント環境差などで再計算が
+     間に合わなかった場合の保険)にstatusbarの外へはみ出させないための保険。 */
+  #statusbar { display: flex; gap: 16px; padding: 0 10px; height: 24px; align-items: center; border-top: 1px solid var(--rule); font-size: 11px; color: var(--ink-mute); flex: none; font-family: var(--font-mono); overflow: hidden; background: var(--chrome-bg); }
+  /* 実機不具合の修正: 幅を狭めたとき各項目が縮んでテキストが1〜2文字ずつ折り返し、
+     height:24pxを超えて縦に伸び、本文エリアに被っていた。原因はflex-shrinkが既定値の
+     ままで、white-space:nowrapも無かったこと。nowrap+flex:noneで「そもそも縮んで
+     折り返さない」ようにし、それでも全項目の合計幅がstatusbarに収まらない場合は
+     main.js側(ResizeObserver)が優先度の低い項目から短縮・非表示にすることで対処する。 */
+  #statusbar > * { white-space: nowrap; flex: none; }
   /* min-heightを明示するのは、#status-encoding/#status-line-endingのように文書を開くまで
      textContentが空になるボタンが、内容が空のあいだ高さ0になってクリックできなくなるのを防ぐため
      (line-heightだけでは中身が空のテキストノードに行ボックスが生成されず効かないため、
