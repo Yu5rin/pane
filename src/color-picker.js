@@ -353,6 +353,50 @@ export function openColorPickerPanel(opts) {
   let alpha = initialColor.a ?? 1;
   let closed = false;
 
+  // ---- パネル内だけのアンドゥ履歴(改善要望1) ----
+  // 本文側のアンドゥ履歴(仕様書4.3、editor.js側でaddToHistory:falseにより中間状態を
+  // 積まない仕組み)とは完全に独立させる。ここではパネルを開いている間の
+  // 「操作の区切り」(ドラッグ1回、数値入力の確定1回、パレットクリック1回など)ごとに
+  // hsl/alphaのスナップショットを積み、Ctrl+Z/Ctrl+Yで行き来する。積んだ結果は
+  // onChange経由でeditor.js側に伝わるが、editor.js側は常にaddToHistory:falseで
+  // 書き込むだけなので、本文のアンドゥ履歴には一切影響しない。
+  let history = [{ hsl: { ...hsl }, alpha }]; // index 0 = パネルを開いた時点の色
+  let histIndex = 0;
+  function historySnapshotEquals(a, b) {
+    return a.hsl.h === b.hsl.h && a.hsl.s === b.hsl.s && a.hsl.l === b.hsl.l && a.alpha === b.alpha;
+  }
+  // 操作の区切りごとに呼ぶ(ドラッグ終了時・数値入力確定時・パレット確定時・スポイト取得時)。
+  // ドラッグ中の連続変化はrender()/notifyChange()だけを呼び、ここは呼ばないことで
+  // 「ドラッグ開始〜終了を1つ」という区切り単位を実現する。
+  // 直前のエントリと結果が変わっていなければ積まない(空の操作で履歴を汚さない)。
+  function pushHistorySnapshot() {
+    const cur = { hsl: { ...hsl }, alpha };
+    if (historySnapshotEquals(history[histIndex], cur)) return;
+    history = history.slice(0, histIndex + 1); // redo分は上書きで破棄
+    history.push(cur);
+    histIndex = history.length - 1;
+    syncHistoryDataset(); // render()を経由しない呼び出し(ドラッグ終了時など)もあるためここでも同期する
+  }
+  function applyHistoryIndex(idx) {
+    if (idx < 0 || idx >= history.length) return;
+    histIndex = idx;
+    const snap = history[idx];
+    hsl = { ...snap.hsl };
+    alpha = snap.alpha;
+    render();
+    notifyChange();
+  }
+  function undoColorHistory() { applyHistoryIndex(histIndex - 1); }
+  function redoColorHistory() { applyHistoryIndex(histIndex + 1); }
+  // 検証スクリプト(.verify-picker.mjs)向けに履歴の長さ・現在位置をdata属性として公開する。
+  // 「ドラッグ中は積まれず、pointerupで1件だけ増える」といった区切りの単位はJS内部の
+  // クロージャ変数のままでは外部から確認できないための最小限のフック(render()の末尾で
+  // 毎回同期するため、ここだけ更新漏れの心配がない)。
+  function syncHistoryDataset() {
+    root.dataset.cpHistLen = String(history.length);
+    root.dataset.cpHistIndex = String(histIndex);
+  }
+
   const root = document.createElement("div");
   root.className = "color-picker-panel";
   root.tabIndex = -1;
@@ -378,7 +422,10 @@ export function openColorPickerPanel(opts) {
       スポイトで取得
     </button>
     <div class="cp-palettes"></div>
-    <div class="cp-actions"><button type="button" class="btn tiny cp-apply">適用</button></div>
+    <div class="cp-actions">
+      <button type="button" class="btn tiny cp-cancel">キャンセル</button>
+      <button type="button" class="btn tiny cp-apply">適用</button>
+    </div>
   `;
   document.body.appendChild(root);
 
@@ -398,6 +445,7 @@ export function openColorPickerPanel(opts) {
   const hexInput = $('input[data-ch="hex"]');
   const palettesEl = $(".cp-palettes");
   const applyBtn = $(".cp-apply");
+  const cancelBtn = $(".cp-cancel");
 
   if (hasAlpha) alphaSlider.hidden = false;
   if (window.EyeDropper) $(".cp-eyedropper").hidden = false;
@@ -444,6 +492,7 @@ export function openColorPickerPanel(opts) {
           alpha = 1;
           render();
           notifyChange();
+          pushHistorySnapshot(); // 即commitで閉じるため実質使われないが、他の操作と扱いを揃えておく
           commit();
         };
         sw.oncontextmenu = (e) => {
@@ -496,6 +545,7 @@ export function openColorPickerPanel(opts) {
     if (document.activeElement !== hexInput) hexInput.value = toHexDisplay(rgba, { withAlpha: false }).slice(1);
 
     renderPalettes();
+    syncHistoryDataset();
   }
 
   function notifyChange() { onChange(currentRgba()); }
@@ -508,6 +558,9 @@ export function openColorPickerPanel(opts) {
     hsl = { h: hsl.h, s: x * 100, l: (1 - y) * 100 };
     render(); notifyChange();
   }
+  // 注意点(改善要望1): ドラッグ中の連続変化(pointermoveのたびに呼ばれるonMove)は
+  // 履歴に積まない。pointerup(ドラッグ終了)の瞬間に1回だけpushHistorySnapshot()を呼び、
+  // 「ドラッグ開始〜終了を1つの操作」として履歴の区切りにする。
   function bindDrag(el, onMove) {
     el.addEventListener("pointerdown", (e) => {
       if (e.button !== 0) return; // 右クリック等では開始しない(既存コードの流儀に合わせる)
@@ -515,7 +568,12 @@ export function openColorPickerPanel(opts) {
       el.setPointerCapture(e.pointerId);
       onMove(e);
       const move = (ev) => onMove(ev);
-      const up = (ev) => { el.releasePointerCapture(ev.pointerId); el.removeEventListener("pointermove", move); el.removeEventListener("pointerup", up); };
+      const up = (ev) => {
+        el.releasePointerCapture(ev.pointerId);
+        el.removeEventListener("pointermove", move);
+        el.removeEventListener("pointerup", up);
+        pushHistorySnapshot();
+      };
       el.addEventListener("pointermove", move);
       el.addEventListener("pointerup", up);
     });
@@ -547,12 +605,17 @@ export function openColorPickerPanel(opts) {
     hsl = rgbToHsl({ r: clampInt(r), g: clampInt(g), b: clampInt(b) });
     render(); notifyChange();
   }
+  // input(打鍵のたび)はライブ反映のみ、change(確定=blurやEnter、上下キーでの増減の都度)で
+  // 履歴に1つ積む(改善要望1「数値入力はそれぞれ1つ」)。数値入力欄のキーボード上下キー操作は
+  // type="number"のネイティブ挙動としてinput/changeの両方を都度発火するため、
+  // 1回の増減がそのまま履歴1件になる。
   for (const [inp, ch] of [[rInput, "r"], [gInput, "g"], [bInput, "b"]]) {
     inp.addEventListener("input", () => {
       const rgb = currentRgb();
       const v = clampInt(Number(inp.value));
       setFromRgb(ch === "r" ? v : rgb.r, ch === "g" ? v : rgb.g, ch === "b" ? v : rgb.b);
     });
+    inp.addEventListener("change", pushHistorySnapshot);
   }
   hexInput.addEventListener("input", () => {
     const raw = "#" + hexInput.value.replace(/[^0-9a-fA-F]/g, "");
@@ -562,6 +625,7 @@ export function openColorPickerPanel(opts) {
     if (raw.length === 5 || raw.length === 9) alpha = parsed.a;
     render(); notifyChange();
   });
+  hexInput.addEventListener("change", pushHistorySnapshot);
 
   // ---- スポイト ----
   if (window.EyeDropper) {
@@ -569,7 +633,7 @@ export function openColorPickerPanel(opts) {
       try {
         const res = await new window.EyeDropper().open();
         const parsed = parseColorLiteral(res.sRGBHex);
-        if (parsed) { hsl = rgbToHsl(parsed); render(); notifyChange(); }
+        if (parsed) { hsl = rgbToHsl(parsed); render(); notifyChange(); pushHistorySnapshot(); }
       } catch { /* ユーザーによるキャンセル等はベストエフォートで無視する */ }
     });
   }
@@ -578,8 +642,27 @@ export function openColorPickerPanel(opts) {
   function commit() { if (closed) return; closed = true; cleanup(); onCommit(currentRgba()); }
   function cancel() { if (closed) return; closed = true; cleanup(); onCancel(); }
   applyBtn.addEventListener("click", commit);
+  // 改善要望2: Esc・パネル外クリックと同じ動作(開いた時の色に戻して閉じる)を
+  // ボタンとしても用意する。cancel()自体は既存のonCancel()をそのまま呼ぶだけなので、
+  // editor.js側の「開いた時の色に戻す」処理(finish(colorText))は変更不要。
+  cancelBtn.addEventListener("click", cancel);
 
-  function onKeyDown(e) { if (e.key === "Escape") { e.preventDefault(); cancel(); } }
+  function onKeyDown(e) {
+    if (e.key === "Escape") { e.preventDefault(); cancel(); return; }
+    // 改善要望1・注意点: パネル内だけのCtrl+Z/Ctrl+Y(Ctrl+Shift+Z)。本文側のアンドゥ操作
+    // (CodeMirrorのkeymap)と取り違えないよう、フォーカスがパネル内(数値入力欄・パレットの
+    // ボタンなど含む)にある時だけ反応し、preventDefault+stopPropagationで本文側へ
+    // 伝播させない。パネル外(本文)にフォーカスがあるときは何もせず素通りさせる。
+    if (!root.contains(document.activeElement)) return;
+    const key = e.key.toLowerCase();
+    if (e.ctrlKey && !e.altKey && key === "z" && !e.shiftKey) {
+      e.preventDefault(); e.stopPropagation();
+      undoColorHistory();
+    } else if (e.ctrlKey && !e.altKey && (key === "y" || (key === "z" && e.shiftKey))) {
+      e.preventDefault(); e.stopPropagation();
+      redoColorHistory();
+    }
+  }
   function onDocMouseDown(e) { if (!root.contains(e.target)) cancel(); }
   document.addEventListener("keydown", onKeyDown, true);
   // クリック直後(パネルを開いた右クリック由来のclick等)で即キャンセルされないよう、

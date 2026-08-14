@@ -14,6 +14,12 @@
 //   paneAlert({ title, message, okLabel })                        -> Promise<void>
 //   paneInput({ title, message, value, placeholder, okLabel, cancelLabel, validate }) -> Promise<string|null>
 
+// Tabキーでのフォーカス閉じ込め・開閉時のフォーカス退避復帰は、設定画面(settings.js)や
+// コマンドパレット(commands.js)と全く同じロジックのため、共通モジュールへ切り出したものを使う
+// (このファイル自身が「他のPaneモジュールに依存しない独立したファイル」という上の方針とは、
+// focus-trap.jsがDOM操作のみの純粋なユーティリティで循環依存を生まないため両立する)。
+import { trapTabKey, focusModal } from "./focus-trap.js";
+
 // 同時に開けるダイアログは1つだけ。閉じる関数をここに置き、次のダイアログを開く前に
 // 残っていれば片付ける(通常は呼び出し側がPromiseを待ってから次を開くため、多重に開くことは
 // 無いはずだが、保険として持っておく)。
@@ -61,11 +67,6 @@ function createButton(label, extraClass) {
 function mountDialog({ overlay, box, onEscape, onEnter, initialFocusEl }) {
   closeCurrent?.(); // 前のダイアログが残っていれば先に畳む(多重オープンの保険)
 
-  function focusables() {
-    return Array.from(box.querySelectorAll("button, input, textarea, select, [tabindex]"))
-      .filter((el) => !el.disabled && el.tabIndex !== -1 && el.offsetParent !== null);
-  }
-
   function onKeydown(e) {
     if (e.key === "Escape") {
       e.preventDefault();
@@ -80,41 +81,26 @@ function mountDialog({ overlay, box, onEscape, onEnter, initialFocusEl }) {
       onEnter();
       return;
     }
-    if (e.key === "Tab") {
-      const els = focusables();
-      if (!els.length) return;
-      const first = els[0];
-      const last = els[els.length - 1];
-      // ダイアログの外へフォーカスが出ないようループさせる。
-      if (e.shiftKey && document.activeElement === first) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && document.activeElement === last) {
-        e.preventDefault();
-        first.focus();
-      } else if (!els.includes(document.activeElement)) {
-        // 何らかの理由でフォーカスがダイアログの外にある場合は先頭へ引き戻す。
-        e.preventDefault();
-        first.focus();
-      }
-    }
+    trapTabKey(e, box); // ダイアログの外へフォーカスが出ないようループさせる(focus-trap.js)。
   }
 
   function onOverlayMousedown(e) {
     if (e.target === overlay) onEscape();
   }
 
+  let restoreFocus;
   function destroy() {
     document.removeEventListener("keydown", onKeydown, true);
     overlay.removeEventListener("mousedown", onOverlayMousedown);
     overlay.remove();
     if (closeCurrent === destroy) closeCurrent = null;
+    restoreFocus?.(); // 開く前にフォーカスがあった要素(呼び出し元のボタン等)へ戻す。
   }
 
   overlay.addEventListener("mousedown", onOverlayMousedown);
   document.addEventListener("keydown", onKeydown, true);
   document.body.appendChild(overlay);
-  (initialFocusEl ?? box.querySelector(".pane-dialog-btn"))?.focus();
+  restoreFocus = focusModal(initialFocusEl ?? box.querySelector(".pane-dialog-btn"));
 
   closeCurrent = destroy;
   return destroy;
@@ -143,7 +129,12 @@ export function paneConfirm({ title = "確認", message = "", okLabel = "OK", ca
     okBtn.addEventListener("click", () => finish(true));
 
     // 既定はOK(confirmOpenExternalと同じくEnterでそのまま確定できるようにする)。
-    destroy = mountDialog({ overlay, box, onEscape: () => finish(false), onEnter: () => finish(true), initialFocusEl: okBtn });
+    // ただしdanger(破壊的操作の確認)のときは初期フォーカスをキャンセル側に置く。
+    // 「保存せずに閉じる」「新規文書を開く」「ごみ箱へ移動」等はうっかりEnterを押すと
+    // データが失われる操作のため、OK側を既定にしてしまうと誤操作の入口になる。
+    // なおEnterキー自体の意味(onEnter=OKを試みる)は変えない。キーボード操作でOKを選ぶ
+    // 場合は、Tabで一度OKボタンへ移動してから押す一手間が必要になる、という安全側の設計。
+    destroy = mountDialog({ overlay, box, onEscape: () => finish(false), onEnter: () => finish(true), initialFocusEl: danger ? cancelBtn : okBtn });
   });
 }
 

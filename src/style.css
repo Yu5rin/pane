@@ -1007,7 +1007,10 @@ html[data-theme="dark"] .cm-table th { background: rgba(61,193,181,.14); }
 .color-picker-panel {
   position: fixed;
   z-index: 80; /* .menu-dropdown(70)より上に出す */
-  width: 264px;
+  /* 改善要望3: 264pxだとR/G/B欄が3桁(255)ぎりぎりで、スピナー分と合わせて欠けていた。
+     数値入力欄まわり全体に余裕を持たせるため288pxへ広げる(位置決めはJS側がoffsetWidthを
+     見て動的に計算するため、この値を変えても4.4節の重なり回避・クランプは自動で追従する)。 */
+  width: 288px;
   max-width: calc(100vw - 16px);
   max-height: calc(100vh - 16px);
   overflow-y: auto;
@@ -1128,8 +1131,10 @@ html[data-theme="dark"] .cm-table th { background: rgba(61,193,181,.14); }
   pointer-events: none;
 }
 
-.cp-numeric { display: grid; grid-template-columns: repeat(3, 1fr) 1.5fr; gap: 6px; }
-.cp-num-field { display: flex; flex-direction: column; gap: 2px; font-size: 10.5px; color: var(--ink-sub); }
+.cp-numeric { display: grid; grid-template-columns: repeat(3, 1fr) 1.6fr; gap: 6px; }
+/* min-width:0がないとgridアイテムがinputの既定最小幅(auto)分だけ広がろうとして
+   隣の列を圧迫することがあるため明示する(改善要望3の見直しの一環)。 */
+.cp-num-field { display: flex; flex-direction: column; gap: 2px; font-size: 10.5px; color: var(--ink-sub); min-width: 0; }
 .cp-num-field input {
   font-family: var(--font-mono);
   font-size: 12.5px;
@@ -1142,6 +1147,19 @@ html[data-theme="dark"] .cm-table th { background: rgba(61,193,181,.14); }
   box-sizing: border-box;
 }
 .cp-num-field input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* 改善要望3: number入力のスピナー(上下ボタン)がR/G/B欄の横幅を大きく食い、
+   3桁(0〜255)の表示が欠ける原因になっていたため非表示にする。
+   キーボードの上下キーによる増減はtype="number"のまま残るため機能は維持される
+   (appearanceは見た目だけを変える指定で、ステップ増減の挙動には影響しない)。 */
+.cp-num-field input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+.cp-num-field input[type="number"]::-webkit-inner-spin-button,
+.cp-num-field input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
 
 .cp-eyedropper {
   display: flex; align-items: center; justify-content: center; gap: 6px;
@@ -1188,4 +1206,7 @@ html[data-theme="dark"] .cm-table th { background: rgba(61,193,181,.14); }
   z-index: 1;
 }
 
-.cp-actions { display: flex; justify-content: flex-end; }
+/* 改善要望2: キャンセルボタンを追加。既存の独自ダイアログ(.pane-dialog-actions)と同じく
+   flex-end + gapで右寄せに並べ、「キャンセル→適用」の順にする(dialog.jsのcancelBtn/okBtnの
+   並びと同じ視覚的な作法)。ボタン自体は既存のPane共通クラス(.btn.tiny)をそのまま使う。 */
+.cp-actions { display: flex; justify-content: flex-end; gap: 8px; }
