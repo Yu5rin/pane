@@ -196,11 +196,26 @@ internal static class SettingsBridge
         new { name = "Mermaid", license = "MIT License" },
     };
 
-    /// <summary>アセンブリのバージョン(AssemblyName.Version)を "x.y.z" 形式で返す。取得できなければ「不明」。</summary>
+    /// <summary>
+    /// 設定の「バージョン情報」に表示するバージョンを "x.y.z" 形式で返す。取得できなければ「不明」。
+    ///
+    /// AssemblyName.Versionは.NETの仕様上どうしても4桁(Major.Minor.Build.Revision)になり、
+    /// そのままToString()すると "1.0.0.0" と出てしまう。利用者に見せる表記は3桁が一般的なため、
+    /// csprojの&lt;Version&gt;から作られるInformationalVersion("1.0.0")を優先して使う。
+    /// </summary>
     private static string DetectAppVersion()
     {
+        string? informational = Assembly.GetExecutingAssembly()
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        if (!string.IsNullOrWhiteSpace(informational))
+        {
+            // ビルド環境によっては "1.0.0+<コミットハッシュ>" の形になるため、"+"以降は落とす。
+            int plus = informational.IndexOf('+');
+            return plus >= 0 ? informational[..plus] : informational;
+        }
+        // InformationalVersionが取れない場合は4桁から先頭3つだけを使う。
         Version? v = Assembly.GetExecutingAssembly().GetName().Version;
-        return v?.ToString() ?? "不明";
+        return v is null ? "不明" : v.ToString(3);
     }
 
     /// <summary>WebView2ランタイムのバージョン。未導入等で取得できない場合は「不明」。</summary>
