@@ -6,7 +6,7 @@
    --chrome-bg/--sidebar-bg/--titlebar-bg/--titlebar-fgは、指定しなければstyle.css側の
    既定(それぞれ--paper/--surface、および「タイトルバーは本文の実描画色を送る」動作)へ
    自動的に倒れるため、各プリセットは「他と違う色にしたい部位だけ」を書けばよい
-   (typora-nightプリセット参照)。 */
+   (typora-nightプリセット参照)。
 
    適用の仕組み: main.jsがapply-settings受信時にdocument.documentElement(=html)へ
    data-light-theme="<id>" / data-dark-theme="<id>" を付与する(既定値は"default")。

@@ -104,6 +104,11 @@ const FIELD_DEFS = {
   showStatusBar: { kind: "bool", def: true },
   showOutlineByDefault: { kind: "bool", def: false },
   collapsibleOutline: { kind: "bool", def: true },
+  // サイドバー幅(ユーザー要望、ドラッグでのリサイズ結果)。displayModeと同じ理由で、
+  // 設定画面には切替UIを一切出さない(ドラッグで直接変えられるものを設定画面にも
+  // 置くと二重になるため)が、FIELD_DEFS自体は残す(直接編集された値もdraftが保持・
+  // 保存できるように)。
+  sidebarWidthPx: { kind: "number", def: 240, min: 180, max: 600 },
   recordRecentFiles: { kind: "bool", def: true },
   zoomWithCtrlWheel: { kind: "bool", def: true },
   // 表示形式(仕様書 第2.10節 C-14)。タブ形式は実装済みだが、ユーザー指示により設定画面には

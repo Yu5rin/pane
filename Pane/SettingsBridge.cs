@@ -42,6 +42,7 @@ internal static class SettingsBridge
             showStatusBar = settings.ShowStatusBar,
             showOutlineByDefault = settings.ShowOutlineByDefault,
             collapsibleOutline = settings.CollapsibleOutline,
+            sidebarWidthPx = settings.SidebarWidthPx,
             recordRecentFiles = settings.RecordRecentFiles,
             zoomWithCtrlWheel = settings.ZoomWithCtrlWheel,
             displayMode = settings.DisplayMode,
@@ -260,6 +261,10 @@ internal static class SettingsBridge
             if (TryGetBool(s, "showStatusBar", out bool showStatusBar)) settings.ShowStatusBar = showStatusBar;
             if (TryGetBool(s, "showOutlineByDefault", out bool showOutlineByDefault)) settings.ShowOutlineByDefault = showOutlineByDefault;
             if (TryGetBool(s, "collapsibleOutline", out bool collapsibleOutline)) settings.CollapsibleOutline = collapsibleOutline;
+            // sidebarWidthPxは設定画面のUIから送られてくることは無いが、displayModeと同じ理由
+            // (設定ファイルを直接編集された場合でもdraftが保持・保存できるように)で受け口は残す。
+            // 実際の永続化は主に"set-sidebar-width"専用メッセージ(MainForm.cs)経由で行われる。
+            if (TryGetInt(s, "sidebarWidthPx", out int sidebarWidthPx)) settings.SidebarWidthPx = sidebarWidthPx;
             if (TryGetBool(s, "recordRecentFiles", out bool recordRecentFiles)) settings.RecordRecentFiles = recordRecentFiles;
             if (TryGetBool(s, "zoomWithCtrlWheel", out bool zoomWithCtrlWheel)) settings.ZoomWithCtrlWheel = zoomWithCtrlWheel;
             if (TryGetString(s, "displayMode", out string displayMode)) settings.DisplayMode = displayMode;

@@ -150,6 +150,20 @@ internal sealed class AppSettings
     /// <summary>アウトラインの各項目を折りたたみ可能にするか。既定true。JS側で効かせる。</summary>
     public bool CollapsibleOutline { get; set; } = true;
 
+    private int _sidebarWidthPx = 240;
+
+    /// <summary>サイドバーの幅(px、ドラッグでのリサイズ結果を永続化。仕様書外・ユーザー要望)。
+    /// 180〜600の範囲でクランプする(180未満はファイルツリーの階層が潰れて読めなくなり、
+    /// 600超は本文エリアを圧迫するため)。ウィンドウ幅の50%を超えないという制約はウィンドウ
+    /// サイズ依存のためここでは扱わず、JS側(sidebar.js)がドラッグ・ウィンドウリサイズの
+    /// たびに動的にクランプする。既定240(元の固定幅と同じ)。設定画面のUIには出さない
+    /// (ドラッグで直接変えられるため、設定画面にも置くと二重になる)。</summary>
+    public int SidebarWidthPx
+    {
+        get => _sidebarWidthPx;
+        set => _sidebarWidthPx = Math.Clamp(value, 180, 600);
+    }
+
     /// <summary>最近使ったファイルを記録するか。falseなら<see cref="RecentFiles"/>への追記を止める。既定true。</summary>
     public bool RecordRecentFiles { get; set; } = true;
 

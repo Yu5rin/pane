@@ -78,6 +78,65 @@ export function createSidebar(editor, ctx) {
   const searchWordEl = searchBarEl.querySelector("#sidebar-search-word");
   const searchRegexEl = searchBarEl.querySelector("#sidebar-search-regex");
 
+  // ---- サイドバー幅のリサイズ(ユーザー要望2) ----
+  // 幅はCSS変数--sidebar-w(src/style.css)で持つ。180px未満・600px超、かつ
+  // ウィンドウ幅の50%を超える幅にはしない(本文エリアが潰れないように)。
+  const SIDEBAR_WIDTH_DEFAULT = 240;
+  const SIDEBAR_WIDTH_MIN = 180;
+  const SIDEBAR_WIDTH_MAX = 600;
+  let sidebarWidthPx = SIDEBAR_WIDTH_DEFAULT;
+  const resizeHandleEl = document.getElementById("sidebar-resize-handle");
+
+  // 「600px、かつウィンドウ幅の50%を超えない」の実際の上限。ウィンドウを狭めたときも
+  // この関数を呼び直すだけで最新の制約に追従する。
+  function maxSidebarWidth() {
+    return Math.max(SIDEBAR_WIDTH_MIN, Math.min(SIDEBAR_WIDTH_MAX, Math.floor(window.innerWidth * 0.5)));
+  }
+  function clampSidebarWidth(px) {
+    return Math.round(Math.max(SIDEBAR_WIDTH_MIN, Math.min(maxSidebarWidth(), px)));
+  }
+  // persist=trueのときだけC#側へ永続化のメッセージを送る(ドラッグ中の連続変化のたびに
+  // 送るとI/Oが無駄なため、ドラッグ終了時・ダブルクリックでの既定復帰時にだけ送る)。
+  function applySidebarWidth(px, persist) {
+    sidebarWidthPx = clampSidebarWidth(px);
+    sidebarEl.style.setProperty("--sidebar-w", `${sidebarWidthPx}px`);
+    if (persist) ctx.bridge?.postMessage({ type: "set-sidebar-width", width: sidebarWidthPx });
+  }
+
+  resizeHandleEl.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return; // 右クリック等では開始しない(既存コードの流儀に合わせる)
+    e.preventDefault();
+    resizeHandleEl.setPointerCapture(e.pointerId);
+    // ドラッグ中は開閉用のtransition(160ms)を切る(残っているとカクつくため)。
+    sidebarEl.classList.add("sidebar-resizing");
+    const move = (ev) => {
+      const rect = sidebarEl.getBoundingClientRect();
+      applySidebarWidth(ev.clientX - rect.left, false);
+    };
+    const up = (ev) => {
+      resizeHandleEl.releasePointerCapture(ev.pointerId);
+      resizeHandleEl.removeEventListener("pointermove", move);
+      resizeHandleEl.removeEventListener("pointerup", up);
+      sidebarEl.classList.remove("sidebar-resizing");
+      applySidebarWidth(sidebarWidthPx, true); // ドラッグ終了時に1回だけ永続化する
+    };
+    resizeHandleEl.addEventListener("pointermove", move);
+    resizeHandleEl.addEventListener("pointerup", up);
+  });
+  // ハンドルのダブルクリックで既定幅(240px)へ戻す。
+  resizeHandleEl.addEventListener("dblclick", () => applySidebarWidth(SIDEBAR_WIDTH_DEFAULT, true));
+
+  // ウィンドウを狭めたときも、幅50%の制約を守って自動的に縮める
+  // (広げたときに以前の幅へ戻すことはしない。ユーザーが意図して縮めた幅と区別が付かないため)。
+  window.addEventListener("resize", () => applySidebarWidth(sidebarWidthPx, false));
+
+  // 設定(sidebarWidthPx、既定240)からの初期化。main.jsのapply-settings受信から呼ばれる。
+  // ドラッグでの変更と同じ経路(applySidebarWidth)を通すことで、範囲外の値が設定ファイルに
+  // 書き込まれていた場合もここでクランプされる。
+  function setWidth(px) {
+    applySidebarWidth(px, false);
+  }
+
   let isOpenFlag = false; // 初期状態はindex.html側の.collapsedと一致させる
   let currentPanelName = "outline"; // 既定パネル(仕様書: アウトラインは左側にピン留めできる)
   // タブをユーザーが自分でクリックして選んだかどうか。trueの間は、開くたびの
@@ -606,6 +665,7 @@ export function createSidebar(editor, ctx) {
     setFolder,
     setCurrentPath,
     setCollapsibleOutline,
+    setWidth,
     openSearch: openSearchFlow,
     // main.jsのhandleHostMessageから"search-results"/"search-done"を渡す窓口。
     handleSearchResults: (hits) => globalSearch.handleResults(hits),
