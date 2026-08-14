@@ -57,14 +57,25 @@ internal static class NativeMenu
         catch (Exception ex) { Logger.WriteException("NativeMenu.CloseCurrent失敗", ex); }
     }
 
+    /// <summary>
+    /// メニューバーのホバー切り替え(ユーザー要望: クリックしなくても隣の見出しへ切り替わる)用。
+    /// <paramref name="onMouseMove"/>を渡すと、表示中のポップアップが受け取るマウス移動を
+    /// 画面座標に変換して都度通知する。<see cref="ToolStripDropDown"/>は表示中マウスを
+    /// キャプチャする(下記Showのコメント参照)ため、この移動通知はポップアップの外・画面の
+    /// どこにカーソルがあっても発火する。判定(どの見出しの上か)・遅延・実際の切り替えは
+    /// すべて呼び出し側(<see cref="MainForm"/>・src/commands.js)の責務とし、ここでは一切持たない
+    /// (コマンドの実装はここに持たせない、というこのクラスの原則と同じ)。
+    /// </summary>
     public static void Show(
         Point screenLocation,
         bool isDark,
+        string? themeId,
         IReadOnlyList<MenuItemData> items,
         Action<string> onCommand,
-        Action onClosed)
+        Action onClosed,
+        Action<Point>? onMouseMove = null)
     {
-        var renderer = new PaneMenuRenderer(isDark);
+        var renderer = new PaneMenuRenderer(isDark, themeId);
         var dropDown = new ToolStripDropDownMenu
         {
             Renderer = renderer,
@@ -126,6 +137,18 @@ internal static class NativeMenu
 
         AddItems(dropDown, items);
 
+        if (onMouseMove is not null)
+        {
+            // ToolStripDropDownは表示中(Show後)マウスをキャプチャするため(Windowsの
+            // メニュー全般の既定動作。画面のどこをクリックしても「メニューの外へのクリック」を
+            // 検知できるようにするための挙動)、MouseMoveは画面全体で発火する。逆に言うと
+            // この間、WebView2側は(ポップアップの真上にカーソルがあろうがなかろうが)
+            // マウスメッセージを一切受け取れない。e.Locationはポップアップのクライアント座標
+            // (カーソルがポップアップの外にあれば負値・外側の値になる)なので、呼び出し側が
+            // 使いやすいよう画面座標へ変換してから渡す。
+            dropDown.MouseMove += (_, e) => onMouseMove(dropDown.PointToScreen(e.Location));
+        }
+
         dropDown.Closed += (_, _) =>
         {
             if (ReferenceEquals(_current, dropDown)) _current = null;
@@ -158,7 +181,16 @@ internal static class NativeMenu
 /// ここで必要な要素をすべて手描きする。
 ///
 /// 色はPane/WindowChrome.csが持っているライト/ダークの定数と同じ考え方で、
-/// src/style.cssの実際の値に合わせている(色の対応表は最終報告に記載)。
+/// src/style.css・src/themes.cssの実際の値に合わせている(色の対応表は最終報告に記載)。
+///
+/// 【実バグ3の修正】以前はisDark(ライト/ダークの2値)だけを見て、既定テーマの配色
+/// (2パターン)固定で描いていた。そのためユーザーがnord/dracula/night等のテーマ
+/// プリセットを選んでいても、ネイティブのドロップダウンだけは常に既定のteal系の色の
+/// ままで、実際のテーマ(水色・紫・シアン等)と食い違って見えていた
+/// (「メニューホバー時の水色や緑色はテーマと合っていない」という指摘の原因)。
+/// isDarkに加えてテーマプリセットID(themeId、main.jsがhtml[data-light-theme]/
+/// [data-dark-theme]へ入れているものと同じ値)を受け取り、9テーマぶんの実配色から
+/// 選ぶようにした。
 /// </summary>
 internal sealed class PaneMenuRenderer : ToolStripRenderer
 {
@@ -167,40 +199,83 @@ internal sealed class PaneMenuRenderer : ToolStripRenderer
     private readonly Color _inkSub;
     private readonly Color _line;
     private readonly Color _rule;
-    private readonly Color _accent;
     private readonly Color _accentSoft;
     /// <summary>無効項目の文字色。src/style.cssの.menu-item.disabled { opacity:.5 } と同じ見た目に
     /// なるよう、--ink-subを背景(--surface)へ50%だけ寄せて事前合成しておく(GDIのTextRenderer.DrawText
     /// はアルファ値を正しく合成しないため、あらかじめ不透明色として計算する)。</summary>
     private readonly Color _inkDisabled;
+    /// <summary>選択中の項目の文字色。テーマの--accentをそのまま使えるならそれを使うが、
+    /// 背景(_accentSoft)とのコントラスト比がWCAG AA(4.5)を割り込むプリセットでは
+    /// --ink、それでも足りなければ白/黒へ補正する(PickAccessibleColor参照)。
+    /// 「テーマと合っていない色」の修正と「読める配色である」ことの両立のため。</summary>
+    private readonly Color _selectedText;
+    /// <summary>チェックマークの色。背景は常に_surface(OnRenderImageMargin参照)のため、
+    /// それに対してPickAccessibleColorで選ぶ(考え方は_selectedTextと同じ)。</summary>
+    private readonly Color _checkColor;
 
-    public PaneMenuRenderer(bool isDark)
+    public PaneMenuRenderer(bool isDark, string? themeId)
     {
-        if (isDark)
-        {
-            // src/style.css html[data-theme="dark"] の実値(:rootの2つ目のブロックが最終的に
-            // 効いている値。Pane/WindowChrome.csのコメントと同じ考え方)。
-            _surface = ColorTranslator.FromHtml("#1C2226");
-            _ink = ColorTranslator.FromHtml("#E4E7E5");
-            _inkSub = ColorTranslator.FromHtml("#93A0A8");
-            _line = ColorTranslator.FromHtml("#2C343A");
-            _rule = ColorTranslator.FromHtml("#242A2E");
-            _accent = ColorTranslator.FromHtml("#6FB3A8");
-            _accentSoft = ColorTranslator.FromHtml("#1E2C2B");
-        }
-        else
-        {
-            // src/style.css :root の実値。
-            _surface = ColorTranslator.FromHtml("#FFFFFF");
-            _ink = ColorTranslator.FromHtml("#1F2428");
-            _inkSub = ColorTranslator.FromHtml("#66707A");
-            _line = ColorTranslator.FromHtml("#DCE2E0");
-            _rule = ColorTranslator.FromHtml("#E4E7E6");
-            _accent = ColorTranslator.FromHtml("#2F6F68");
-            _accentSoft = ColorTranslator.FromHtml("#E1EFED");
-        }
+        var p = ResolvePalette(isDark, themeId);
+        _surface = p.Surface;
+        _ink = p.Ink;
+        _inkSub = p.InkSub;
+        _line = p.Line;
+        _rule = p.Rule;
+        _accentSoft = p.AccentSoft;
         _inkDisabled = Blend(_inkSub, _surface, 0.5);
+        _selectedText = PickAccessibleColor(_accentSoft, p.Accent, _ink);
+        _checkColor = PickAccessibleColor(_surface, p.Accent, _ink);
     }
+
+    private readonly record struct Palette(Color Surface, Color Ink, Color InkSub, Color Line, Color Rule, Color Accent, Color AccentSoft);
+
+    /// <summary>
+    /// isDark・themeIdから配色を選ぶ。値はsrc/style.css(既定ライト/ダーク)・
+    /// src/themes.css(7プリセット)の実値をそのまま転記したもの(9テーマぶん)。
+    /// 未知のthemeId("default"含む)はisDarkに応じた既定配色にフォールバックする。
+    /// </summary>
+    private static Palette ResolvePalette(bool isDark, string? themeId) => (isDark, themeId) switch
+    {
+        // ---- ダーク側プリセット(src/themes.css) ----
+        (true, "nord") => new(
+            ColorTranslator.FromHtml("#3B4252"), ColorTranslator.FromHtml("#ECEFF4"), ColorTranslator.FromHtml("#D8DEE9"),
+            ColorTranslator.FromHtml("#434C5E"), ColorTranslator.FromHtml("#434C5E"),
+            ColorTranslator.FromHtml("#88C0D0"), ColorTranslator.FromHtml("#3B4A52")),
+        (true, "dracula") => new(
+            ColorTranslator.FromHtml("#343746"), ColorTranslator.FromHtml("#F8F8F2"), ColorTranslator.FromHtml("#B4B9D6"),
+            ColorTranslator.FromHtml("#44475A"), ColorTranslator.FromHtml("#44475A"),
+            ColorTranslator.FromHtml("#BD93F9"), ColorTranslator.FromHtml("#3B3D52")),
+        (true, "solarized-dark") => new(
+            ColorTranslator.FromHtml("#073642"), ColorTranslator.FromHtml("#93A1A1"), ColorTranslator.FromHtml("#839496"),
+            ColorTranslator.FromHtml("#0A3C4A"), ColorTranslator.FromHtml("#0A3C4A"),
+            ColorTranslator.FromHtml("#268BD2"), ColorTranslator.FromHtml("#0E4B5E")),
+        (true, "night") => new(
+            ColorTranslator.FromHtml("#2E3033"), ColorTranslator.FromHtml("#b8bfc6"), ColorTranslator.FromHtml("#838A92"),
+            ColorTranslator.FromHtml("#555555"), ColorTranslator.FromHtml("#555555"),
+            ColorTranslator.FromHtml("#6dc1e7"), ColorTranslator.FromHtml("#3C4851")),
+        // ---- ライト側プリセット(src/themes.css) ----
+        (false, "sepia") => new(
+            ColorTranslator.FromHtml("#FBF3E3"), ColorTranslator.FromHtml("#3B2F22"), ColorTranslator.FromHtml("#7A6A55"),
+            ColorTranslator.FromHtml("#E3D5B8"), ColorTranslator.FromHtml("#E3D5B8"),
+            ColorTranslator.FromHtml("#A9762C"), ColorTranslator.FromHtml("#EDE0C0")),
+        (false, "github") => new(
+            ColorTranslator.FromHtml("#F6F8FA"), ColorTranslator.FromHtml("#1F2328"), ColorTranslator.FromHtml("#59636E"),
+            ColorTranslator.FromHtml("#D0D7DE"), ColorTranslator.FromHtml("#D0D7DE"),
+            ColorTranslator.FromHtml("#0969DA"), ColorTranslator.FromHtml("#DDF4FF")),
+        (false, "solarized-light") => new(
+            ColorTranslator.FromHtml("#EEE8D5"), ColorTranslator.FromHtml("#073642"), ColorTranslator.FromHtml("#657B83"),
+            ColorTranslator.FromHtml("#D3CBB7"), ColorTranslator.FromHtml("#D3CBB7"),
+            ColorTranslator.FromHtml("#268BD2"), ColorTranslator.FromHtml("#E3EFFA")),
+        // ---- 既定(プリセット無し。src/style.css) ----
+        (true, _) => new(
+            ColorTranslator.FromHtml("#1C2226"), ColorTranslator.FromHtml("#E4E7E5"), ColorTranslator.FromHtml("#93A0A8"),
+            ColorTranslator.FromHtml("#2C343A"), ColorTranslator.FromHtml("#242A2E"),
+            ColorTranslator.FromHtml("#6FB3A8"), ColorTranslator.FromHtml("#1E2C2B")),
+        (false, _) => new(
+            ColorTranslator.FromHtml("#FFFFFF"), ColorTranslator.FromHtml("#1F2428"), ColorTranslator.FromHtml("#66707A"),
+            ColorTranslator.FromHtml("#DCE2E0"), ColorTranslator.FromHtml("#E4E7E6"),
+            ColorTranslator.FromHtml("#2F6F68"), ColorTranslator.FromHtml("#E1EFED")),
+    };
 
     private static Color Blend(Color fg, Color bg, double fgRatio)
     {
@@ -208,6 +283,43 @@ internal sealed class PaneMenuRenderer : ToolStripRenderer
         int g = (int)Math.Round(fg.G * fgRatio + bg.G * (1 - fgRatio));
         int b = (int)Math.Round(fg.B * fgRatio + bg.B * (1 - fgRatio));
         return Color.FromArgb(r, g, b);
+    }
+
+    /// <summary>sRGB相対輝度(WCAG方式)。src/main.jsのrelativeLuminance()と同じ式。</summary>
+    private static double RelativeLuminance(Color c)
+    {
+        double Chan(byte v)
+        {
+            double x = v / 255.0;
+            return x <= 0.04045 ? x / 12.92 : Math.Pow((x + 0.055) / 1.055, 2.4);
+        }
+        return 0.2126 * Chan(c.R) + 0.7152 * Chan(c.G) + 0.0722 * Chan(c.B);
+    }
+
+    /// <summary>WCAGのコントラスト比((明るい方+0.05)/(暗い方+0.05))。</summary>
+    private static double ContrastRatio(Color a, Color b)
+    {
+        double la = RelativeLuminance(a) + 0.05;
+        double lb = RelativeLuminance(b) + 0.05;
+        return la > lb ? la / lb : lb / la;
+    }
+
+    /// <summary>実バグ3の安全策(src/main.jsのタイトルバー向け補正と同じ考え方):
+    /// 背景(background)に対して、候補(candidates、優先順)のうち最初にWCAG AA(4.5)を
+    /// 満たす色を返す。テーマの--accentをそのまま使えれば一番良い(選択時に主張色が
+    /// 出て「テーマに合っている」と感じられる)ので最優先候補にし、それが読めない
+    /// プリセットでは--ink、それでも読めなければ白/黒のうちコントラストが高い方へ
+    /// 落とす(最後の砦。ここまで来ることは実際には無い)。</summary>
+    private static Color PickAccessibleColor(Color background, params Color[] candidates)
+    {
+        const double MinContrast = 4.5;
+        foreach (Color c in candidates)
+        {
+            if (ContrastRatio(c, background) >= MinContrast) return c;
+        }
+        double white = ContrastRatio(Color.White, background);
+        double black = ContrastRatio(Color.Black, background);
+        return white >= black ? Color.White : Color.Black;
     }
 
     /// <summary>ポップアップの背景(src/style.css .menu-dropdown { background: var(--surface) }相当)。</summary>
@@ -277,7 +389,7 @@ internal sealed class PaneMenuRenderer : ToolStripRenderer
         }
         else if (e.Item.Selected)
         {
-            color = _accent;
+            color = _selectedText;
         }
         else
         {
@@ -297,7 +409,7 @@ internal sealed class PaneMenuRenderer : ToolStripRenderer
 
         var oldSmoothing = e.Graphics.SmoothingMode;
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        using var pen = new Pen(_accent, 2f) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round };
+        using var pen = new Pen(_checkColor, 2f) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round };
         int x = bounds.X, y = bounds.Y, w = bounds.Width, h = bounds.Height;
         Point p1 = new(x + (int)(w * 0.2), y + (int)(h * 0.55));
         Point p2 = new(x + (int)(w * 0.42), y + (int)(h * 0.75));

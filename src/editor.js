@@ -1,12 +1,12 @@
 // Pane ライブプレビューエディタ (CodeMirror 6)
 // index.html から createEditor() で生成し、返り値のAPIで操作する。
 // 依存はすべてesbuildでビルド成果物(dist/)に同梱する。実行時に外部CDNへは一切到達しない。
-import { EditorView, keymap, Decoration, ViewPlugin, WidgetType, lineNumbers } from "@codemirror/view";
-import { EditorState, Compartment, StateEffect, StateField, Prec, Transaction } from "@codemirror/state";
+import { EditorView, keymap, Decoration, ViewPlugin, WidgetType, lineNumbers, gutter, GutterMarker } from "@codemirror/view";
+import { EditorState, Compartment, StateEffect, StateField, Prec, Transaction, RangeSet, RangeSetBuilder } from "@codemirror/state";
 import { markdown } from "@codemirror/lang-markdown";
 import { Strikethrough, Table, Superscript, Subscript, Emoji, Autolink } from "@lezer/markdown";
 import { defaultKeymap, history, historyKeymap, indentWithTab, insertNewline, undo, redo, moveLineUp, moveLineDown, copyLineDown, deleteLine, indentLess, indentSelection, selectAll } from "@codemirror/commands";
-import { syntaxTree, syntaxHighlighting, HighlightStyle, LanguageDescription, bracketMatching, indentUnit, foldGutter, foldCode, unfoldCode, foldAll, unfoldAll } from "@codemirror/language";
+import { syntaxTree, syntaxHighlighting, HighlightStyle, LanguageDescription, bracketMatching, indentUnit, foldCode, unfoldCode, foldAll, unfoldAll, codeFolding, foldNodeProp, foldedRanges, foldEffect, unfoldEffect } from "@codemirror/language";
 import { autocompletion, closeBrackets, closeBracketsKeymap, startCompletion } from "@codemirror/autocomplete";
 import { search, setSearchQuery, getSearchQuery, SearchQuery, findNext, findPrevious, replaceNext, replaceAll } from "@codemirror/search";
 import { tags as t } from "@lezer/highlight";
@@ -2365,81 +2365,359 @@ const foldKeymapSafe = [
   { key: "Ctrl-Alt-]", run: unfoldAll },
 ];
 
-// 折りたたみガターのマーカー(依頼: 「Graftと同じく+-で折りたたみできるようにして」)。
-// @codemirror/language標準のfoldGutter()は既定で"⌄"(展開中)/"›"(畳み中)という山形の
-// マーカーだが、参考画像(Graft=VS Code系)では行番号の右・本文の直前に四角い枠で囲んだ
-// 「+」(畳み中)/「−」(展開中)が出る。foldGutter()のmarkerDOMオプションに独自のDOM生成
-// 関数を渡すことで差し替える。
+// 折りたたみガター(依頼: 「Graftと同じく階層に応じた横位置・折りたたみ範囲の縦線・
+// マーカーの見た目」)。
 //
-// 不具合修正(ユーザー報告「折りたたみマーカーはGraftと同じく本文の左に表示してください」):
-// 実機比較の結果、当初はfoldGutter()をlineNumbers()より先に登録しており、マーカーが
-// 行番号のさらに左(ガターの一番外側)に出てしまっていた。Graftは[行番号][折りたたみ][本文]
-// の並び(マーカーは行番号の右・本文の直前)のため、codeModeExtras()側でfoldGutter()と
-// lineNumbers()の登録順を入れ替えた(CodeMirrorのガター表示順は、gutter()を登録した拡張の
-// 並び順に一致するため、順序を変えるだけで見た目の並びが変わる)。
-// 注意: markerDOMを指定すると、@codemirror/language既定のtitle付与(FoldMarker.toDOM内で
-// state.phrase()経由で"Fold line"/"Unfold line"を設定する処理)がスキップされる
-// (markerDOMがあれば即returnするため)。Paneはこのフレーズを未ローカライズ(既定の英語文言の
-// まま)のため、同じ文言をここで明示的に付け直す(.verify-codefold.mjsもこのtitle属性で
-// クリック対象のマーカーを判別しているため必須)。
-function foldMarkerDOM(open) {
-  const span = document.createElement("span");
-  span.className = "cm-fold-marker";
-  // 畳まれている(open=false)→"+"、展開中(open=true)→"−"。U+2212(MINUS SIGN)は
-  // ハイフンマイナス(-)より線が太く、"+"と字面の太さが揃って見やすいためこちらを使う。
-  span.textContent = open ? "−" : "+";
-  span.title = open ? "Fold line" : "Unfold line";
-  return span;
+// 【経緯】 当初は@codemirror/language標準のfoldGutter()にmarkerDOMを渡すだけの実装
+// だった(既定の"⌄"/"›"をGraft風の「+」「−」四角枠に差し替え)。しかしfoldGutter()の
+// markerDOM(open)コールバックは開閉状態(open: boolean)しか受け取れず、「この行が
+// 何階層目か」「この行の下にどの範囲の縦線を通すべきか」といった行ごとの文脈を一切
+// 持てない。また、foldGutter()内部のgutter()呼び出しはrenderEmptyElements(既定false)を
+// 固定で使っており、外から変更する手段が無い。renderEmptyElementsがfalseだと「折りたたみ
+// 可能な行(またはfoldされている行)」以外はガターのセル自体が生成されない(高さ0で
+// 詰められる)ため、"function内の中間行"のように「foldGutter基準ではマーカーが無いが、
+// 縦線は通したい行」にDOMの取っ掛かりが無い。
+// → 今回、@codemirror/language標準のfoldGutter()を使うのをやめ、@codemirror/viewの
+//   低レベルAPI(gutter()・GutterMarker)を直接使って自前のガターを組む。fold/unfoldの
+//   状態管理自体(foldState・foldEffect・unfoldEffect・foldedRanges)は引き続き
+//   @codemirror/languageのものをそのまま使う(車輪の再発明はしない。挙動を変えたいのは
+//   「ガターの見た目・レイアウト」だけで、折りたたみの状態管理そのものは変える理由が無い)。
+//
+// 【階層に応じた横位置(依頼1)】
+// 「その行のインデント深さ」ではなく、「その行を含む、複数行にまたがる折りたたみ可能範囲
+// (foldNodeProp)の、祖先方向への入れ子段数」を深さの基準にした。インデント幅(スペース/
+// タブの個数)は既存のcodeIndentSize設定や書き手の癖で簡単にズレる(タブ混在・インデント
+// 崩れ等)のに対し、構文木上の入れ子段数は「その行がいくつのfoldable範囲の中にいるか」を
+// 直接表しており、後述の縦線・└印を「同じ深さ=同じx座標」で必ず揃えられる(マーカーの
+// 横位置がズレる原因を作らない)という実利がある。ancestorFoldRangesAtLine()が、
+// syntaxTree(state).resolveStack()でその行の祖先ノードだけを辿り(木の深さに比例した
+// 計算量で、文書全体は舐めない)、foldNodePropを持つ祖先のうち複数行にまたがるものだけを
+// 外側→内側の順で列挙する。
+//
+// 【折りたたみ範囲の縦線(依頼2)】
+// 行ごとに ancestorFoldRangesAtLine() の結果を「深さiの範囲Rについて、この行がRの開始行
+// なら『マーカー』、終了行なら『└(角)』、それ以外(中間)なら『縦線』」に分類し
+// (classifySegment)、深さごとに横方向へ積み上げて描画する。これにより:
+//   - 範囲の開始行にはその深さのマーカーが立ち、
+//   - 開始行の下半分〜終了行の上半分まで縦線が途切れず伸び、
+//   - 終了行では縦線が角(└、横棒への曲がり)で閉じる。
+// 複数の階層が重なる行(外側のfunctionの中に内側のifがある、等)では、各深さが独立した
+// 横位置(スロット)に描画されるため、縦線が深さの数だけ並んで見える(依頼の想定どおり)。
+// 表示範囲だけを走査する(view.viewportLineBlocksのみをイテレートし、文書全体は舐めない。
+// 既存のindentGuideMarksと同じ作法)。
+//
+// 【溝(ガター)の幅が足りない場合の扱い】
+// 深さが一定数(FOLD_MAX_DEPTH)を超えたら、それ以上は右へずらさずクランプする(同じ
+// 横位置に重なって描画される)。ガター自体の幅はFOLD_TRACK_WIDTHとして固定し
+// (initialSpacerで常に同じ幅を予約する)、実際に見えている行の最大深さによってガター幅が
+// 前後にガタつく(スクロール中に横幅が変わる)ことも防いでいる。深いネストでは深さの
+// 違いが視覚的に区別できなくなるが、マーカー自体は常にクリック可能な位置に留まり、
+// ガターが本文へ食い込むことは無い(M節: 本文のpadding-left領域と重ならないことの実測
+// 対象)。
+class FoldTrackMarker extends GutterMarker {
+  // segments: 深さ0(最も外側)から順に並んだ配列。各要素は
+  //   { kind: "vline" }                                        中間(縦線のみ)
+  //   { kind: "elbow" }                                         終了行(└)
+  //   { kind: "marker", range: {from,to}, folded: bool }        開始行(クリック可能なマーカー)
+  //   { kind: "elbow-marker", range: {from,to}, folded: bool }  同じ行の同じ深さで、範囲の
+  //                                                              終了と別範囲の開始が重なる
+  //                                                              (例:「} else {」)
+  constructor(segments) {
+    super();
+    this.segments = segments;
+    // eq()用の比較キー。範囲の識別にfrom/toを使う(同じ行・同じ深さでも範囲が変われば
+    // 別マーカーとして再描画させるため)。
+    this.key = segments.map((s) => `${s.kind}:${s.range ? `${s.range.from}-${s.range.to}-${s.folded}` : ""}`).join("|");
+  }
+  eq(other) { return this.key === other.key; }
+  toDOM(view) {
+    const track = document.createElement("span");
+    track.className = "cm-fold-track";
+    // 「開始行のマーカー」本体を作る小さなヘルパー。marker(通常)・elbow-marker(閉じつつ
+    // 開く combo)の両方から使う。
+    const makeMarkerEl = (x, range, folded, extraClass) => {
+      const el = document.createElement("span");
+      el.className = extraClass ? `cm-fold-marker ${extraClass}` : "cm-fold-marker";
+      el.style.left = `${x}px`;
+      // 畳まれている(folded=true)→"+"、展開中(folded=false)→"−"。U+2212(MINUS SIGN)は
+      // ハイフンマイナス(-)より線が太く、"+"と字面の太さが揃って見やすいためこちらを使う。
+      el.textContent = folded ? "+" : "−";
+      el.title = view.state.phrase(folded ? "Unfold line" : "Fold line");
+      el.addEventListener("click", (event) => {
+        event.preventDefault();
+        toggleFoldRange(view, range);
+      });
+      return el;
+    };
+    // 「└」の角(縦棒+横棒の2要素)を作る小さなヘルパー。elbow・elbow-markerの両方から使う。
+    // 縦棒は上半分だけ(0〜50%)。角の頂点(曲がり角)がちょうど行の中央に来る。
+    const makeElbowEl = (x) => {
+      const box = document.createElement("span");
+      box.className = "cm-fold-elbow";
+      box.style.left = `${x}px`;
+      // 縦棒(上半分)と横棒(下端)の2つの実要素で「└」の角を組む(疑似要素のcontentに
+      // 頼らず、Playwrightからも実要素として検証できるようにするため)。
+      const v = document.createElement("span");
+      v.className = "cm-fold-elbow-v";
+      const h = document.createElement("span");
+      h.className = "cm-fold-elbow-h";
+      box.appendChild(v);
+      box.appendChild(h);
+      return box;
+    };
+    // マーカー行の「下側」に伸ばす縦線(50%〜100%)。マーカー自体は行の中央(50%)に浮かせて
+    // 描くため、そのままでは「マーカーの下から次の行へ続く線」が無く、たまたまマーカーの
+    // 箱がその隙間を覆っているように見えるだけ(=箱のサイズやCSSの数値を変えると簡単に
+    // 途切れる、壊れやすい状態)だった。次の行との境界(行の下端)まで確実にpxで塗り切る
+    // ことを明示するため、専用の要素として独立させる。
+    const makeLowerVlineEl = (x) => {
+      const el = document.createElement("span");
+      el.className = "cm-fold-vline-lower";
+      el.style.left = `${x}px`;
+      return el;
+    };
+    this.segments.forEach((seg, i) => {
+      // FOLD_MAX_DEPTHを超える深さはクランプ(上記コメント参照)。
+      const x = Math.min(i, FOLD_MAX_DEPTH) * FOLD_SLOT_WIDTH;
+      if (seg.kind === "vline") {
+        const el = document.createElement("span");
+        el.className = "cm-fold-vline";
+        el.style.left = `${x}px`;
+        track.appendChild(el);
+      } else if (seg.kind === "elbow") {
+        track.appendChild(makeElbowEl(x));
+      } else if (seg.kind === "marker") {
+        // マーカー(中央に浮かせた箱)+ その下から次の行へ続く縦線。上には何も無い
+        // (この深さの範囲がまさにこの行で開始するため、行の上側には元々何も無いのが正しい)。
+        track.appendChild(makeLowerVlineEl(x));
+        track.appendChild(makeMarkerEl(x, seg.range, seg.folded, null));
+      } else if (seg.kind === "elbow-marker") {
+        // 「} else {」のように、同じ行の同じ深さで範囲の終了(└)と別範囲の開始(マーカー)が
+        // 重なる場合。角の縦棒(0〜50%)→横棒(角の頂点、50%)→マーカー(行下端寄りに小さく
+        // 配置。通常サイズのままだと角の頂点と重なって隠れてしまうため、cm-fold-marker-combo
+        // で一回り小さくして下へ逃がす)→下側の縦線(マーカーの下端〜100%)で、行の上端から
+        // 下端まで途切れず繋がりつつ、角の横棒(└の意味そのもの)も隠れずに見える。
+        track.appendChild(makeElbowEl(x));
+        track.appendChild(makeLowerVlineEl(x));
+        track.appendChild(makeMarkerEl(x, seg.range, seg.folded, "cm-fold-marker-combo"));
+      }
+    });
+    return track;
+  }
 }
-// マーカーの見た目(四角い枠)。色はテーマのCSS変数(--ink-sub/--rule/--accent-soft等)を
-// var()で参照するだけなので、getComputedStyleでの再構築なしに9テーマすべてへ自動で追従する
-// (indentGuideThemeが--ruleを使っているのと同じ作法)。src/style.css・src/themes.cssは
-// 他エージェントが編集中のため触れず、ここ(EditorView.theme())だけで完結させる。
-// クリック判定自体は@codemirror/view側でガター行セル全体(cm-gutterElement、行の高さ×
-// ガター幅ぶん)に対して行われる(この小さい四角はあくまで見た目)ため、押せる範囲が
-// マーカーの見た目サイズに制限されることはない。とはいえ見た目でも押せることが伝わるよう、
-// ガター行セル自体にもcursor:pointerを与え、ホバー時はマーカーの枠・文字色を強めて
-// 目立たせる。
+
+// posの位置での祖先チェーン(foldNodePropを持ち、複数行にまたがる範囲だけ)を、外側→内側の
+// 順(=そのチェーンにおける「深さ」がそのまま配列indexになる順)で返す。
+// syntaxTree(state).resolveStack(pos, side)は「posを含む祖先ノードの連なり」を内側→外側の
+// 順に返すAPI(@codemirror/languageのsyntaxFolding()内部実装と同じ使い方)で、木の深さに
+// 比例した計算量しかかからない(文書全体は舐めない)。
+function collectFoldChainAt(state, pos, side) {
+  const tree = syntaxTree(state);
+  // 末尾まで構文解析が終わっていない範囲は諦める(foldable()自身と同じ安全策。巨大ファイル
+  // で解析が追いついていない箇所を誤った範囲で扱わないため)。
+  if (tree.length < pos) return [];
+  const doc = state.doc;
+  const chain = [];
+  for (let iter = tree.resolveStack(pos, side); iter; iter = iter.next) {
+    const cur = iter.node;
+    const prop = cur.type.prop(foldNodeProp);
+    if (!prop) continue;
+    const value = prop(cur, state);
+    if (!value) continue;
+    const fromLine = doc.lineAt(value.from).number;
+    const toLine = doc.lineAt(value.to).number;
+    if (toLine <= fromLine) continue; // 1行に収まる範囲は縦線を引く意味が無い
+    chain.push({ from: value.from, to: value.to, fromLine, toLine });
+  }
+  chain.reverse(); // 外側(深さ0)→内側の順にする
+  return chain;
+}
+// 行lineNumberが、どの深さで「通過中(vline)」「範囲の終了(elbow)」「範囲の開始(marker)」
+// になるかを判定する。
 //
-// 不具合修正(ユーザー報告「Graftより見にくい」): 実機比較のスクリーンショットで、Graft
-// (VS Code系)のマーカーは枠が細く記号自体のコントラストが高いのに対し、Paneは記号の色に
-// --ink-mute(本文の副次テキスト用、控えめな色)を使っており見劣りする、との指摘を受けた。
-// 実測(.verify-codefold.mjsの相対輝度によるコントラスト比計算)したところ、night/
-// solarized-darkの2テーマで--ink-mute使用時のコントラスト比が2.3〜2.8とWCAGの下限
-// (3.0、UIコンポーネントに対する目安)を下回っていた。前任は「枠線付きのため視認は問題ない」
-// と判断していたが、実際のユーザー評価は「見にくい」だったため、その判断基準(枠があれば
-// 十分)自体が甘かったとみなし、数値目標をコントラスト比3.0以上に引き上げたうえで色を
-// 選び直す。
-//   - 記号の色: --ink-mute → --ink-sub(本文の見出し等に使う、より濃い副次色)に変更。
-//     実測(9テーマ全数、.verify-codefold.mjs (K)参照)でnight=3.24、solarized-dark=4.76と
-//     いずれも3.0を上回ることを確認済み(他7テーマはいずれも4以上でさらに余裕がある)。
-//   - 記号の太さ: fontWeight 700(太字)にして、色のコントラストに加えて画線自体の存在感を
-//     上げる(Graftの記号が「はっきりしている」という指摘に対応。数値コントラストだけでなく
-//     視覚的な判断でも実際にスクリーンショットを見て決めた)。
-//   - 枠: Graftは「枠が細く」目立ちすぎない、との指摘のため、太さは変えず(1px)そのまま
-//     維持する(記号だけを強めることで、枠に頼らなくても視認できるようにする狙い)。
-const foldGutterTheme = EditorView.theme({
-  ".cm-foldGutter .cm-gutterElement": { display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" },
+// 不具合(実装中に発覚): 行の1点(例えば行末)だけをresolveStackで解決すると、
+// 「} else {」のように1行の中で範囲が閉じると同時に別の範囲が開くケースを取りこぼす
+// (行末で解決すると、行の途中で終わった範囲=閉じたブロックは既に祖先チェーンから
+// 外れてしまっており見えない)。逆に行頭だけで解決すると、行の途中から開く範囲
+// (=行末側でしか祖先に含まれない)が見えない。そのため行頭(lineFrom)・行末(lineTo)の
+// 両方で解決し、同じ深さで「行頭側に見えた範囲」と「行末側に見えた範囲」を突き合わせる
+// (同一範囲なら1本の線として扱い、別範囲なら「終了+開始」が同じ行の同じ深さで重なる
+// ケースとして扱う)。
+function ancestorFoldRangesAtLine(state, lineFrom, lineTo, lineNumber) {
+  const startChain = collectFoldChainAt(state, lineFrom, -1); // 行頭時点でまだ開いている範囲(閉じかけの範囲も含む)
+  const endChain = collectFoldChainAt(state, lineTo, 1); // 行末時点で開いている範囲(この行で新規に開いた範囲も含む)
+  const depth = Math.max(startChain.length, endChain.length);
+  const segments = [];
+  for (let d = 0; d < depth; d++) {
+    const s = startChain[d];
+    const e = endChain[d];
+    const closesHere = s && s.toLine === lineNumber;
+    const opensHere = e && e.fromLine === lineNumber;
+    // 行頭側・行末側のどちらかが「この行を通過中(mid-span)」の範囲を示していれば、それが
+    // この深さの実体(通常はs===eで同一範囲)。
+    const through = (s && s.fromLine < lineNumber && s.toLine > lineNumber) ? s
+      : (e && e.fromLine < lineNumber && e.toLine > lineNumber) ? e : null;
+    if (through) {
+      segments.push({ kind: "vline" });
+    } else if (closesHere && opensHere) {
+      // 「} else {」のように、この行のこの深さで範囲が閉じると同時に別の範囲が開く。
+      segments.push({ kind: "elbow-marker", range: e, folded: isRangeFolded(state, e) });
+    } else if (closesHere) {
+      segments.push({ kind: "elbow" });
+    } else if (opensHere) {
+      segments.push({ kind: "marker", range: e, folded: isRangeFolded(state, e) });
+    } else if (s || e) {
+      // 保険: 想定していない組み合わせ(崩れた構文の一時的な状態等)。何も描かないより、
+      // 少なくとも縦線が通っていることだけは示す。
+      segments.push({ kind: "vline" });
+    }
+  }
+  return segments;
+}
+// 範囲rangeが現在畳まれているかどうか。@codemirror/language内部のfindFold()は非公開のため、
+// 同じ考え方(その範囲の開始位置ちょうどに折りたたみ装飾があるか)をfoldedRanges()
+// (公開API)で自前実装する。
+function isRangeFolded(state, range) {
+  let found = false;
+  foldedRanges(state).between(range.from, range.from, (a) => { if (a === range.from) found = true; });
+  return found;
+}
+// マーカークリック時の開閉トグル。foldCode/unfoldCode(標準キーマップ)と同じfoldEffect/
+// unfoldEffectを使うため、キーボード操作(Alt-[/Alt-])・全折りたたみ(Ctrl-Alt-[)などと
+// 状態が完全に一致する(同じfoldNodeProp計算から得た同一のfrom/toを使っているため)。
+function toggleFoldRange(view, range) {
+  let existing = null;
+  foldedRanges(view.state).between(range.from, range.from, (a, b) => { if (a === range.from) existing = { from: a, to: b }; });
+  if (existing) view.dispatch({ effects: unfoldEffect.of(existing) });
+  else view.dispatch({ effects: foldEffect.of(range) });
+}
+
+// 表示範囲(view.viewportLineBlocksのみ。文書全体は舐めない)から、行ごとのFoldTrackMarker
+// を組み立てる。indentGuideMarks・foldGutter本家のbuildMarkers()と同じ「viewportだけを
+// 見る」作法。segments.length===0(=どのfoldable範囲にも属さない行。トップレベルの空行等)
+// は何も描画しないため、builder.add()自体を呼ばない(既存のgutter()側のマージン詰め
+// 機構により、間の行は自動的に高さぶんスキップされる。renderEmptyElements指定は不要)。
+function buildFoldTrackMarkers(view) {
+  const builder = new RangeSetBuilder();
+  const { state } = view;
+  for (const line of view.viewportLineBlocks) {
+    // 不具合修正(実装中に発覚): 範囲が畳まれている行は、view.viewportLineBlocksの
+    // BlockInfo自体が「畳まれた範囲全体(複数のソース行ぶん)」を1つの行として表す
+    // (line.to が元の最終行の終端まで伸びる)。これをそのままancestorFoldRangesAtLine()の
+    // 行末位置に使うと、「範囲の終端(またはその外)」で構文木を解決することになり、
+    // 本来この行が開くはずの範囲自体を見失う(畳んだ直後にマーカーが消える不具合の原因
+    // だった)。折りたたみ状態に関わらず常に同じ結果になるよう、実際の文書上の1ソース行
+    // (state.doc.lineAt())の境界だけを使う(BlockInfoの境界は使わない)。
+    const docLine = state.doc.lineAt(line.from);
+    const segments = ancestorFoldRangesAtLine(state, docLine.from, docLine.to, docLine.number);
+    if (segments.length === 0) continue;
+    builder.add(line.from, line.from, new FoldTrackMarker(segments));
+  }
+  return builder.finish();
+}
+// docChanged/viewportChanged/foldState変化/言語変化/構文木変化のいずれかで再構築する
+// (@codemirror/language標準のfoldGutter()内部実装と同じトリガ集合。foldState変化は
+// マーカークリックによる開閉そのものを検知するために必須)。
+const foldTrackPlugin = ViewPlugin.fromClass(class {
+  constructor(view) { this.markers = buildFoldTrackMarkers(view); }
+  update(update) {
+    if (update.docChanged || update.viewportChanged ||
+        foldedRanges(update.startState) !== foldedRanges(update.state) ||
+        syntaxTree(update.startState) !== syntaxTree(update.state)) {
+      this.markers = buildFoldTrackMarkers(update.view);
+    }
+  }
+});
+
+const foldGuideGutter = gutter({
+  class: "cm-foldGutter",
+  markers: (view) => view.plugin(foldTrackPlugin)?.markers ?? RangeSet.empty,
+  initialSpacer: () => new FoldTrackMarker([]),
+  // その行のfoldState変化にだけ反応すればよい(update()側で既にdocChanged等を見ているため
+  // ここは常にfalseで良い。gutter()標準の再同期はmarkers()の差分検出で自然に効く)。
+  lineMarkerChange: () => false,
+});
+
+// マーカー・縦線・角(└)の見た目。色はテーマのCSS変数だけを参照するため、
+// getComputedStyleでの再構築なしに9テーマすべてへ自動追従する(indentGuideThemeと同じ
+// 作法)。src/style.css・src/themes.cssは他エージェントが編集中のため触れず、ここ
+// (EditorView.theme())だけで完結させる。
+//
+// 【マーカーの見た目の見直し(依頼3、ユーザー評価「Graftより見にくい」への対応)】
+// 前回は「枠線+透明な地」のまま記号の色だけ強めたが、実機比較でGraftのマーカーは
+// 塗り(地)が効いた四角(⊟に近い印象)であるのに対し、Paneは相変わらず輪郭だけの
+// 印象だったとの再指摘。今回は次の3点を変える。
+//   - 地の色を追加: 常時塗りつぶす。塗りの色は最初var(--accent-soft)(既存のアクセント系の
+//     淡色)を試したが、実測(.verify-codefold.mjs (T)節)したところ淡色ゆえに地色自体と
+//     背景とのコントラスト比が1.1〜1.6程度しか無く(3.0を大きく下回る)、「塗りが付いた
+//     ことで逆に埋もれる」結果になっていた。そこで地の色をvar(--ink-sub)(枠・記号と
+//     同じ、副次テキスト用の濃い色)に変更し、文字色をvar(--paper)(地の紙色。既に
+//     var(--ink-sub)とのコントラスト比が9テーマ全数で3.0以上であることを(K)節で確認
+//     済みの組み合わせを、地と文字を入れ替えて再利用する―コントラスト比は2色の順序に
+//     依存しないため、同じ比率がそのまま成り立つ)にする。「濃い塗りの四角に薄い記号」という、
+//     枠線だけだった前回よりもはっきり四角として視認できる見た目になる。
+//   - 枠: 塗りと同じvar(--ink-sub)、太さは1.5px(記号・地と一体の「塗りつぶされた四角」に
+//     見えるようにする)。
+//   - 箱を一回り大きく: 14px→15px、fontSizeも11px→12pxへ。塗りが付いたことで小さすぎると
+//     潰れて見えるため。
+// ホバー時はvar(--accent)(ブランドのアクセント色)に切り替え、クリックできることを
+// より強く伝える。
+// 実測(9テーマ、.verify-codefold.mjs (T)節参照): 記号色と地色それぞれについて、背景との
+// コントラスト比が3.0以上であることを確認する。
+const FOLD_SLOT_WIDTH = 7; // 深さ1段あたりの横方向オフセット(px)
+const FOLD_MAX_DEPTH = 6; // これを超える深さは同じ位置にクランプする(上記コメント参照)
+const FOLD_MARKER_SIZE = 15; // マーカー本体の一辺(px)
+const FOLD_TRACK_WIDTH = FOLD_MAX_DEPTH * FOLD_SLOT_WIDTH + FOLD_MARKER_SIZE; // ガター全体の固定幅
+const foldGuideTheme = EditorView.theme({
+  ".cm-foldGutter .cm-gutterElement": { position: "relative", padding: 0 },
+  ".cm-fold-track": { position: "relative", display: "block", width: `${FOLD_TRACK_WIDTH}px`, height: "100%" },
+  // 中間行の縦線(範囲の開始行〜終了行の間、途切れず続く)。
+  ".cm-fold-vline": {
+    position: "absolute", top: 0, bottom: 0, width: "1.5px",
+    backgroundColor: "var(--ink-sub)",
+  },
+  // マーカー行の下半分(50%〜100%)を埋める縦線。マーカーの箱の見た目に頼らず、次の行との
+  // 境界まで明示的に塗り切ることで、拡大表示・箱サイズの変更に対しても途切れを起こさない。
+  ".cm-fold-vline-lower": {
+    position: "absolute", top: "50%", bottom: 0, width: "1.5px",
+    backgroundColor: "var(--ink-sub)",
+  },
+  // 終了行の角(└)。縦棒(上半分)+横棒(下端)の2要素で組む。
+  ".cm-fold-elbow": { position: "absolute", top: 0, height: "50%", width: `${FOLD_SLOT_WIDTH + 2}px` },
+  ".cm-fold-elbow-v": { position: "absolute", left: 0, top: 0, bottom: 0, width: "1.5px", backgroundColor: "var(--ink-sub)" },
+  ".cm-fold-elbow-h": { position: "absolute", left: 0, bottom: 0, width: `${Math.round(FOLD_SLOT_WIDTH * 0.75)}px`, height: "1.5px", backgroundColor: "var(--ink-sub)" },
+  // 開始行のマーカー本体(クリック対象)。
   ".cm-fold-marker": {
+    position: "absolute", top: "50%", transform: "translateY(-50%)",
     display: "inline-flex",
     alignItems: "center",
     justifyContent: "center",
     boxSizing: "border-box",
-    width: "14px",
-    height: "14px",
+    width: `${FOLD_MARKER_SIZE}px`,
+    height: `${FOLD_MARKER_SIZE}px`,
     lineHeight: "1",
-    fontSize: "11px",
-    fontWeight: "700",
+    fontSize: "12px",
+    fontWeight: "800",
     fontFamily: "var(--font-mono, ui-monospace, monospace)",
-    color: "var(--ink-sub)",
-    border: "1px solid var(--rule)",
+    color: "var(--paper)",
+    border: "1.5px solid var(--ink-sub)",
     borderRadius: "3px",
+    backgroundColor: "var(--ink-sub)",
     userSelect: "none",
+    cursor: "pointer",
+    zIndex: "1", // 縦線・角より前面に出す(重なっても読める順序)
   },
   ".cm-fold-marker:hover": {
-    color: "var(--ink)",
-    borderColor: "var(--ink-mute)",
-    backgroundColor: "var(--accent-soft)",
+    color: "var(--paper)",
+    borderColor: "var(--accent)",
+    backgroundColor: "var(--accent)",
+  },
+  // 「} else {」のような combo(elbow-marker)専用。通常サイズのまま行中央(50%)に置くと
+  // 角の頂点・横棒(└の意味そのもの)を隠してしまうため、一回り小さくして行の下寄りに
+  // 逃がす(角の頂点=50%より下、かつ行の下端との間に線が見える余地を残す)。
+  ".cm-fold-marker-combo": {
+    top: "auto", bottom: "1px", transform: "none",
+    width: "11px", height: "11px", fontSize: "9px", borderRadius: "2px",
   },
 });
 
@@ -2732,7 +3010,7 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
   const codeModeExtras = () => [
     lineNumbers(),
     gutterDividerTheme,
-    ...(codeFoldingOn ? [foldGutter({ markerDOM: foldMarkerDOM }), foldGutterTheme, keymap.of(foldKeymapSafe)] : []),
+    ...(codeFoldingOn ? [codeFolding(), foldTrackPlugin, foldGuideGutter, foldGuideTheme, keymap.of(foldKeymapSafe)] : []),
     bracketMatching(),
     ...(codeIndentGuidesOn ? [indentGuideMarks, indentGuideTheme(codeIndentSizeValue)] : []),
   ];
