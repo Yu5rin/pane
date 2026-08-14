@@ -2365,6 +2365,58 @@ const foldKeymapSafe = [
   { key: "Ctrl-Alt-]", run: unfoldAll },
 ];
 
+// 折りたたみガターのマーカー(依頼: 「Graftと同じく+-で折りたたみできるようにして」)。
+// @codemirror/language標準のfoldGutter()は既定で"⌄"(展開中)/"›"(畳み中)という山形の
+// マーカーだが、参考画像(Graft=VS Code系)では行番号の左に四角い枠で囲んだ「+」(畳み中)/
+// 「−」(展開中)が出る。foldGutter()のmarkerDOMオプションに独自のDOM生成関数を渡すことで
+// 差し替える。
+// 注意: markerDOMを指定すると、@codemirror/language既定のtitle付与(FoldMarker.toDOM内で
+// state.phrase()経由で"Fold line"/"Unfold line"を設定する処理)がスキップされる
+// (markerDOMがあれば即returnするため)。Paneはこのフレーズを未ローカライズ(既定の英語文言の
+// まま)のため、同じ文言をここで明示的に付け直す(.verify-codefold.mjsもこのtitle属性で
+// クリック対象のマーカーを判別しているため必須)。
+function foldMarkerDOM(open) {
+  const span = document.createElement("span");
+  span.className = "cm-fold-marker";
+  // 畳まれている(open=false)→"+"、展開中(open=true)→"−"。U+2212(MINUS SIGN)は
+  // ハイフンマイナス(-)より線が太く、"+"と字面の太さが揃って見やすいためこちらを使う。
+  span.textContent = open ? "−" : "+";
+  span.title = open ? "Fold line" : "Unfold line";
+  return span;
+}
+// マーカーの見た目(四角い枠)。色はテーマのCSS変数(--ink-mute/--rule/--accent-soft等)を
+// var()で参照するだけなので、getComputedStyleでの再構築なしに9テーマすべてへ自動で追従する
+// (indentGuideThemeが--ruleを使っているのと同じ作法)。src/style.css・src/themes.cssは
+// 他エージェントが編集中のため触れず、ここ(EditorView.theme())だけで完結させる。
+// クリック判定自体は@codemirror/view側でガター行セル全体(cm-gutterElement、行の高さ×
+// ガター幅ぶん)に対して行われる(この小さい四角はあくまで見た目)ため、押せる範囲が
+// マーカーの見た目サイズに制限されることはない。とはいえ見た目でも押せることが伝わるよう、
+// ガター行セル自体にもcursor:pointerを与え、ホバー時はマーカーの枠・文字色を強めて
+// 目立たせる。
+const foldGutterTheme = EditorView.theme({
+  ".cm-foldGutter .cm-gutterElement": { display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" },
+  ".cm-fold-marker": {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    boxSizing: "border-box",
+    width: "13px",
+    height: "13px",
+    lineHeight: "1",
+    fontSize: "10px",
+    fontFamily: "var(--font-mono, ui-monospace, monospace)",
+    color: "var(--ink-mute)",
+    border: "1px solid var(--rule)",
+    borderRadius: "3px",
+    userSelect: "none",
+  },
+  ".cm-fold-marker:hover": {
+    color: "var(--ink)",
+    borderColor: "var(--ink-mute)",
+    backgroundColor: "var(--accent-soft)",
+  },
+});
+
 // インデントガイド(縦線)。ユーザー報告「コードモードのインデントが小さすぎる」への対応の一部。
 // 実測の結果、Tabキーで新たに挿入されるインデント幅(indentUnit)と、既に書かれているスペース
 // インデントの見た目の幅は別物で、後者はCSS側では変えようがない(スペースは文字なのでフォントの
@@ -2508,7 +2560,7 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
   // codeFoldingOn/codeIndentGuidesOn/codeIndentSizeValueはこのcreateEditor()インスタンス
   // (ウィンドウ/タブ)ごとの状態のため、この関数自体もここ(createEditor内)で定義する。
   const codeModeExtras = () => [
-    ...(codeFoldingOn ? [foldGutter(), keymap.of(foldKeymapSafe)] : []),
+    ...(codeFoldingOn ? [foldGutter({ markerDOM: foldMarkerDOM }), foldGutterTheme, keymap.of(foldKeymapSafe)] : []),
     lineNumbers(),
     bracketMatching(),
     ...(codeIndentGuidesOn ? [indentGuideMarks, indentGuideTheme(codeIndentSizeValue)] : []),
@@ -2675,7 +2727,11 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
         editable.of(EditorView.editable.of(true)),
         search({ top: false }),
         EditorView.updateListener.of((u) => {
-          if (u.docChanged && onChange) onChange(view.state.doc.toString());
+          // 実機不具合の修正(main.jsのダーティ判定見直しに伴う性能改善): 呼び出し側(main.js)は
+          // 引数を使っておらず、view.state.doc.toString()は1万行規模の文書で毎回の入力時に
+          // 文書全体を文字列化する無駄なコストになっていたため引数を渡すのをやめる。
+          // 本文の文字列が必要な呼び出し元はeditor.getValue()を都度呼ぶこと。
+          if (u.docChanged && onChange) onChange();
           if (u.focusChanged) { (view.hasFocus ? onFocus : onBlur)?.(); }
           if ((u.docChanged || u.viewportChanged || u.selectionSet) && onRender) requestAnimationFrame(() => onRender());
           // 行/列・文字数カウント(ステータスバー)用の軽量な通知。doc変化でもカーソル位置は
