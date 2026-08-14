@@ -430,6 +430,7 @@ export function openColorPickerPanel(opts) {
   document.body.appendChild(root);
 
   const $ = (sel) => root.querySelector(sel);
+  const previewEl = $(".cp-preview"); // ドラッグハンドル(ユーザー要望1)
   const previewSwatch = $(".cp-preview-swatch");
   const primaryEl = $(".cp-primary");
   const secondaryEl = $(".cp-secondary");
@@ -696,6 +697,58 @@ export function openColorPickerPanel(opts) {
     root.style.left = `${left}px`;
     root.style.top = `${top}px`;
   }
+
+  // ---- パネルのドラッグ移動(ユーザー要望1) ----
+  // プレビュー行(.cp-preview、色スウォッチ+色番号の行)をドラッグハンドルにする。
+  // 入力欄・スライダー・彩度明度の四角形・パレット・ボタンの上で操作を始めると色が
+  // 選べなくなるため、ドラッグ開始点をプレビュー行に限定したうえで、念のため
+  // イベントの発生源(e.target)がフォーム要素・操作系の子要素でないことも確認する
+  // (プレビュー行自体には現状スウォッチとテキストしか無いが、将来ここに操作要素が
+  // 増えても誤ってドラッグが始まらないようにするための保険)。
+  function isNonDraggableTarget(target) {
+    return !!target.closest(
+      "input, button, .cp-sl-box, .cp-hue-slider, .cp-alpha-slider, .cp-palette-swatch"
+    );
+  }
+  function dragPlacedByUser() {
+    // 一度でもドラッグで動かしたら、以後は自動再配置(place())を行わない
+    // (ユーザーが置いた位置を尊重する。実際にはplace()はパネルを開いた直後の
+    // 1回しか呼ばれないため、このフラグ自体は現状の自動再配置を止めるためというより、
+    // 「ドラッグ移動済みかどうか」を外部(検証スクリプト等)から確認できるようdata属性へ
+    // 反映する目的で持つ)。
+    root.dataset.cpUserPositioned = "true";
+  }
+  previewEl.style.touchAction = "none";
+  previewEl.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return; // 右クリック等では開始しない(既存コードの流儀に合わせる)
+    if (isNonDraggableTarget(e.target)) return;
+    e.preventDefault();
+    previewEl.setPointerCapture(e.pointerId);
+    const startClientX = e.clientX, startClientY = e.clientY;
+    const startLeft = root.offsetLeft, startTop = root.offsetTop;
+    const move = (ev) => {
+      const margin = 0; // パネル自体は掴んだ場所の相対位置のまま動かし、クランプだけ画面端で行う
+      const vw = window.innerWidth, vh = window.innerHeight;
+      const pw = root.offsetWidth, ph = root.offsetHeight;
+      const rawLeft = startLeft + (ev.clientX - startClientX);
+      const rawTop = startTop + (ev.clientY - startClientY);
+      // ビューポートからはみ出さないようクランプする(掴む部分が画面外へ出ると
+      // 二度と動かせなくなるため。パネル自体が画面より大きい極端なケースでも
+      // 0未満にはならないようMath.maxで下限を0に揃える)。
+      const left = clamp(rawLeft, margin, Math.max(margin, vw - pw - margin));
+      const top = clamp(rawTop, margin, Math.max(margin, vh - ph - margin));
+      root.style.left = `${left}px`;
+      root.style.top = `${top}px`;
+    };
+    const up = (ev) => {
+      previewEl.releasePointerCapture(ev.pointerId);
+      previewEl.removeEventListener("pointermove", move);
+      previewEl.removeEventListener("pointerup", up);
+      dragPlacedByUser();
+    };
+    previewEl.addEventListener("pointermove", move);
+    previewEl.addEventListener("pointerup", up);
+  });
 
   render();
   place();

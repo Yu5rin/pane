@@ -845,8 +845,22 @@ internal sealed class MainForm : Form
                     SaveFontSize(fontSize);
                 }
                 break;
+            case "set-sidebar-width":
+                // サイドバー幅のドラッグリサイズ(ユーザー要望2)。ドラッグ終了時・既定幅への
+                // ダブルクリック復帰時にJS側(sidebar.js)から送られてくる。他ウィンドウへの
+                // 再配信は不要(サイドバー幅はウィンドウごとの見た目の好みのため、
+                // ウィンドウ位置・サイズと同じくbroadcastはしない)。
+                if (TryGetInt(root, "width", out int sidebarWidth))
+                {
+                    SaveSidebarWidth(sidebarWidth);
+                }
+                break;
             case "open-folder":
-                HandleOpenFolderRequest();
+                // newWindow: JS側(main.js openFolder())が本文の空判定(D&Dのopen-dropped-file
+                // と同じ考え方)で送ってくる。trueなら新しいウィンドウでフォルダを開く。
+                bool openFolderNewWindow = root.TryGetProperty("newWindow", out JsonElement openFolderNewWindowProp)
+                    && openFolderNewWindowProp.ValueKind == JsonValueKind.True;
+                HandleOpenFolderRequest(openFolderNewWindow);
                 break;
             case "load-folder":
                 string? folderPath = TryGetNullableString(root, "path");
@@ -1114,7 +1128,9 @@ internal sealed class MainForm : Form
     /// (削除/名前変更/新規作成の結果を一覧へ反映する)。</summary>
     private void ReloadLoadedFolderIfAny()
     {
-        if (_loadedFolderRootPath is not null) _ = LoadFolderAsync(_loadedFolderRootPath);
+        // 既に読み込み済みのフォルダの再走査(削除/名前変更/新規作成の反映、設定変更の反映)
+        // であり、ユーザーが新たに「フォルダを開いた」わけではないためautoLoaded: trueにする。
+        if (_loadedFolderRootPath is not null) _ = LoadFolderAsync(_loadedFolderRootPath, autoLoaded: true);
     }
 
     // ---- ウィンドウ制御(仕様書 第2.5節 V-08・V-11・V-12) ----
@@ -1502,14 +1518,25 @@ internal sealed class MainForm : Form
 
     /// <summary>
     /// File &gt; フォルダを開く。<see cref="FolderBrowserDialog"/> で選ばせ、選ばれたら走査する。
+    /// newWindow: trueなら、このウィンドウを置き換えず新しいウィンドウでフォルダを開く
+    /// (ユーザー指示: 新規ファイル(未編集)から開いたときは現在のウィンドウを使い、
+    /// それ以外は新しいウィンドウで開く。判定自体はJS側main.jsのopenFolder()が行う)。
     /// </summary>
-    private void HandleOpenFolderRequest()
+    private void HandleOpenFolderRequest(bool newWindow)
     {
         using var dialog = new FolderBrowserDialog();
-        if (dialog.ShowDialog(this) == DialogResult.OK)
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+
+        if (newWindow)
         {
-            _ = LoadFolderAsync(dialog.SelectedPath);
+            // _requestNewWindow(OpenWindow)はpathがDirectory.Existsなら自動的に
+            // initialFolderPathとして新しいウィンドウを開く(PaneApplicationContext.OpenWindow参照)。
+            // ドロップされたファイルの新規ウィンドウ経路(_requestNewWindowWithContent)とは
+            // 別だが、既存の判定を素直に再利用できるためこの経路を使う。
+            _requestNewWindow?.Invoke(dialog.SelectedPath);
+            return;
         }
+        _ = LoadFolderAsync(dialog.SelectedPath);
     }
 
     /// <summary>
@@ -1528,7 +1555,10 @@ internal sealed class MainForm : Form
             return;
         }
 
-        _ = LoadFolderAsync(parentDir);
+        // ファイルを開いた副作用としての自動読み込みであり、ユーザーが「フォルダを開いた」
+        // わけではないためautoLoaded: trueにする(サイドバーを勝手に開いたり、見ている
+        // パネルをファイルツリーへ強制的に切り替えたりしない)。
+        _ = LoadFolderAsync(parentDir, autoLoaded: true);
     }
 
     private static bool PathsEqual(string a, string b)
@@ -1543,9 +1573,17 @@ internal sealed class MainForm : Form
     /// AutoLoadParentFolder(ファイルを開いた際の自動読み込み)の3経路がすべてここを通る。
     /// 走査中に別のフォルダ読み込みが始まった場合は、前の走査をキャンセルする。
     /// </summary>
-    private async Task LoadFolderAsync(string path)
+    /// <summary>
+    /// autoLoaded: trueなら「ユーザーが明示的にフォルダを開いた」わけではない再走査
+    /// (ファイルを開いた際の親フォルダ自動読み込み・削除/名前変更/新規作成後の再走査・
+    /// 設定変更後の再走査)であることをJS側へ伝える。folder-loadedのペイロードへそのまま
+    /// 乗せ、JS側(main.js)はこのフラグがtrueのときサイドバーの自動表示(仕様: フォルダを開いた
+    /// 直後はサイドバーを開いてファイルツリータブへ切り替える)を行わない。既に見ている
+    /// パネルを勝手にツリーへ切り替えたり、閉じているサイドバーを毎回開いたりしないための区別。
+    /// </summary>
+    private async Task LoadFolderAsync(string path, bool autoLoaded = false)
     {
-        Logger.Write($"LoadFolderAsync開始: {path}");
+        Logger.Write($"LoadFolderAsync開始: {path}, autoLoaded={autoLoaded}");
         // 走査中に別のフォルダ読み込みが始まった場合、前のCTSはCancelするだけでなく
         // ここでDisposeまで行う(不具合修正: 従来はCancelのみで、置き換えられた前のCTSが
         // 誰にもDisposeされないまま残っていた)。
@@ -1578,6 +1616,7 @@ internal sealed class MainForm : Form
                     isDirectory = entry.IsDirectory,
                 }),
                 truncated = result.Truncated,
+                autoLoaded,
             });
         }
         catch (OperationCanceledException)
@@ -2223,6 +2262,7 @@ internal sealed class MainForm : Form
             showStatusBar = settings.ShowStatusBar,
             showOutlineByDefault = settings.ShowOutlineByDefault,
             collapsibleOutline = settings.CollapsibleOutline,
+            sidebarWidthPx = settings.SidebarWidthPx,
             zoomWithCtrlWheel = settings.ZoomWithCtrlWheel,
             displayMode = settings.DisplayMode,
             recentFiles = settings.RecentFiles,
@@ -2452,6 +2492,15 @@ internal sealed class MainForm : Form
         if (size < 8 || size > 40) return; // JS側(editor.js)と同じ範囲。想定外の値は無視する
         // Lost Update対策(SettingsService.Update参照)。
         SettingsService.Update(settings => settings.EditorFontSize = size);
+    }
+
+    /// <summary>サイドバー幅のドラッグリサイズ(ユーザー要望2)を永続化する。
+    /// 範囲外の値はAppSettings.SidebarWidthPxのsetterがクランプするため、ここでは
+    /// そのまま渡すだけでよい(SaveFontSizeのように呼び出し前で弾く必要はない)。</summary>
+    private static void SaveSidebarWidth(int width)
+    {
+        // Lost Update対策(SettingsService.Update参照)。
+        SettingsService.Update(settings => settings.SidebarWidthPx = width);
     }
 
     /// <summary>最近使ったファイル一覧(仕様書 F-09)を更新する。先頭が最新、重複除去、最大10件。

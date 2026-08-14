@@ -1024,7 +1024,10 @@ const ctx = {
       // フォルダ選択ダイアログ自体がC#側(WinForms)の機能のため、ブリッジが無い
       // ブラウザ単体動作では提供できない(仕様書 S-02/S-03はデスクトップアプリ前提)。
       if (!bridge) { await paneAlert({ title: "開けません", message: "フォルダを開く機能はデスクトップアプリ版でのみ利用できます。" }); return; }
-      bridge.postMessage({ type: "open-folder" });
+      // 本文が空(新規ファイル等、失われる内容が無い)ならこのウィンドウでフォルダを開き、
+      // 何か書かれていれば新しいウィンドウで開く(D&Dのopen-dropped-fileと同じ判定・同じ考え方)。
+      const isEmptyDocument = editor.getValue().trim() === "";
+      bridge.postMessage({ type: "open-folder", newWindow: !isEmptyDocument });
     },
     openFileByPath(path, line) {
       // lineが指定された場合(グローバル検索の結果クリック等)は、file-openedが届いて
@@ -2046,6 +2049,9 @@ async function handleHostMessage(msg) {
       setReadingSpeedWpm(msg.readingSpeedWpm ?? 0);
       // アウトラインパネルの折りたたみ可否(仕様書 collapsibleOutline、既定true)。
       if (typeof msg.collapsibleOutline === "boolean") sidebar.setCollapsibleOutline(msg.collapsibleOutline);
+      // サイドバー幅(ユーザー要望2、既定240)。ドラッグでの変更を次回起動時に復元する。
+      // 未指定(旧バージョンのC#側等)なら既定値のまま(sidebar.js内のSIDEBAR_WIDTH_DEFAULT)にする。
+      if (typeof msg.sidebarWidthPx === "number") sidebar.setWidth(msg.sidebarWidthPx);
       // 起動時にアウトラインを既定表示するか(仕様書 showOutlineByDefault、既定false)。
       // 「起動時1回だけ」のため、以後のapply-settings再送では判定自体を行わない
       // (ユーザーが手で閉じた後に勝手に再度開かないようにするため)。
@@ -2081,6 +2087,16 @@ async function handleHostMessage(msg) {
       } else {
         folderData = msg;
         sidebar.setFolder(msg);
+        // フォルダの読み込みに成功したら、サイドバーを開いてファイルツリーのタブへ切り替える
+        // (ユーザー要望3)。この経路は「フォルダを開く」ダイアログ・起動時のcustomFolder設定・
+        // コマンドラインからのフォルダ渡しのすべてが通る(いずれもC#側からfolder-loadedとして
+        // 届く)ため、入口を分けずここ1箇所の変更で全経路をカバーできる。
+        // ただし、ファイルを開いた際の親フォルダ自動読み込みや、削除/名前変更/新規作成後・
+        // 設定変更後の再走査もfolder-loadedを通るため、そちらまでサイドバーを強制的に
+        // 開いてツリーへ切り替えると「ファイルを開いただけなのにアウトラインを見ていたはずが
+        // ツリーへ切り替わる」といった意図しない挙動になる。C#側(MainForm.cs)が
+        // autoLoaded:trueとして区別してくれるので、それがtrueの間は何もしない。
+        if (!msg.autoLoaded) sidebar.showPanel("tree");
       }
       break;
     case "search-results":

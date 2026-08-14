@@ -286,16 +286,35 @@ html[data-theme="dark"] #theme-moon { display: none; }
 .wc-val.wc-sel { color: var(--accent); }
 
 /* ===== サイドバー(仕様書 第2.8節・第10.4節) =====
-   #main-area は #sidebar と #cm-host を横並びにする行。開閉は幅0⇔240pxの
+   #main-area は #sidebar と #cm-host を横並びにする行。開閉は幅0⇔既定幅(240px)の
    トランジションで表現し、hidden属性ではなく.collapsedクラスで制御する
-   (hidden属性はdisplay:noneになり幅アニメーションができないため)。 */
+   (hidden属性はdisplay:noneになり幅アニメーションができないため)。
+   幅自体はCSS変数--sidebar-wで持つ(ユーザー要望2: ドラッグでのリサイズ)。
+   JS側(sidebar.js)がドラッグ量に応じてこの変数を書き換える。 */
 #status-sidebar { display: inline-flex; align-items: center; }
 #sidebar {
-  width: 240px; flex: none; display: flex; flex-direction: column; overflow: hidden;
+  width: var(--sidebar-w, 240px); flex: none; display: flex; flex-direction: column; overflow: hidden;
   background: var(--sidebar-bg); border-right: 1px solid var(--rule);
   transition: width 160ms ease;
+  position: relative; /* 右端のリサイズハンドル(.sidebar-resize-handle)をここへ絶対配置する */
 }
 #sidebar.collapsed { width: 0; border-right: none; }
+/* ドラッグ中は開閉用のtransitionを切る(160msのtransitionが残っているとカクつくため)。
+   sidebar.js側がドラッグの開始〜終了の間だけこのクラスを付け外しする。 */
+#sidebar.sidebar-resizing { transition: none; }
+/* サイドバー右端のリサイズハンドル(ユーザー要望2)。表の列リサイズ用の既存クラス
+   .resize-handle とは名前を分ける(同じ名前だとgrid-column指定等が衝突するため)。
+   #sidebarはoverflow: hiddenなので(開閉transition中に中身がはみ出さないようにするため)、
+   right: 0(サイドバー内側)に幅6pxで置く。境界の外へはみ出す配置(例: right:-3px)だと
+   overflow: hiddenでクリップされ、当たり判定自体が消えてクリックできなくなるため。 */
+.sidebar-resize-handle {
+  position: absolute; top: 0; right: 0; bottom: 0; width: 6px;
+  cursor: col-resize; background: transparent; z-index: 5; touch-action: none;
+}
+.sidebar-resize-handle:hover, .sidebar-resize-handle:active { background: var(--accent-soft); }
+/* サイドバーが閉じている間はハンドルを掴めないようにする(幅0の状態から広げる操作は
+   「開く」トグルの役目であり、リサイズハンドルの役目ではないため)。 */
+#sidebar.collapsed .sidebar-resize-handle { display: none; }
 .sidebar-tabs { display: flex; align-items: center; gap: 2px; padding: 6px; border-bottom: 1px solid var(--rule); flex: none; }
 .sidebar-tab { border: none; background: transparent; color: var(--ink-sub); border-radius: 6px; width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; transition: background 160ms ease, color 160ms ease; }
 .sidebar-tab:hover { color: var(--ink); }
@@ -1043,7 +1062,9 @@ html[data-theme="dark"] .cm-table th { background: rgba(61,193,181,.14); }
 }
 .color-picker-panel:focus { outline: none; }
 
-.cp-preview { display: flex; align-items: center; gap: 10px; }
+/* ユーザー要望1: プレビュー行をドラッグしてパネルを移動できるようにする。
+   cursor: move で掴めることを示す(実際のドラッグ処理はcolor-picker.js側)。 */
+.cp-preview { display: flex; align-items: center; gap: 10px; cursor: move; }
 .cp-preview-swatch-wrap {
   flex: none;
   width: 36px; height: 36px;
