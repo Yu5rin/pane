@@ -57,13 +57,41 @@ import { paneAlert } from "./dialog.js";
 // 「変数の参照・宣言」で役割を分ける。t.function(...)で修飾されたものだけを
 // --code-fnにし、無修飾のt.variableNameとt.definition(t.variableName)(変数宣言の
 // 左辺)は--code-varにする。
+//
+// 不具合修正3(ユーザーからの正式な目標指定「Lezerでできる範囲でVS Code Dark+相当に
+// 寄せて」を受けた追加調査): JS/TS/CSS/HTML/PythonをPaneで実際に開き、各トークンに
+// 実際に付いている@lezer/highlightタグ(またはCSSクラス)をDOM上で実測して洗い出した
+// (想像でtags.xxxに割り当てず、実測結果に基づいて追加している)。判明した不足分:
+//   - t.tagName(HTML/JSXのタグ名、例<div>のdiv): tagName.setはtypeName/nameに
+//     一般化されるため、専用ルールが無いと--code-type(型/クラス色)に吸収されて
+//     しまっていた。実測でHTMLの"div"が--code-type色になっているのを確認した。
+//     Dark+はタグ名をキーワードと同じ青(#569CD6)にしているため、--code-kwを
+//     専用ルールで明示的に割り当てる(型色と切り離す)。
+//   - t.color(CSS: #fffのような16進カラーリテラル)・t.unit(CSS: pxやem等の単位)への
+//     ルールが無かった。実測すると、#fffはハイライト対象外(カラーピッカー機能の
+//     別レイヤーでのみ薄く着色)のまま、pxはunitの.set継承でtags.keywordに
+//     フォールバックし、実際にキーワードと同じ青で着色されていた(色の意味が
+//     ずれる)。数値の一部として扱うのが一般的なため、両方--code-numに統一する。
+//   - t.regexp(正規表現リテラル)へのルールが無く無色だった。Dark+は文字列と別の
+//     赤(#D16969)を割り当てているため、専用の--code-regexを新設する。
+//   - t.escape(文字列中の\nなどのエスケープ)へのルールが無く、文字列の中だけ
+//     地の色が混じって見えていた。Dark+の対応表には無いが、無色のまま放置すると
+//     文字列内で色が途切れて不自然なため、文字列色(--code-str)に含める。
+// なお実測の結果、Lezerでは再現できないと判明した箇所(意味解析が必要でLezerの
+// 構文タグだけでは判別できない): TypeScriptのenumメンバー名・SNAKE_CASE/ALL_CAPS
+// 慣習による「定数」判定(Dark+の#4FC1FF「定数・列挙子」に相当)は、
+// @lezer/javascriptの構文木上はただのvariableName/propertyNameとしてしか
+// 現れず、命名規則や型情報を見るセマンティックハイライトが無いと判別できないため
+// 非対応(Dark+と完全一致させることはできない。ここに正直に明記する)。
 const codeHighlightStyle = HighlightStyle.define([
   { tag: t.controlKeyword, color: "var(--code-kw2)", fontWeight: "600" },
   { tag: [t.keyword, t.moduleKeyword, t.operatorKeyword], color: "var(--code-kw)", fontWeight: "600" },
   { tag: [t.atom, t.bool, t.self], color: "var(--code-kw)" },
-  { tag: [t.string, t.special(t.string)], color: "var(--code-str)" },
+  { tag: t.tagName, color: "var(--code-kw)" },
+  { tag: [t.string, t.special(t.string), t.escape], color: "var(--code-str)" },
+  { tag: t.regexp, color: "var(--code-regex)" },
   { tag: t.comment, color: "var(--code-cmt)", fontStyle: "italic" },
-  { tag: [t.number, t.integer, t.float], color: "var(--code-num)" },
+  { tag: [t.number, t.integer, t.float, t.color, t.unit], color: "var(--code-num)" },
   { tag: t.propertyName, color: "var(--code-prop)", fontWeight: "600" },
   { tag: [t.function(t.variableName), t.function(t.propertyName)], color: "var(--code-fn)" },
   { tag: [t.variableName, t.definition(t.variableName)], color: "var(--code-var)" },
@@ -2473,6 +2501,18 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
   // として、既存のインデント(スペース/タブいずれも)を列単位で視覚化する。codeIndentSizeと同じ
   // 幅で線を引くため、専用のON/OFF設定は今回は追加していない(詳細は報告参照)。
   let codeIndentGuidesOn = true;
+  // コードモード限定の拡張(仕様書 決定済み事項: 行番号・括弧の対応表示・インデントガイド・
+  // 折りたたみまで。矩形選択・コード補完・LSP連携・エラー診断は搭載しない)。
+  // 折りたたみマーカーは行番号の左に出す(依頼画像どおり)ため、lineNumbers()より先に置く
+  // (CodeMirrorのgutter表示順は、gutter()を登録した拡張の並び順に一致する)。
+  // codeFoldingOn/codeIndentGuidesOn/codeIndentSizeValueはこのcreateEditor()インスタンス
+  // (ウィンドウ/タブ)ごとの状態のため、この関数自体もここ(createEditor内)で定義する。
+  const codeModeExtras = () => [
+    ...(codeFoldingOn ? [foldGutter(), keymap.of(foldKeymapSafe)] : []),
+    lineNumbers(),
+    bracketMatching(),
+    ...(codeIndentGuidesOn ? [indentGuideMarks, indentGuideTheme(codeIndentSizeValue)] : []),
+  ];
   // ソースコードモード(仕様書 V-05): 記法マーカーを隠さない生表示。docModeComp(構文ハイライト)は
   // 外さず、livePreviewComp(装飾・マーカー非表示)だけを空にすることで実現する。markdownモード
   // かつsourceMode===falseの時だけライブプレビューを入れる、という条件はsetFileMode/setSourceMode
