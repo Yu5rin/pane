@@ -60,6 +60,15 @@ html[data-theme="light"][data-light-theme="sepia"] {
   --code-bg: #ECE0C4;
   --chrome-bg: #EAD9B5;
   --titlebar-bg: #EAD9B5;
+  /* 実バグ2の修正で追加。未定義のままだと本文の実描画色をJS側が読んで代用するが、
+     WebView2非表示中はCSSトランジションが実時間どおり進まず古い色が読めてしまう
+     ことがあった(詳細はstyle.css :root ブロックのコメント参照)。--inkをそのまま
+     使い(実測コントラスト比9.34:1)、この問題自体を起こさないようにする。 */
+  --titlebar-fg: var(--ink);
+  /* 実バグ3の修正: メニューホバー時の文字色。var(--accent)(#A9762C)を
+     var(--accent-soft)(#EDE0C0)の上の文字色にすると実測コントラスト比3.02:1しか
+     出ずWCAG AA(4.5)を割り込むため、var(--ink)へ補正する(実測9.92:1)。 */
+  --menu-hover-fg: var(--ink);
   --code-kw: #8B3A2B;
   --code-kw2: #8B3A2B;
   --code-var: #3E6B6E;
@@ -107,6 +116,11 @@ html[data-theme="light"][data-light-theme="github"] {
   --code-bg: #F6F8FA;
   --chrome-bg: #EAEEF2;
   --titlebar-bg: #EAEEF2;
+  /* 実バグ2の修正で追加(根拠はsepiaブロックのコメント参照)。実測コントラスト比13.55:1。 */
+  --titlebar-fg: var(--ink);
+  /* 実バグ3の修正。var(--accent)(#0969DA)とvar(--accent-soft)(#DDF4FF)の実測
+     コントラスト比は4.56:1でAA基準(4.5)を満たすため、var(--accent)のまま使う。 */
+  --menu-hover-fg: var(--accent);
   --code-kw: #D73A49;
   --code-kw2: #D73A49;
   --code-var: #005CC5;
@@ -159,6 +173,11 @@ html[data-theme="light"][data-light-theme="solarized-light"] {
   --code-bg: #EEE8D5;
   --chrome-bg: #D1CCBB;
   --titlebar-bg: #D1CCBB;
+  /* 実バグ2の修正で追加(根拠はsepiaブロックのコメント参照)。実測コントラスト比8.09:1。 */
+  --titlebar-fg: var(--ink);
+  /* 実バグ3の修正: var(--accent)(#268BD2)とvar(--accent-soft)(#E3EFFA)の実測
+     コントラスト比は3.15:1でAA基準を割り込むため、var(--ink)へ補正する(実測11.14:1)。 */
+  --menu-hover-fg: var(--ink);
   --code-kw: #647300;
   --code-kw2: #647300;
   --code-var: #1D689E;
@@ -207,6 +226,11 @@ html[data-theme="dark"][data-dark-theme="nord"] {
   --code-bg: #20242D;
   --chrome-bg: #242932;
   --titlebar-bg: #242932;
+  /* 実バグ2の修正で追加(根拠はsepiaブロックのコメント参照)。実測コントラスト比12.67:1。 */
+  --titlebar-fg: var(--ink);
+  /* 実バグ3の修正。var(--accent)(#88C0D0)とvar(--accent-soft)(#3B4A52)の実測
+     コントラスト比は4.59:1でAA基準を満たすため、var(--accent)のまま使う。 */
+  --menu-hover-fg: var(--accent);
   --code-kw: #81A1C1;
   --code-kw2: #81A1C1;
   --code-var: #D8DEE9;
@@ -257,6 +281,12 @@ html[data-theme="dark"][data-dark-theme="dracula"] {
   --sidebar-bg: #21222C;
   --chrome-bg: #1B1C24;
   --titlebar-bg: #1B1C24;
+  /* 実バグ2の修正で追加(根拠はsepiaブロックのコメント参照)。実測コントラスト比15.91:1。 */
+  --titlebar-fg: var(--ink);
+  /* 実バグ3の修正: var(--accent)(#BD93F9)とvar(--accent-soft)(#3B3D52)の実測
+     コントラスト比は4.41:1でAA基準(4.5)にわずかに届かないため、var(--ink)へ
+     補正する(実測9.97:1)。 */
+  --menu-hover-fg: var(--ink);
   --code-kw: #FF79C6;
   --code-kw2: #FF79C6;
   --code-var: #F8F8F2;
@@ -307,6 +337,14 @@ html[data-theme="dark"][data-dark-theme="solarized-dark"] {
   --code-bg: #001F2A;
   --chrome-bg: #00252E;
   --titlebar-bg: #00252E;
+  /* 実バグ2の修正で追加(根拠はsepiaブロックのコメント参照)。実測コントラスト比6.02:1
+     (9テーマ中もっとも低いが、AA基準の4.5は満たす)。 */
+  --titlebar-fg: var(--ink);
+  /* 実バグ3の修正: var(--accent)(#268BD2)とvar(--accent-soft)(#0E4B5E)の実測
+     コントラスト比は2.61:1、var(--ink)(#93A1A1)でも3.59:1までしか出ずどちらも
+     AA基準(4.5)を割り込む(9テーマ中もっとも厳しいケース)。白(#FFFFFF)なら
+     9.60:1出るため、これで補正する。 */
+  --menu-hover-fg: #FFFFFF;
   --code-kw: #859900;
   --code-kw2: #859900;
   --code-var: #268BD2;
@@ -453,6 +491,11 @@ html[data-theme="dark"][data-dark-theme="night"] {
   --chrome-bg: #26282B;
   --titlebar-bg: #26282B;
   --ink: #b8bfc6;
+  /* 実バグ2の修正で追加。実機ログで実際に不具合が再現したのがこのnightテーマだった
+     (背景#26282Bは正しく送られたのに、文字色だけ一つ前のライトテーマの色#1F2428の
+     まま送られていた)。根拠・機序の詳細はstyle.css :rootブロックのコメント参照。
+     --inkをそのまま使う(実測コントラスト比7.96:1)。 */
+  --titlebar-fg: var(--ink);
   --ink-sub: #838A92;
   --ink-mute: #6A7280;
   --line: #555555;
@@ -460,6 +503,11 @@ html[data-theme="dark"][data-dark-theme="night"] {
   --accent: #6dc1e7;
   --accent-hover: #83CAEB;
   --accent-soft: #3C4851;
+  /* 実バグ3の修正。var(--accent)とvar(--accent-soft)の実測コントラスト比は4.66:1で
+     AA基準を満たすため、var(--accent)のまま使う(実機報告の「水色」はこの色自体では
+     なく、ネイティブメニュー側がテーマを無視して既定色を使っていたことが原因。
+     詳細はPane/NativeMenu.cs参照)。 */
+  --menu-hover-fg: var(--accent);
   --code-bg: #292C30;
   --code-kw: #6dc1e7;
   --code-kw2: #6dc1e7;

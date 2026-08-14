@@ -101,10 +101,27 @@ html[data-theme="dark"] {
      これに伴い、titlebar-colorの送信先(.verify-titlebar-paste.mjs)も
      「本文エリアの実描画色と一致」ではなく「--titlebar-bgの実効値(=タイトルバーの
      実描画色)と一致」を検証するよう更新している(カスタムCSSで本文の色を変えたときに
-     追従する、というテストの主旨自体は変えていない)。 */
+     追従する、というテストの主旨自体は変えていない)。
+     【実バグ2の修正で追加】--titlebar-fgは長らく未定義のままで、main.js
+     syncTitleBarColor()が本文エリアの実描画色(getComputedStyle(...).color)を
+     読んで代用していた。しかしbody要素にはbackground/colorのトランジション
+     (下記body{transition: background .2s, color .2s;})が掛かっており、
+     WebView2が非表示(Visible=false)の間はブラウザの描画パイプラインが
+     止まっているためこのトランジションが実時間どおり進行しない。結果、
+     初回のtitlebar-color送信でforegroundだけ「一つ前のテーマ(既定ライト)の
+     色のまま」止まって送られてしまう実機不具合があった(background側は
+     CSS変数の直接参照でトランジションの影響を受けないため正しく送れていた)。
+     --titlebar-fgをここで明示すれば、main.js側はCSS変数を直接読むだけで済み
+     (readTitleBarOverride()がgetPropertyValueで読む、こちらはトランジション非対象)、
+     この問題自体が起きなくなる。値は--ink(コントラスト比は実測13.8:1、
+     十分に読める)をそのまま使う。 */
   --chrome-bg: #EFF1F0;
   --sidebar-bg: var(--surface);
   --titlebar-bg: #EFF1F0;
+  --titlebar-fg: var(--ink);
+  /* 実バグ3の修正: メニューのホバー/選択時の文字色(背景はvar(--accent-soft))。
+     実測コントラスト比4.94:1でvar(--accent)のまま問題ない。 */
+  --menu-hover-fg: var(--accent);
 
   --font-heading: "Source Serif 4", "Noto Serif JP", serif;
   --font-body: "Inter", "Noto Sans JP", system-ui, sans-serif;
@@ -133,6 +150,11 @@ html[data-theme="dark"] {
   --chrome-bg: #0E1012;
   --sidebar-bg: var(--surface);
   --titlebar-bg: #0E1012;
+  /* 実バグ2の修正で追加(根拠は上の:rootブロックのコメント参照)。コントラスト比は
+     実測約15:1。 */
+  --titlebar-fg: var(--ink);
+  /* 実バグ3の修正。実測コントラスト比5.99:1でvar(--accent)のまま問題ない。 */
+  --menu-hover-fg: var(--accent);
 }
 
 /* ===== コードのハイライト配色(仕様書 第5章・第10.2節) =====
@@ -364,14 +386,20 @@ html[data-theme="dark"] #theme-moon { display: none; }
 #menubar { display: flex; align-items: center; height: 28px; padding: 0 6px; border-bottom: 1px solid var(--rule); flex: none; font-size: 12.5px; background: var(--chrome-bg); }
 #menubar.hidden { display: none; }
 .menu-top { border: none; background: transparent; color: var(--ink); font: inherit; padding: 3px 10px; border-radius: 6px; cursor: pointer; }
-.menu-top:hover, .menu-top.open { background: var(--accent-soft); color: var(--accent); }
+/* 実バグ3の修正: 文字色はvar(--accent)決め打ちではなくvar(--menu-hover-fg)を使う。
+   --menu-hover-fgは、--accentをそのまま--accent-soft背景の上の文字色に使うと
+   WCAG AA(4.5)を割り込むテーマ(sepia/solarized-light/solarized-dark/dracula、
+   実測はPane/NativeMenu.cs側のコメント・最終報告参照)のために、9テーマすべてで
+   個別に定義した(style.css既定2つ・themes.css7プリセット)。未定義のテーマが
+   将来増えてもvar(--accent)へ自動的にフォールバックする。 */
+.menu-top:hover, .menu-top.open { background: var(--accent-soft); color: var(--menu-hover-fg, var(--accent)); }
 /* max-height / overflow-y は、ウィンドウの高さが足りないときにメニューが画面外へ
    はみ出して下の方の項目に永久に届かなくなるのを防ぐためのもの。
    メニューバーの高さと下端の余白を差し引いた高さに収め、超える分はスクロールさせる
    (「表示」メニューは項目が20個あり、小さいウィンドウでは確実にはみ出す)。 */
 .menu-dropdown { position: fixed; z-index: 70; min-width: 240px; max-height: calc(100vh - 46px); overflow-y: auto; overscroll-behavior: contain; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow-pop); padding: 4px; display: flex; flex-direction: column; }
 .menu-item { display: flex; align-items: center; gap: 8px; border: none; background: transparent; color: var(--ink); font: inherit; font-size: 12.5px; text-align: left; padding: 6px 10px; border-radius: 6px; cursor: pointer; }
-.menu-item:hover:not(.disabled) { background: var(--accent-soft); color: var(--accent); }
+.menu-item:hover:not(.disabled) { background: var(--accent-soft); color: var(--menu-hover-fg, var(--accent)); }
 .menu-item.disabled { color: var(--ink-sub); opacity: .5; cursor: default; }
 .menu-item-check { width: 12px; flex: none; color: var(--accent); }
 .menu-item-label { flex: 1; white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }

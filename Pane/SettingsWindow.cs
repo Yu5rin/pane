@@ -309,9 +309,12 @@ internal sealed class SettingsWindow : Form
 
         AppSettings settings = SettingsService.Load();
         bool isDark = MainForm.ResolveIsDarkTheme(settings.Theme);
+        // 実バグ3の修正: MainForm側と同じくテーマプリセットIDも渡す(MainForm.ResolveThemeId参照)。
+        string themeId = MainForm.ResolveThemeId(settings, isDark);
         NativeMenu.Show(
             screenPoint,
             isDark,
+            themeId,
             items,
             onCommand: id => PostToWeb(new { type = "menu-command", id }),
             onClosed: () => PostToWeb(new { type = "menu-closed", menu = "__context__" }));

@@ -214,9 +214,14 @@ export function isAssignableShortcut(shortcutString) {
 // 経路から開いたかに関わらず同じメッセージ形で届く。同時に開けるポップアップは常に1つだけ
 // (NativeMenu.Show内のCloseCurrent()が前のポップアップを必ず閉じる)なので、最後に開いた側だけが
 // 応答を受け取れるよう、ここで「いま応答を受けるべき相手」を1つだけ覚えておく。
-let activeNativeOwner = null; // { handleMenuCommand(id), handleMenuClosed(menu) } | null
+let activeNativeOwner = null; // { handleMenuCommand(id), handleMenuClosed(menu), handleMenuHoverSwitch?(menu) } | null
 export function routeNativeMenuCommand(id) { activeNativeOwner?.handleMenuCommand(id); }
 export function routeNativeMenuClosed(menu) { activeNativeOwner?.handleMenuClosed(menu); }
+// handleMenuHoverSwitchは今のところメニューバー(initMenuBar)側しか持たない(右クリック
+// メニュー側では隣へのホバー切り替えという概念自体が無いため)。activeNativeOwnerが
+// 右クリックメニュー側を指している間にC#から届いても(通常は起きないが)落ちないよう、
+// メソッド自体の存在も一緒に確認する。
+export function routeNativeMenuHoverSwitch(menu) { activeNativeOwner?.handleMenuHoverSwitch?.(menu); }
 
 // ---- メニューバー(仕様書 第10.1節・第10.4節) ----
 // 既定は表示。Altキーで表示・非表示をトグルする(表示中はショートカット一覧としても機能する)。
@@ -240,9 +245,18 @@ export function initMenuBar(container, commands, ctx) {
   // 代わりにWinFormsのネイティブなポップアップ(Pane/NativeMenu.cs、ToolStripDropDownMenu)を
   // 使う。見出しがクリックされた時点の状態を評価してJSONにしC#へ送り、選ばれた項目の実行は
   // 既存のcommand.run()経路をそのまま使う(コマンドの実装はC#側に持たせない)。
-  // 開いている間に別の見出しへマウスを移動する「メニュー間の移動」には対応しない
-  // (ネイティブのポップアップが表示されている間、マウスはOS側のポップアップに捕捉され
-  // HTML側の見出しボタンのmouseenterはそもそも発火しない。仕様上ここまでで良いとされている)。
+  //
+  // 開いている間に別の見出しへマウスを移動すると、クリックしなくても隣のメニューへ切り替わる
+  // (Windows標準のメニューバーの挙動)。ただしネイティブのポップアップが表示されている間、
+  // マウスはOS側のポップアップに捕捉され、HTML側の見出しボタンのmouseenterはそもそも
+  // 発火しない(WebView2のウィンドウは、画面上のどこにカーソルがあってもマウスメッセージを
+  // 受け取れなくなる)。そのためC#側(Pane/NativeMenu.cs・MainForm.cs)がポップアップ自身の
+  // 受け取るマウス移動(キャプチャにより画面全体で発火する)を見て、下のheadersで渡す見出し
+  // ボタンの画面座標と突き合わせて判定し、"menu-hover-switch"で知らせてくる
+  // (受け口はhandleMenuHoverSwitch)。実際の切り替えはopenNativeMenuを呼び直すだけで、
+  // クリックしたときとまったく同じ経路(前のポップアップを閉じて新しいものを開く→前の
+  // ポップアップの遅れたmenu-closedはnativeOpenMenuNameとの突き合わせで無視される)に乗るため、
+  // 既存の「連打しても1回で消えない」対策をそのまま利用できる。
   const useNative = !!ctx.bridge;
   // id→実行関数の対応表。開くたびに作り直す(「最近使ったファイル」等の動的なsubmenuは
   // 開くたびに内容が変わり得るため)。submenu項目は元々idを持たないため、ここで
@@ -253,6 +267,10 @@ export function initMenuBar(container, commands, ctx) {
   // いま開いているネイティブメニューの名前("File"等)。C#から遅れて届く「前のメニューが
   // 閉じた」通知(menu-closed)と、いま開いているメニューを取り違えないために持つ。
   let nativeOpenMenuName = null;
+  // 見出し名→ボタン要素。ホバー切り替え(handleMenuHoverSwitch)で、C#から届いた見出し名から
+  // 実際のボタン要素を引くために使う。ボタン自体は下のforループで生成されるため、この時点では
+  // まだ空(参照は関数呼び出し時点で解決されるので問題ない)。
+  const menuButtons = new Map();
 
   function buildNativeItem(item) {
     const grayed = item.grayed?.(ctx) ?? false;
@@ -292,13 +310,32 @@ export function initMenuBar(container, commands, ctx) {
     const items = commands.filter((c) => c.menu === menuName && !c.contextOnly).map(buildNativeItem);
     nativeOpenBtn = btn;
     nativeOpenMenuName = menuName;
-    activeNativeOwner = { handleMenuCommand, handleMenuClosed }; // 応答は自分宛てとして受け取る
+    activeNativeOwner = { handleMenuCommand, handleMenuClosed, handleMenuHoverSwitch }; // 応答は自分宛てとして受け取る
     btn.classList.add("open");
     // WebView2内のCSSピクセル座標で送る。C#側(Pane/MainForm.HandleOpenMenuRequest)で
     // DeviceDpiとWebView2の画面上の位置(_webView.PointToScreen)を使って画面座標へ変換する。
     const rect = btn.getBoundingClientRect();
-    ctx.bridge.postMessage({ type: "open-menu", menu: menuName, x: rect.left, y: rect.bottom, items });
+    // ホバー切り替え用: 全見出しボタンの矩形も併せて送る(自分自身も含めてよい。C#側で
+    // 「いま開いている見出し自身」は除外して判定する)。開くたびに送り直すのは、ウィンドウの
+    // 移動・リサイズで画面座標が変わり得るため(C#側は毎回のopen-menuでしか座標を持たない)。
+    const headers = menus.map((name) => {
+      const b = menuButtons.get(name);
+      const r = b.getBoundingClientRect();
+      return { menu: name, left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+    });
+    ctx.bridge.postMessage({ type: "open-menu", menu: menuName, x: rect.left, y: rect.bottom, items, headers });
     watchOutsideClick();
+  }
+
+  // C#(Pane/MainForm.HandleMenuBarHoverMouseMove)から届く「隣の見出しへ切り替えてほしい」
+  // 通知。メニューが開いていない(クリックされていない)ときはホバーだけでは開かない、という
+  // 標準の挙動を守るため、nativeOpenMenuNameがnullなら何もしない(C#側もメニュー表示中しか
+  // マウス移動を監視していないので通常起きないが、念のための二重の防御)。
+  function handleMenuHoverSwitch(menuName) {
+    if (!nativeOpenMenuName || menuName === nativeOpenMenuName) return;
+    const btn = menuButtons.get(menuName);
+    if (!btn) return;
+    openNativeMenu(menuName, btn);
   }
 
   // ネイティブポップアップは別のウィンドウとして表示されるため、WebView2の中(=本文や
@@ -434,6 +471,7 @@ export function initMenuBar(container, commands, ctx) {
     btn.type = "button";
     btn.className = "menu-top";
     btn.textContent = MENU_LABELS[menuName] ?? menuName;
+    menuButtons.set(menuName, btn);
     if (useNative) {
       btn.addEventListener("click", () => openNativeMenu(menuName, btn));
     } else {
@@ -515,7 +553,7 @@ export function initMenuBar(container, commands, ctx) {
     closeAll();
   });
 
-  return { closeAll, handleMenuCommand, handleMenuClosed };
+  return { closeAll, handleMenuCommand, handleMenuClosed, handleMenuHoverSwitch };
 }
 
 // ---- コマンドパレット(Ctrl+Shift+P、仕様書 第10.1節) ----

@@ -4,7 +4,7 @@
 // 使えない場合(単体のブラウザで動作確認する場合)は File System Access API /
 // File API による仮実装にフォールバックする(Phase 1からの経路をそのまま維持)。
 import { createEditor, DEFAULT_FONT_SIZE } from "./editor.js";
-import { buildCommands, initMenuBar, initCommandPalette, initContextMenu, routeNativeMenuCommand, routeNativeMenuClosed, bindShortcuts, applyKeyBindings, showContextMenu } from "./commands.js";
+import { buildCommands, initMenuBar, initCommandPalette, initContextMenu, routeNativeMenuCommand, routeNativeMenuClosed, routeNativeMenuHoverSwitch, bindShortcuts, applyKeyBindings, showContextMenu } from "./commands.js";
 import { createSearchUI } from "./search-ui.js";
 import { createSidebar } from "./sidebar.js";
 import { createQuickOpen } from "./quick-open.js";
@@ -94,16 +94,27 @@ function markInitialDocumentApplied() {
 function trySignalInitialRenderReady() {
   if (initialRenderReadySent || !initialSettingsApplied || !initialDocumentApplied) return;
   initialRenderReadySent = true;
-  // この時点でDOMの変更(テーマ属性・本文の内容)は済んでいるが、実際に画面へペイントされた
-  // 保証はまだ無い。requestAnimationFrameを2回挟むことで、直前までのDOM変更が確実に
-  // 一度ブラウザの描画パイプラインを通ってから通知する(1回だけだと、環境によっては
-  // 直前のフレームの変更がまだ反映されていないことがあるため2回にしている)。
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      logToHost("log", "initial-render-ready送信(テーマ・メニューバー・ステータスバー・本文エリアの初期描画完了)");
-      bridge?.postMessage({ type: "initial-render-ready" });
-    });
-  });
+  // 【実バグ1の修正】以前はここでrequestAnimationFrameを2回挟んでから通知していた
+  // (「直前までのDOM変更が実際にペイントされてから通知する」ため)。しかしC#側
+  // (Pane/MainForm.cs)はこの通知を受け取るまでWebView2コントロール自体を非表示
+  // (Visible=false)にしたままにしている設計のため、非表示の間はブラウザの描画
+  // パイプラインが止まっており、requestAnimationFrameのコールバックが一切発火しない。
+  // 結果として通知が送れないまま3秒のフォールバックタイマー(WebViewRevealFallbackMs)が
+  // 先に発動して強制表示され、そこでようやくrAFが発火して通知が送られる——という
+  // 「見えるまで通知しない」のに「通知するまで見せない」という自己矛盾した無限待ちに
+  // なっており、白フラッシュ対策が実質機能していなかった(実機ログで2.5秒以上の
+  // 遅延を確認済み)。
+  //
+  // 「ペイント完了を待ってから通知する」という当初の意図は、この
+  // 非表示→通知→表示という順序そのものと両立しない。WebView2が非表示の間は
+  // そもそも何もペイントされないため、ペイント完了を待つこと自体が無意味であり、
+  // ここに来る時点でDOM変更(テーマ属性の付与・本文setValue等)は既に同期的に
+  // 完了している。表示後の実際の初回ペイントはC#側がVisible=trueにした直後に
+  // WebView2が行うため、JS側はrAFはおろかsetTimeoutの1tickすら待たず、条件が
+  // 揃った瞬間に即座に通知する(非表示中でも確実に送られることをコード上で保証する:
+  // requestAnimationFrame/setTimeoutを一切使わない同期呼び出しにした)。
+  logToHost("log", "initial-render-ready送信(テーマ・メニューバー・ステータスバー・本文エリアの初期描画完了)");
+  bridge?.postMessage({ type: "initial-render-ready" });
 }
 
 let currentHandle = null; // File System Access API(ブラウザ単体時のみ使用)
@@ -610,27 +621,76 @@ function readTitleBarOverride(varName) {
   if (!raw) return null;
   return rgbToHex(raw) ?? raw;
 }
+// 実バグ2の安全策: 背景・文字色のコントラスト比(WCAG方式)を計算する。タイトルバーが
+// 読めなくなるのは致命的なので、値がおかしいときに素通りさせない仕組みとして使う。
+function relativeLuminance(hex) {
+  const m = /^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(hex || "");
+  if (!m) return null;
+  const chan = (h) => {
+    const c = parseInt(h, 16) / 255;
+    return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * chan(m[1]) + 0.7152 * chan(m[2]) + 0.0722 * chan(m[3]);
+}
+function contrastRatio(hexA, hexB) {
+  const lA = relativeLuminance(hexA);
+  const lB = relativeLuminance(hexB);
+  if (lA === null || lB === null) return null;
+  const [lighter, darker] = lA > lB ? [lA, lB] : [lB, lA];
+  return (lighter + 0.05) / (darker + 0.05);
+}
+const TITLEBAR_MIN_CONTRAST = 4.5; // WCAG AA(通常テキスト)相当
 let titleBarSyncTimer = null;
 function syncTitleBarColor() {
   if (!bridge) return;
-  // 背景色と文字色にはCSSのtransition(style.css: transition: background .2s, color .2s)が
-  // 掛かっているため、テーマを切り替えた直後にgetComputedStyleすると「遷移中の中間色」が返る。
-  // そのまま送るとタイトルバーだけ半端な色で固定されてしまうので、遷移が終わってから読む。
-  // 待ち時間は決め打ちにせず実際のtransition-durationから求める
-  // (prefers-reduced-motion時は0sになるため待たない。CSS側を変えてもここは追従する)。
   clearTimeout(titleBarSyncTimer);
+  // 【実バグ1・2の教訓】WebView2が非表示(Visible=false)の間はブラウザの描画パイプラインが
+  // 止まっており、body要素のCSSトランジション(style.css: transition: background .2s,
+  // color .2s)も実時間どおりには進行しない。従来はここで「トランジション時間ぶん待って
+  // から読む」実装だったため、非表示中に読むと「遷移前(=一つ前のテーマ)の色のまま」の
+  // getComputedStyleを拾ってしまうことがあった(実機バグ2: nightテーマなのに
+  // foregroundがライト既定の#1F2428のまま送られた不具合)。
+  // document.hidden(=WebView2非表示)の間はどのみち誰にも見えていないため、遷移を
+  // 律儀に待つ意味が無い。bodyのtransitionを一時的に無効化し、強制リフローで
+  // スタイルを即時確定させてから読む(読み終えたら即座に元へ戻すため、後で可視化
+  // されたときの通常のテーマ切替アニメーションには影響しない)。
+  // 可視状態(通常の設定変更・テーマ切替ボタン)では、この間だけの見た目のフェードを
+  // 損なわないよう、従来どおり遷移完了を待ってから読む。
+  if (document.hidden) {
+    const prevTransition = document.body.style.transition;
+    document.body.style.transition = "none";
+    void document.body.offsetHeight; // 強制リフロー
+    sendTitleBarColors();
+    document.body.style.transition = prevTransition;
+    return;
+  }
   const durations = getComputedStyle(document.body).transitionDuration || "0s";
   const maxSeconds = durations.split(",").reduce((max, s) => Math.max(max, parseFloat(s) || 0), 0);
-  titleBarSyncTimer = setTimeout(() => {
-    // --titlebar-bg/--titlebar-fgが定義されていれば最優先で使う。未定義なら従来どおり
-    // 本文エリアの実描画色を送る(テーマ切替・プリセット・カスタムCSSのどの経路の
-    // 変更にも同じ仕組みで追従できるようにするため)。
-    const background = readTitleBarOverride("--titlebar-bg") ?? readPaintedColor([".cm-editor", "#cm-host", "body"], "backgroundColor");
-    const foreground = readTitleBarOverride("--titlebar-fg") ?? readPaintedColor([".cm-content", ".cm-editor", "body"], "color");
-    if (!background && !foreground) return;
-    console.log(`[titlebar] タイトルバーへ反映: background=${background}, foreground=${foreground}`);
-    bridge.postMessage({ type: "titlebar-color", background, foreground });
-  }, Math.round(maxSeconds * 1000) + 60);
+  titleBarSyncTimer = setTimeout(sendTitleBarColors, Math.round(maxSeconds * 1000) + 60);
+}
+function sendTitleBarColors() {
+  // --titlebar-bg/--titlebar-fgが定義されていれば最優先で使う(9テーマすべてに
+  // 実バグ2の修正で明示済み。CSS変数の直接参照なのでトランジションの影響を受けず、
+  // 非表示中でも常に最終値が読める)。未定義(カスタムCSSでの独自上書き等)の場合のみ、
+  // 従来どおり本文エリアの実描画色にフォールバックする。
+  let background = readTitleBarOverride("--titlebar-bg") ?? readPaintedColor([".cm-editor", "#cm-host", "body"], "backgroundColor");
+  let foreground = readTitleBarOverride("--titlebar-fg") ?? readPaintedColor([".cm-content", ".cm-editor", "body"], "color");
+  if (!background && !foreground) return;
+  // 安全策: コントラスト比が低すぎる(=文字が読めなくなる)組み合わせは、そのまま
+  // C#側へ送らず、白/黒のうちコントラストが高い方へ文字色を補正する。背景色自体は
+  // テーマの意図した色なので変えない。
+  if (background && foreground) {
+    const ratio = contrastRatio(background, foreground);
+    if (ratio !== null && ratio < TITLEBAR_MIN_CONTRAST) {
+      const bgLum = relativeLuminance(background);
+      const corrected = bgLum !== null && bgLum > 0.5 ? "#000000" : "#FFFFFF";
+      logToHost("error",
+        `titlebar-color: コントラスト比が低すぎるため文字色を補正(background=${background}, foreground=${foreground}, 比=${ratio.toFixed(2)} → ${corrected}へ補正)`);
+      foreground = corrected;
+    }
+  }
+  console.log(`[titlebar] タイトルバーへ反映: background=${background}, foreground=${foreground}`);
+  bridge.postMessage({ type: "titlebar-color", background, foreground });
 }
 
 function updateStatusMeta() {
@@ -2420,6 +2480,11 @@ async function handleHostMessage(msg) {
       // ネイティブメニューが選択なしで閉じられた。見出しのハイライト解除・外側クリック監視の
       // 解除を、開いていた側(メニューバー or 右クリックメニュー)だけに委ねる。
       routeNativeMenuClosed(msg.menu);
+      break;
+    case "menu-hover-switch":
+      // C#側(Pane/MainForm.HandleMenuBarHoverMouseMove)が、開いているメニューの隣の見出しに
+      // マウスが乗ったと判定した。実際の切り替え(commands.jsのhandleMenuHoverSwitch)へ委ねる。
+      routeNativeMenuHoverSwitch(msg.menu);
       break;
   }
 }
