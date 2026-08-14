@@ -17,6 +17,9 @@ internal sealed class SettingsForm : Form
     private readonly CheckBox _checkInlineMath;
     private readonly CheckBox _checkMathAutoNumber;
     private readonly CheckBox _checkCopyHtml;
+    /// <summary>Font自体はControl.Dispose()では解放されない(コンポーネントコレクション未登録の
+    /// フォントは持ち主が明示的にDisposeする必要がある)ため、自前で保持してDispose(bool)で破棄する。</summary>
+    private readonly Font _formFont;
 
     public bool RestoreSessionOnStartup => _radioRestoreSession.Checked;
     public bool FileAssociationEnabled => _checkFileAssociation.Checked;
@@ -38,7 +41,8 @@ internal sealed class SettingsForm : Form
         StartPosition = FormStartPosition.CenterParent;
         Width = 400;
         Height = 610;
-        Font = new Font("Yu Gothic UI", 9f);
+        _formFont = new Font("Yu Gothic UI", 9f);
+        Font = _formFont;
 
         var groupStartup = new GroupBox
         {
@@ -204,5 +208,16 @@ internal sealed class SettingsForm : Form
 
         AcceptButton = btnOk;
         CancelButton = btnCancel;
+    }
+
+    /// <summary>コンストラクタで自前生成した<see cref="_formFont"/>を、Formの通常の破棄処理に
+    /// あわせて解放する(不具合修正: 従来はFontを生成したまま誰もDisposeしていなかった)。</summary>
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _formFont.Dispose();
+        }
+        base.Dispose(disposing);
     }
 }

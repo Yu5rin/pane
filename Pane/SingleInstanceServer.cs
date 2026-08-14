@@ -58,9 +58,24 @@ internal sealed class SingleInstanceServer
                 // Stop() による正常終了
                 break;
             }
-            catch (IOException)
+            catch (IOException ex)
             {
                 // クライアント切断等。次の接続待ちへ戻る。
+                Logger.Write($"SingleInstanceServer: IOExceptionを無視して待受を継続する: {ex.Message}");
+            }
+            catch (Exception ex)
+            {
+                // 不具合修正: 従来はOperationCanceledException/IOException以外を一切
+                // 捕捉していなかったため、想定外の例外が1回でも起きるとRunLoopAsyncが
+                // 静かに終了し、以後は二重起動の検知が永久に止まる(ログにも残らない)という
+                // 不具合があった。ここで受け止めてログに残し、ループを継続する。
+                // ただしtokenが既にキャンセル済み(Stop()呼び出し後)であれば、正常な終了
+                // シーケンス中なのでこれ以上ループを続けず終了する。
+                Logger.WriteException("SingleInstanceServer: 想定外の例外", ex);
+                if (token.IsCancellationRequested)
+                {
+                    break;
+                }
             }
         }
     }

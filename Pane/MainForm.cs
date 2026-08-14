@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
+using static Pane.JsonMessageHelpers;
 
 namespace Pane;
 
@@ -198,8 +199,28 @@ internal sealed class MainForm : Form
         FormClosed += (_, _) =>
         {
             Logger.Write("Form.FormClosed");
+            // タイマーの停止漏れ対策(不具合修正)。従来は_autoSaveTimerのStopのみで、
+            // _externalChangeDebounceTimerはStop/Disposeともに行っていなかった。
+            // 閉じた直後にTickが走ると、破棄済みのFormに対してOnExternalChangeDebounceElapsedから
+            // MessageBox.Show(this, ...)を呼ぶ経路が残ってしまう。また、どちらのTimerも
+            // コンポーネントコレクションに登録していないためForm.Dispose()では解放されず、
+            // ここで明示的にDisposeしておく必要がある。
             _autoSaveTimer.Stop();
+            _autoSaveTimer.Dispose();
+            _externalChangeDebounceTimer.Stop();
+            _externalChangeDebounceTimer.Dispose();
             _watcher?.Dispose();
+            // フォルダ走査・グローバル検索は非同期のfire-and-forgetで、ウィンドウを閉じても
+            // キャンセルしなければ走り続け、完了後にPostToWeb/BeginInvokeで(既に閉じた)
+            // このウィンドウへ結果を返そうとしてしまう(不具合修正)。CTSはCancelだけでは
+            // 解放されない(コンポーネントコレクション同様、こちらも明示的なDisposeが要る)ため、
+            // ここでキャンセルしたうえで破棄する。
+            _folderScanCts?.Cancel();
+            _folderScanCts?.Dispose();
+            _folderScanCts = null;
+            _searchCts?.Cancel();
+            _searchCts?.Dispose();
+            _searchCts = null;
             // 自動保存のスナップショットを消す(仕様書 N-06)。
             // 従来は「明示保存が成功したとき」だけ消していたため、未保存のまま
             // 「保存しない」を選んで閉じた場合にスナップショットが残り、次回起動時に
@@ -405,14 +426,23 @@ internal sealed class MainForm : Form
 
     private void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
     {
-        using JsonDocument doc = JsonDocument.Parse(e.WebMessageAsJson);
-        JsonElement root = doc.RootElement;
-        string type = root.TryGetProperty("type", out JsonElement typeProp) ? typeProp.GetString() ?? "" : "";
-        // "dirty"は入力のたびに飛んでくるため、ログが埋もれないよう対象外にする。
-        if (type != "dirty") Logger.Write($"JSからのメッセージ受信: type={type}");
-
-        switch (type)
+        // JS側から届くメッセージは外部入力として扱う。個々のcase内は共有ヘルパー
+        // (JsonMessageHelpers)でValueKindを確認して安全に読み取っているが、それでも
+        // 想定していない経路(JSON自体が壊れている・ロジック側の不具合等)で例外が
+        // 漏れた場合に備え、メッセージ1件の処理全体を保険としてtry/catchで囲む。
+        // ここが無いと、1つの不正なメッセージでOnWebMessageReceivedの外(WebView2の
+        // イベントディスパッチ元)まで例外が伝播し、アプリ全体が落ちる。
+        string type = "(unknown)";
+        try
         {
+            using JsonDocument doc = JsonDocument.Parse(e.WebMessageAsJson);
+            JsonElement root = doc.RootElement;
+            TryGetString(root, "type", out type);
+            // "dirty"は入力のたびに飛んでくるため、ログが埋もれないよう対象外にする。
+            if (type != "dirty") Logger.Write($"JSからのメッセージ受信: type={type}");
+
+            switch (type)
+            {
             case "ready":
                 PostCapabilities();
                 PostWindowState();
@@ -430,9 +460,9 @@ internal sealed class MainForm : Form
                 HandleOpenRequest();
                 break;
             case "open-path":
-                if (root.TryGetProperty("path", out JsonElement openPathProp))
+                if (TryGetString(root, "path", out string openPath))
                 {
-                    _ = HandleOpenPathRequestAsync(openPathProp.GetString() ?? "");
+                    _ = HandleOpenPathRequestAsync(openPath);
                 }
                 break;
             case "save":
@@ -461,15 +491,15 @@ internal sealed class MainForm : Form
                 }
                 break;
             case "dirty":
-                if (root.TryGetProperty("value", out JsonElement dirtyProp))
+                if (TryGetBool(root, "value", out bool dirtyValue))
                 {
-                    SetDirty(dirtyProp.GetBoolean());
+                    SetDirty(dirtyValue);
                 }
                 break;
             case "text-response":
-                if (root.TryGetProperty("text", out JsonElement textProp))
+                if (TryGetString(root, "text", out string autoSaveText))
                 {
-                    WriteAutoSaveSnapshot(textProp.GetString() ?? "");
+                    WriteAutoSaveSnapshot(autoSaveText);
                 }
                 break;
             case "tabs-changed":
@@ -522,44 +552,41 @@ internal sealed class MainForm : Form
                 break;
             case "log":
                 // JS側の不具合調査ログ(main.jsのlogToHost)をC#側と同じログファイルへ集約する。
-                string level = root.TryGetProperty("level", out JsonElement levelProp) ? levelProp.GetString() ?? "log" : "log";
-                string logMessage = root.TryGetProperty("message", out JsonElement msgProp) ? msgProp.GetString() ?? "" : "";
+                string level = TryGetString(root, "level", out string levelValue) ? levelValue : "log";
+                TryGetString(root, "message", out string logMessage);
                 Logger.Write($"[JS:{level}] {logMessage}");
                 break;
             case "set-theme":
-                if (root.TryGetProperty("theme", out JsonElement themeProp))
+                if (TryGetString(root, "theme", out string themeValue))
                 {
-                    SaveTheme(themeProp.GetString() ?? "system");
+                    SaveTheme(themeValue);
                     ApplyTitleBarTheme(); // テーマ変更を即座にタイトルバーへも反映する
                 }
                 break;
             case "titlebar-color":
                 // 案A: JS側から実際の描画色(--paper/--inkの計算結果)が届いた場合の受け口。
                 // { type: "titlebar-color", background: "#RRGGBB", foreground: "#RRGGBB" }
-                string? titlebarBackground = root.TryGetProperty("background", out JsonElement tbBgProp) ? tbBgProp.GetString() : null;
-                string? titlebarForeground = root.TryGetProperty("foreground", out JsonElement tbFgProp) ? tbFgProp.GetString() : null;
+                string? titlebarBackground = TryGetNullableString(root, "background");
+                string? titlebarForeground = TryGetNullableString(root, "foreground");
                 Logger.Write($"titlebar-color受信: background={titlebarBackground ?? "(なし)"}, foreground={titlebarForeground ?? "(なし)"}");
                 if (!string.IsNullOrWhiteSpace(titlebarBackground)) _titlebarBackgroundOverride = titlebarBackground;
                 if (!string.IsNullOrWhiteSpace(titlebarForeground)) _titlebarForegroundOverride = titlebarForeground;
                 ApplyTitleBarTheme();
                 break;
             case "set-font-size":
-                if (root.TryGetProperty("size", out JsonElement sizeProp) && sizeProp.ValueKind == JsonValueKind.Number)
+                if (TryGetInt(root, "size", out int fontSize))
                 {
-                    SaveFontSize(sizeProp.GetInt32());
+                    SaveFontSize(fontSize);
                 }
                 break;
             case "open-folder":
                 HandleOpenFolderRequest();
                 break;
             case "load-folder":
-                if (root.TryGetProperty("path", out JsonElement loadFolderPathProp))
+                string? folderPath = TryGetNullableString(root, "path");
+                if (!string.IsNullOrEmpty(folderPath))
                 {
-                    string? folderPath = loadFolderPathProp.GetString();
-                    if (!string.IsNullOrEmpty(folderPath))
-                    {
-                        _ = LoadFolderAsync(folderPath);
-                    }
+                    _ = LoadFolderAsync(folderPath);
                 }
                 break;
             case "global-search":
@@ -637,24 +664,25 @@ internal sealed class MainForm : Form
             case "open-in-default-app":
                 // 右クリックメニュー「画像を開く」(仕様書 2.4)。OSの既定アプリで開くだけで、
                 // 現在の編集内容には触れない(open-pathとは異なりウィンドウの中身は置き換えない)。
-                if (root.TryGetProperty("path", out JsonElement openDefaultPathProp))
+                if (TryGetString(root, "path", out string openDefaultPath))
                 {
-                    FolderService.OpenInDefaultApp(openDefaultPathProp.GetString() ?? "");
+                    FolderService.OpenInDefaultApp(openDefaultPath);
                 }
                 break;
             case "reveal-in-explorer":
                 // サイドバーの右クリックメニュー「エクスプローラーで表示」(仕様書 4.2・4.3)。
-                if (root.TryGetProperty("path", out JsonElement revealPathProp))
+                if (TryGetString(root, "path", out string revealPath))
                 {
-                    FolderService.RevealInExplorer(revealPathProp.GetString() ?? "");
+                    FolderService.RevealInExplorer(revealPath);
                 }
                 break;
             case "open-path-new-window":
                 // サイドバーの右クリックメニュー「新しいウィンドウで開く」(仕様書 4.2)。
                 // File > 開く(HandleOpenRequest)と同じ経路(_requestNewWindow)を使う。
-                if (root.TryGetProperty("path", out JsonElement newWinPathProp))
+                // pathプロパティさえ存在すれば(型が違ってもnullとして)開く、という従来の挙動を保つ。
+                if (root.TryGetProperty("path", out _))
                 {
-                    _requestNewWindow?.Invoke(newWinPathProp.GetString());
+                    _requestNewWindow?.Invoke(TryGetNullableString(root, "path"));
                 }
                 break;
             case "delete-path":
@@ -666,6 +694,14 @@ internal sealed class MainForm : Form
             case "create-file-in-folder":
                 HandleCreateFileInFolderRequest(root);
                 break;
+            }
+        }
+        catch (Exception ex)
+        {
+            // 1つの不正なメッセージ(壊れたJSON・想定外の型・処理中の予期しない例外)で
+            // アプリ全体が落ちないようにする最終防波堤。どのメッセージ種別(type)を処理していて
+            // 何が起きたかをログへ残す(typeの取得自体に失敗していれば"(unknown)"のまま)。
+            Logger.WriteException($"OnWebMessageReceivedで未処理の例外が発生した(type={type})", ex);
         }
     }
 
@@ -685,9 +721,9 @@ internal sealed class MainForm : Form
     /// </summary>
     private void HandleOpenMenuRequest(JsonElement root)
     {
-        string menuName = root.TryGetProperty("menu", out JsonElement menuProp) ? menuProp.GetString() ?? "" : "";
-        double cssX = root.TryGetProperty("x", out JsonElement xProp) && xProp.ValueKind == JsonValueKind.Number ? xProp.GetDouble() : 0;
-        double cssY = root.TryGetProperty("y", out JsonElement yProp) && yProp.ValueKind == JsonValueKind.Number ? yProp.GetDouble() : 0;
+        TryGetString(root, "menu", out string menuName);
+        TryGetDouble(root, "x", out double cssX);
+        TryGetDouble(root, "y", out double cssY);
         List<NativeMenu.MenuItemData> items = root.TryGetProperty("items", out JsonElement itemsProp) && itemsProp.ValueKind == JsonValueKind.Array
             ? ParseMenuItems(itemsProp)
             : new List<NativeMenu.MenuItemData>();
@@ -751,13 +787,13 @@ internal sealed class MainForm : Form
         var list = new List<NativeMenu.MenuItemData>();
         foreach (JsonElement el in arrayElement.EnumerateArray())
         {
-            string? id = el.TryGetProperty("id", out JsonElement idProp) && idProp.ValueKind == JsonValueKind.String ? idProp.GetString() : null;
-            string label = el.TryGetProperty("label", out JsonElement labelProp) ? labelProp.GetString() ?? "" : "";
-            string shortcut = el.TryGetProperty("shortcut", out JsonElement scProp) ? scProp.GetString() ?? "" : "";
+            string? id = TryGetNullableString(el, "id");
+            TryGetString(el, "label", out string label);
+            TryGetString(el, "shortcut", out string shortcut);
             bool enabled = !el.TryGetProperty("enabled", out JsonElement enProp) || enProp.ValueKind != JsonValueKind.False;
             bool isChecked = el.TryGetProperty("checked", out JsonElement chProp) && chProp.ValueKind == JsonValueKind.True;
             bool separatorAfter = el.TryGetProperty("separatorAfter", out JsonElement sepProp) && sepProp.ValueKind == JsonValueKind.True;
-            string note = el.TryGetProperty("note", out JsonElement noteProp) ? noteProp.GetString() ?? "" : "";
+            TryGetString(el, "note", out string note);
             List<NativeMenu.MenuItemData>? submenu = el.TryGetProperty("submenu", out JsonElement subProp) && subProp.ValueKind == JsonValueKind.Array
                 ? ParseMenuItems(subProp)
                 : null;
@@ -773,7 +809,7 @@ internal sealed class MainForm : Form
     /// <summary>"delete-path": ファイル/フォルダをごみ箱へ送る。</summary>
     private void HandleDeletePathRequest(JsonElement root)
     {
-        string path = root.TryGetProperty("path", out JsonElement p) ? p.GetString() ?? "" : "";
+        TryGetString(root, "path", out string path);
         if (path.Length == 0) return;
         if (!FolderService.DeleteToRecycleBin(path, out string? error))
         {
@@ -785,8 +821,8 @@ internal sealed class MainForm : Form
     /// <summary>"rename-path": 同じ親フォルダ内でファイル/フォルダの名前を変更する。</summary>
     private void HandleRenamePathRequest(JsonElement root)
     {
-        string path = root.TryGetProperty("path", out JsonElement p) ? p.GetString() ?? "" : "";
-        string newName = root.TryGetProperty("newName", out JsonElement n) ? n.GetString() ?? "" : "";
+        TryGetString(root, "path", out string path);
+        TryGetString(root, "newName", out string newName);
         if (path.Length == 0 || newName.Length == 0) return;
         if (!FolderService.RenamePath(path, newName, out string? error))
         {
@@ -798,8 +834,8 @@ internal sealed class MainForm : Form
     /// <summary>"create-file-in-folder": 指定フォルダ直下に空の新規ファイルを作る。</summary>
     private void HandleCreateFileInFolderRequest(JsonElement root)
     {
-        string dirPath = root.TryGetProperty("dirPath", out JsonElement d) ? d.GetString() ?? "" : "";
-        string name = root.TryGetProperty("name", out JsonElement n) ? n.GetString() ?? "" : "";
+        TryGetString(root, "dirPath", out string dirPath);
+        TryGetString(root, "name", out string name);
         if (dirPath.Length == 0 || name.Length == 0) return;
         if (!FolderService.CreateFile(dirPath, name, out string? error))
         {
@@ -891,8 +927,8 @@ internal sealed class MainForm : Form
 
     private void HandleSaveRequest(JsonElement message)
     {
-        string text = message.TryGetProperty("text", out JsonElement textProp) ? textProp.GetString() ?? "" : "";
-        bool saveAs = message.TryGetProperty("saveAs", out JsonElement saveAsProp) && saveAsProp.GetBoolean();
+        TryGetString(message, "text", out string text);
+        TryGetBool(message, "saveAs", out bool saveAs);
 
         if (_isReadOnly && !saveAs)
         {
@@ -1118,9 +1154,9 @@ internal sealed class MainForm : Form
         {
             foreach (JsonElement t in tabsProp.EnumerateArray())
             {
-                string guid = t.TryGetProperty("guid", out JsonElement gProp) ? gProp.GetString() ?? "" : "";
+                TryGetString(t, "guid", out string guid);
                 string? tPath = t.TryGetProperty("path", out JsonElement pProp) && pProp.ValueKind == JsonValueKind.String ? pProp.GetString() : null;
-                bool dirty = t.TryGetProperty("dirty", out JsonElement dProp) && dProp.GetBoolean();
+                TryGetBool(t, "dirty", out bool dirty);
                 tabInfos.Add(new TabInfo(guid, tPath, dirty));
 
                 if (activeGuid is not null && guid == activeGuid)
@@ -1128,7 +1164,7 @@ internal sealed class MainForm : Form
                     foundActive = true;
                     activePath = tPath;
                     activeDirty = dirty;
-                    activeReadOnly = t.TryGetProperty("readOnly", out JsonElement rProp) && rProp.GetBoolean();
+                    TryGetBool(t, "readOnly", out activeReadOnly);
                     if (t.TryGetProperty("encoding", out JsonElement eProp) && eProp.ValueKind == JsonValueKind.String)
                     {
                         activeEncoding = TextFileService.ParseEncodingLabel(eProp.GetString() ?? "");
@@ -1172,17 +1208,17 @@ internal sealed class MainForm : Form
 
         foreach (JsonElement t in tabsProp.EnumerateArray())
         {
-            string? guidStr = t.TryGetProperty("guid", out JsonElement gProp) ? gProp.GetString() : null;
+            string? guidStr = TryGetNullableString(t, "guid");
             if (guidStr is null || !Guid.TryParse(guidStr, out Guid tabId)) continue;
 
-            bool dirty = t.TryGetProperty("dirty", out JsonElement dProp) && dProp.GetBoolean();
+            TryGetBool(t, "dirty", out bool dirty);
             if (!dirty)
             {
                 AutoSaveService.DeleteSnapshot(tabId);
                 continue;
             }
 
-            string text = t.TryGetProperty("text", out JsonElement textProp) ? textProp.GetString() ?? "" : "";
+            TryGetString(t, "text", out string text);
             string? path = t.TryGetProperty("path", out JsonElement pProp) && pProp.ValueKind == JsonValueKind.String ? pProp.GetString() : null;
             FileEncodingKind encoding = t.TryGetProperty("encoding", out JsonElement eProp) && eProp.ValueKind == JsonValueKind.String
                 ? TextFileService.ParseEncodingLabel(eProp.GetString() ?? "")
@@ -1244,9 +1280,14 @@ internal sealed class MainForm : Form
     private async Task LoadFolderAsync(string path)
     {
         Logger.Write($"LoadFolderAsync開始: {path}");
-        _folderScanCts?.Cancel();
+        // 走査中に別のフォルダ読み込みが始まった場合、前のCTSはCancelするだけでなく
+        // ここでDisposeまで行う(不具合修正: 従来はCancelのみで、置き換えられた前のCTSが
+        // 誰にもDisposeされないまま残っていた)。
+        CancellationTokenSource? previousFolderScanCts = _folderScanCts;
+        previousFolderScanCts?.Cancel();
         var cts = new CancellationTokenSource();
         _folderScanCts = cts;
+        previousFolderScanCts?.Dispose();
         try
         {
             // 隠しファイル表示・除外パターン(仕様書「詳細」節 showHiddenFilesInTree/fileTreePatterns)は
@@ -1285,7 +1326,14 @@ internal sealed class MainForm : Form
         }
         finally
         {
-            if (ReferenceEquals(_folderScanCts, cts)) _folderScanCts = null;
+            // ここで自分が最新のCTSのままであれば、後続の走査にもFormClosedにも置き換えられて
+            // いないということなので、役目を終えたCTSとして自分でDisposeする
+            // (置き換えられていた場合は、置き換えた側またはFormClosedが既にDispose済み)。
+            if (ReferenceEquals(_folderScanCts, cts))
+            {
+                _folderScanCts = null;
+                cts.Dispose();
+            }
         }
     }
 
@@ -1298,28 +1346,37 @@ internal sealed class MainForm : Form
     /// </summary>
     private void HandleGlobalSearchRequest(JsonElement message)
     {
-        string queryText = message.TryGetProperty("query", out JsonElement queryProp) ? queryProp.GetString() ?? "" : "";
+        TryGetString(message, "query", out string queryText);
         bool caseSensitive = message.TryGetProperty("caseSensitive", out JsonElement csProp) && csProp.ValueKind == JsonValueKind.True;
         bool regexp = message.TryGetProperty("regexp", out JsonElement reProp) && reProp.ValueKind == JsonValueKind.True;
         bool wholeWord = message.TryGetProperty("wholeWord", out JsonElement wwProp) && wwProp.ValueKind == JsonValueKind.True;
 
-        _searchCts?.Cancel();
+        // 新しい検索が始まったら前の検索は必ずキャンセルする。CancelだけでDisposeしないと
+        // 置き換えられた前のCTSが誰にもDisposeされないまま残ってしまう(不具合修正)ため、
+        // このメソッドを抜けるすべての経路でDisposeする。
+        CancellationTokenSource? previousSearchCts = _searchCts;
+        previousSearchCts?.Cancel();
 
         if (_loadedFolderRootPath is null)
         {
             Logger.Write("global-search: フォルダ未読込のため検索できない");
+            previousSearchCts?.Dispose();
+            _searchCts = null;
             PostToWeb(new { type = "search-done", error = "フォルダが読み込まれていません" });
             return;
         }
 
         if (string.IsNullOrEmpty(queryText))
         {
+            previousSearchCts?.Dispose();
+            _searchCts = null;
             PostToWeb(new { type = "search-done", total = 0, truncated = false });
             return;
         }
 
         var cts = new CancellationTokenSource();
         _searchCts = cts;
+        previousSearchCts?.Dispose();
         string rootPath = _loadedFolderRootPath;
         var query = new SearchQuery(queryText, caseSensitive, regexp, wholeWord);
         Logger.Write($"global-search開始: root={rootPath}, text=\"{queryText}\", caseSensitive={caseSensitive}, regexp={regexp}, wholeWord={wholeWord}");
@@ -1361,7 +1418,14 @@ internal sealed class MainForm : Form
         }
         finally
         {
-            if (ReferenceEquals(_searchCts, cts)) _searchCts = null;
+            // ここで自分が最新のCTSのままであれば、後続の検索にもFormClosedにも置き換えられて
+            // いないということなので、役目を終えたCTSとして自分でDisposeする
+            // (置き換えられていた場合は、置き換えた側またはFormClosedが既にDispose済み)。
+            if (ReferenceEquals(_searchCts, cts))
+            {
+                _searchCts = null;
+                cts.Dispose();
+            }
         }
 
         // SearchAsyncはヒット総数を戻り値では返さない(仕様どおりTask)ため、
@@ -1378,6 +1442,16 @@ internal sealed class MainForm : Form
     /// </summary>
     private Task PostSearchResultsToUiThreadAsync(IReadOnlyList<SearchHit> hits)
     {
+        // ワーカースレッドからの呼び出しなので、ウィンドウを閉じた直後に呼ばれる可能性がある。
+        // IsDisposedを見ずにBeginInvokeすると、破棄済みのコントロールに対する呼び出しで
+        // 例外になりうるため、先に確認してから触る(不具合修正)。
+        // それでも「確認した直後に閉じられる」レースは原理的に残るため、PostToWeb側でも
+        // 二重に防御している。
+        if (IsDisposed || !IsHandleCreated)
+        {
+            Logger.Write("global-search: ウィンドウが破棄済みのためバッチ送信をスキップ");
+            return Task.CompletedTask;
+        }
         Logger.Write($"global-search: バッチ送信 件数={hits.Count}");
         BeginInvoke(new MethodInvoker(() =>
         {
@@ -1410,8 +1484,8 @@ internal sealed class MainForm : Form
     /// </summary>
     private void HandleOpenDroppedFile(JsonElement message)
     {
-        string name = message.TryGetProperty("name", out JsonElement nameProp) ? nameProp.GetString() ?? "無題" : "無題";
-        string dataBase64 = message.TryGetProperty("dataBase64", out JsonElement dataProp) ? dataProp.GetString() ?? "" : "";
+        string name = TryGetString(message, "name", out string droppedName) ? droppedName : "無題";
+        TryGetString(message, "dataBase64", out string dataBase64);
         bool newWindow = message.TryGetProperty("newWindow", out JsonElement nwProp) && nwProp.ValueKind == JsonValueKind.True;
         Logger.Write($"HandleOpenDroppedFile: name={name}, newWindow={newWindow}");
         try
@@ -1533,7 +1607,11 @@ internal sealed class MainForm : Form
 
     private void PostToWeb(object message)
     {
-        if (_webView.CoreWebView2 is null) return;
+        // フォルダ走査・グローバル検索等の非同期処理は、ウィンドウを閉じた後に完了して
+        // ここへ結果を送ってくることがある。IsDisposedを見ずにCoreWebView2だけ確認していると、
+        // 破棄済みのWebView2/Formに対して操作してしまう可能性があるため、まずIsDisposedを確認する
+        // (不具合修正: 従来はCoreWebView2 is nullのチェックのみだった)。
+        if (IsDisposed || _webView.IsDisposed || _webView.CoreWebView2 is null) return;
         string json = JsonSerializer.Serialize(message, JsonOptions);
         _webView.CoreWebView2.PostWebMessageAsJson(json);
     }
@@ -1685,6 +1763,12 @@ internal sealed class MainForm : Form
     private void OnFileChangedExternally(object sender, FileSystemEventArgs e)
     {
         if (_suppressWatcher) return;
+        // FileSystemWatcherのイベントはワーカースレッド発火であり、Formを閉じた直後
+        // (_watcher.Dispose()が呼ばれた直後)に飛んでくることがある。IsDisposedを見ずに
+        // BeginInvokeすると、破棄済みのコントロールに対する呼び出しで例外になりうるため、
+        // 先に確認してから触る(不具合修正。それでも確認直後に閉じられるレースは残るため、
+        // 呼び出し先のOnExternalChangeDebounceElapsed側でも安全に倒す)。
+        if (IsDisposed || !IsHandleCreated) return;
 
         // 保存操作1回でも複数のファイルシステムイベントが飛んでくることがあるため、
         // UIスレッドで短時間デバウンスしてからまとめて1回だけ確認する。
@@ -1698,6 +1782,7 @@ internal sealed class MainForm : Form
 
     private void OnExternalChangeDebounceElapsed(object? sender, EventArgs e)
     {
+        if (IsDisposed) return; // Form破棄後にTickが走った場合の保険(FormClosedで基本は止めているが念のため)
         _externalChangeDebounceTimer.Stop();
         if (!_externalChangePending || _currentPath is null) return;
         _externalChangePending = false;
@@ -2127,8 +2212,8 @@ internal sealed class MainForm : Form
     // 必ず"export-done"を返し、JS側の表示を元に戻せるようにする。 ----
     private async Task HandleExportRequestAsync(JsonElement message)
     {
-        string format = message.TryGetProperty("format", out JsonElement fmtProp) ? fmtProp.GetString() ?? "" : "";
-        string text = message.TryGetProperty("text", out JsonElement textProp) ? textProp.GetString() ?? "" : "";
+        TryGetString(message, "format", out string format);
+        TryGetString(message, "text", out string text);
         JsonElement pageOptions = message.TryGetProperty("pageOptions", out JsonElement poProp) && poProp.ValueKind == JsonValueKind.Object
             ? poProp
             : default;
@@ -2438,8 +2523,21 @@ internal sealed class MainForm : Form
         {
             // ドラッグ&ドロップ・クリップボード貼り付け(src/main.jsのinsertImageFile経由)。
             // WebView2の標準DOM File APIでは実パスが取れないため、常にバイト列で届く。
-            bytes = Convert.FromBase64String(dataProp.GetString() ?? "");
-            if (message.TryGetProperty("name", out JsonElement nameProp) && nameProp.GetString() is string n && n.Length > 0)
+            // dataBase64はJS側からの外部入力であり、壊れたBase64だとFormatExceptionが飛ぶ。
+            // 従来はこの呼び出しが下のtryブロックの外にあり、例外がOnWebMessageReceivedの
+            // 外まで伝播してアプリ全体が落ちる不具合があったため、ここで確実に受け止める。
+            try
+            {
+                bytes = Convert.FromBase64String(dataProp.GetString() ?? "");
+            }
+            catch (FormatException ex)
+            {
+                Logger.WriteException("画像挿入: dataBase64が不正なBase64だった", ex);
+                PostToWeb(new { type = "insert-image-error", error = "画像データを読み取れませんでした。" });
+                MessageBox.Show(this, "画像データを読み取れませんでした。", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            if (TryGetString(message, "name", out string n) && n.Length > 0)
             {
                 suggestedName = n;
             }

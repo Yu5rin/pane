@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Reflection;
 using System.Text.Json;
 using Microsoft.Web.WebView2.Core;
+using static Pane.JsonMessageHelpers;
 
 namespace Pane;
 
@@ -634,8 +635,9 @@ internal static class SettingsBridge
     /// </summary>
     public static void HandleBrowsePathRequest(JsonElement root, Form owner, Action<object> postToWeb)
     {
-        string field = root.TryGetProperty("field", out JsonElement fieldProp) ? fieldProp.GetString() ?? "" : "";
-        string kind = root.TryGetProperty("kind", out JsonElement kindProp) ? kindProp.GetString() ?? "" : "";
+        // field/kindの型が違っていても(想定外の入力)例外を投げず既定値""へ倒す(JsonMessageHelpers参照)。
+        TryGetString(root, "field", out string field);
+        TryGetString(root, "kind", out string kind);
         if (field.Length == 0)
         {
             Logger.Write("browse-path受信: fieldが無いため無視");
@@ -671,6 +673,10 @@ internal static class SettingsBridge
         postToWeb(new { type = "browse-path-result", field, path = selectedPath });
     }
 
+    // ---- save-settings用のJSON読み取りヘルパーは Pane/JsonMessageHelpers.cs へ移した ----
+    // (MainForm.cs側のOnWebMessageReceivedでも同種のValueKind未確認の不具合があったため、
+    // 両方から使える共有ヘルパーへ切り出した。呼び出し方はusing staticにより従来と同じ)。
+
     private static bool? _pandocAvailableCache;
 
     /// <summary>Pandocの導入有無を検出する(Word/EPUBエクスポートに必要)。プロセス起動1回のみでキャッシュする。</summary>
@@ -695,66 +701,5 @@ internal static class SettingsBridge
         }
         _pandocAvailableCache = available;
         return available;
-    }
-
-    // ---- save-settings用のJSON読み取りヘルパー ----
-
-    private static bool TryGetString(JsonElement obj, string name, out string value)
-    {
-        if (obj.TryGetProperty(name, out JsonElement prop) && prop.ValueKind == JsonValueKind.String)
-        {
-            value = prop.GetString() ?? "";
-            return true;
-        }
-        value = "";
-        return false;
-    }
-
-    private static bool TryGetBool(JsonElement obj, string name, out bool value)
-    {
-        if (obj.TryGetProperty(name, out JsonElement prop) &&
-            (prop.ValueKind == JsonValueKind.True || prop.ValueKind == JsonValueKind.False))
-        {
-            value = prop.GetBoolean();
-            return true;
-        }
-        value = false;
-        return false;
-    }
-
-    private static bool TryGetInt(JsonElement obj, string name, out int value)
-    {
-        if (obj.TryGetProperty(name, out JsonElement prop) && prop.ValueKind == JsonValueKind.Number &&
-            prop.TryGetInt32(out int parsed))
-        {
-            value = parsed;
-            return true;
-        }
-        value = 0;
-        return false;
-    }
-
-    private static bool TryGetDouble(JsonElement obj, string name, out double value)
-    {
-        if (obj.TryGetProperty(name, out JsonElement prop) && prop.ValueKind == JsonValueKind.Number &&
-            prop.TryGetDouble(out double parsed))
-        {
-            value = parsed;
-            return true;
-        }
-        value = 0;
-        return false;
-    }
-
-    /// <summary>文字列の配列プロパティを読み取る。プロパティが無い・配列でない場合はnullを返す
-    /// (「送られてこなければ既存の値を変更しない」という既存の挙動に合わせるため)。</summary>
-    private static List<string>? TryGetStringList(JsonElement obj, string name)
-    {
-        if (!obj.TryGetProperty(name, out JsonElement prop) || prop.ValueKind != JsonValueKind.Array) return null;
-        return prop.EnumerateArray()
-            .Where(e => e.ValueKind == JsonValueKind.String)
-            .Select(e => e.GetString() ?? "")
-            .Where(e => e.Length > 0)
-            .ToList();
     }
 }

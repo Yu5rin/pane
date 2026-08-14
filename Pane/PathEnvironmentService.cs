@@ -110,12 +110,31 @@ internal static class PathEnvironmentService
         return raw.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
     }
 
-    /// <summary>REG_EXPAND_SZとして書き戻す。既存のユーザーPATHは%変数%を含みうるため、
-    /// 種別をREG_SZへ変えてしまうと展開されなくなる不具合を起こす。</summary>
+    /// <summary>
+    /// 既存のPATH値の種別(REG_SZ / REG_EXPAND_SZ)を読み取り、その種別を維持したまま書き戻す
+    /// (不具合修正: 従来は既存の種別を確認せず、常にREG_EXPAND_SZへ変えて書き戻していた。
+    /// 既存のユーザーPATHがREG_SZだった場合に、無断で種別を変えてしまう副作用があった)。
+    /// 値がまだ存在しない(初回登録)場合は、Windowsの一般的な既定であるREG_EXPAND_SZを使う
+    /// (%変数%を含みうるPATHの一般的な種別であり、REG_SZだと展開されなくなる不具合を起こすため)。
+    /// </summary>
     private static void WritePathEntries(IReadOnlyList<string> entries)
     {
         using RegistryKey key = Registry.CurrentUser.CreateSubKey(EnvironmentKeyPath);
-        key.SetValue(ValueName, string.Join(';', entries), RegistryValueKind.ExpandString);
+        RegistryValueKind kind = RegistryValueKind.ExpandString;
+        try
+        {
+            RegistryValueKind existing = key.GetValueKind(ValueName);
+            if (existing == RegistryValueKind.String || existing == RegistryValueKind.ExpandString)
+            {
+                kind = existing;
+            }
+        }
+        catch (IOException)
+        {
+            // 値がまだ存在しない場合(GetValueKindは値が無いとIOExceptionを投げる)。
+            // 上で初期化済みのExpandStringのまま進む。
+        }
+        key.SetValue(ValueName, string.Join(';', entries), kind);
     }
 
     /// <summary>
