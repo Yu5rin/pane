@@ -38,10 +38,33 @@ function ensureInitialized(mermaid, dark) {
 // 単一のカウンタを持つ)。
 let renderSeq = 0;
 
+// mermaid.render()の呼び出しを直列化するためのチェーン。
+// mermaid本体は計測のために一時的なDOM要素をdocument.body直下へ挿入する設計のため、
+// 複数のrender()を並行に走らせると互いの一時要素を壊し合ってしまう(可視範囲に複数の
+// Mermaidブロックが同時に入ると、最初の1つ以外が「Cannot read properties of null」等で
+// 描画に失敗する)。上の「増えた分を掃除する」後始末も、並行実行だと他の呼び出しの
+// 一時要素まで巻き込んで消してしまうため、掃除も含めて呼び出し全体を1本のPromiseチェーンで
+// 順番待ちさせる(前の描画が完全に終わってから次を始める)。1件あたりの描画自体は速いため、
+// 直列化しても体感の遅さにはならない。
+let renderChain = Promise.resolve();
+
 // Mermaid記法のコードをSVG(文字列)に変換する。失敗時はエラーメッセージ付きで返す
 // (呼び出し側=MermaidWidgetでエラー表示にフォールバックする。math.jsのrenderMathToHtmlと
 // 同じ戻り値の流儀: { svg, error, message })。
-export async function renderMermaid(code, { dark = false } = {}) {
+export function renderMermaid(code, { dark = false } = {}) {
+  const run = renderChain.then(() => renderOne(code, dark));
+  // チェーン自体は今回の呼び出しが失敗しても切れさせない(1件の失敗で後続の描画待ちが
+  // 巻き込まれて全滅しないよう、runの成否に関わらず必ず次の呼び出しへ繋ぐ)。
+  renderChain = run.then(
+    () => {},
+    () => {}
+  );
+  return run;
+}
+
+// 直列化された区間の中身。前の呼び出しが終わってから呼ばれることが保証されているため、
+// body直下の掃除も他の呼び出しの一時要素を巻き込む心配がない。
+async function renderOne(code, dark) {
   // mermaidはパース失敗時などに、計測用の一時的なDOM要素をdocument.body直下へ挿入したまま
   // 残してしまうことがある。呼び出し前後のbody直下の子要素を比較し、増えた分は必ず取り除く。
   const before = new Set(document.body.children);
