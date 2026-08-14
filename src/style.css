@@ -842,6 +842,28 @@ html[data-theme="dark"] .cm-table th { background: rgba(61,193,181,.14); }
 .extlink-btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--surface); }
 }
 
+/* ===== 共通ダイアログ(src/dialog.js: paneConfirm / paneAlert / paneInput) =====
+   ブラウザ標準の確認・入力・警告ダイアログの置き換え。見た目は上の.extlink-*と揃える
+   (--surface背景・--line枠・--shadow-pop)。設定ウィンドウ(settings-window.html)からも
+   読み込まれるため、.settings-modal-overlay(z-index:80)より上に出す。 */
+.pane-dialog-overlay { position: fixed; inset: 0; z-index: 95; background: rgba(10,14,16,.4); display: flex; justify-content: center; align-items: center; padding: min(24px, 3vh) 16px; }
+.pane-dialog-box { width: min(420px, 100%); max-height: 100%; overflow-y: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow-pop); padding: 18px 20px 14px; }
+.pane-dialog-title { font-size: 13.5px; font-weight: 700; color: var(--ink); margin-bottom: 8px; }
+.pane-dialog-message { font-size: 12.5px; color: var(--ink-sub); line-height: 1.6; margin-bottom: 14px; white-space: pre-wrap; }
+.pane-dialog-input { display: block; width: 100%; font: inherit; font-size: 13px; color: var(--ink); background: var(--input-bg); border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; margin-bottom: 6px; }
+.pane-dialog-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.pane-dialog-error { font-size: 11.5px; color: var(--danger); font-weight: 600; margin-bottom: 8px; }
+.pane-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.pane-dialog-btn { border: 1px solid var(--line); background: var(--surface); color: var(--ink); font: inherit; font-size: 12px; padding: 6px 14px; border-radius: 6px; cursor: pointer; }
+.pane-dialog-btn:disabled { opacity: .5; cursor: default; }
+.pane-dialog-btn-primary { background: var(--accent); border-color: var(--accent); color: var(--surface); font-weight: 700; }
+.pane-dialog-btn-danger { background: var(--danger); border-color: var(--danger); color: var(--surface); font-weight: 700; }
+@media (hover: hover) {
+.pane-dialog-btn:hover:not(:disabled) { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+.pane-dialog-btn-primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--surface); }
+.pane-dialog-btn-danger:hover:not(:disabled) { background: var(--danger); border-color: var(--danger); filter: brightness(1.1); color: var(--surface); }
+}
+
 /* ===== 拡張子の関連付けツリーの三状態表示 =====
    「全部選択」と「一部だけ選択」が同じ色だと見分けがつかないため、チェック色を分ける。
    全部選択はアクセント色、一部選択は控えめな灰色にし、行のラベルにも「一部選択」と出す。

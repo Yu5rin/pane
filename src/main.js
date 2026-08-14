@@ -17,6 +17,7 @@ import { FILE_TYPES } from "./file-types.js";
 import { detectContentMode } from "./detect-mode.js";
 import { setReadingSpeedWpm } from "./text-stats.js";
 import { setOutlineMaxLevel } from "./markdown-extras.js";
+import { paneConfirm, paneAlert, paneInput } from "./dialog.js";
 
 const host = document.getElementById("cm-host");
 const statusbarEl = document.getElementById("statusbar");
@@ -641,7 +642,7 @@ const ctx = {
   actions: {
     async newDocument() {
       if (bridge) { bridge.postMessage({ type: "new" }); return; }
-      if (isDirty && !window.confirm("保存されていない変更があります。新規文書を開くと失われますが、よろしいですか?")) return;
+      if (isDirty && !(await paneConfirm({ title: "新規文書を開きますか?", message: "保存されていない変更があります。新規文書を開くと失われますが、よろしいですか?", okLabel: "開く", danger: true }))) return;
       pushClosedFile(currentPath);
       await applyNewDocumentLocal();
     },
@@ -661,7 +662,7 @@ const ctx = {
       bridge?.postMessage({ type: "open-path", path });
     },
     async exportAs(format) {
-      if (!bridge) { window.alert("エクスポートはデスクトップアプリ版でのみ利用できます。"); return; }
+      if (!bridge) { await paneAlert({ title: "エクスポートできません", message: "エクスポートはデスクトップアプリ版でのみ利用できます。" }); return; }
       // exportReadYamlFrontMatter(仕様書): trueならFront Matterのページ設定等を読んで上書きする。
       // 読み取るキーの一覧はmd-to-html.jsのFRONT_MATTER_KEYSを参照(このファイルが正)。
       const fm = exportSettings.exportReadYamlFrontMatter ? parseFrontMatterOverrides(editor.getValue()) : {};
@@ -710,7 +711,7 @@ const ctx = {
       // 未保存の変更がある場合の保存確認はC#側(FormClosing)が一元的に行う
       // (ネイティブのXボタン・Alt+F4で閉じた場合と挙動を揃えるため)。
       if (bridge) { bridge.postMessage({ type: "close" }); return; }
-      if (isDirty && !window.confirm("保存されていない変更があります。閉じてもよろしいですか?")) return;
+      if (isDirty && !(await paneConfirm({ title: "閉じますか?", message: "保存されていない変更があります。閉じてもよろしいですか?", okLabel: "閉じる", danger: true }))) return;
       window.close();
     },
     async copyAsMarkdown() {
@@ -739,8 +740,8 @@ const ctx = {
     // 右クリックメニュー「画像を開く」(docs/コンテキストメニュー仕様.md 2.4)。
     // 既定のビューアで開く操作自体はC#(WinForms)側の機能のため、ブリッジが無い
     // ブラウザ単体動作では提供できない。
-    openImageFile(rawSrc) {
-      if (!bridge) { window.alert("既定のビューアで開く機能はデスクトップアプリ版でのみ利用できます。"); return; }
+    async openImageFile(rawSrc) {
+      if (!bridge) { await paneAlert({ title: "開けません", message: "既定のビューアで開く機能はデスクトップアプリ版でのみ利用できます。" }); return; }
       const resolved = resolveImageFsPath(rawSrc);
       if (!resolved) return;
       bridge.postMessage({ type: "open-in-default-app", path: resolved });
@@ -772,9 +773,19 @@ const ctx = {
       editor.setWordWrap(wordWrapOn);
       updateWrapButton();
     },
-    gotoLineFlow() {
+    async gotoLineFlow() {
       const total = editor.getValue().split("\n").length;
-      const input = window.prompt(`移動する行番号を入力してください(1〜${total})`);
+      const input = await paneInput({
+        title: "指定行へジャンプ",
+        message: `移動する行番号を入力してください(1〜${total})`,
+        okLabel: "移動",
+        validate: (v) => {
+          if (v.trim() === "") return null; // 未入力時はOK無効化ではなく単にジャンプしない(空欄OKも許容)
+          const n = parseInt(v, 10);
+          if (!Number.isFinite(n) || String(n) !== v.trim() || n < 1 || n > total) return `1〜${total}の数値を入力してください`;
+          return null;
+        },
+      });
       if (!input) return;
       const n = parseInt(input, 10);
       if (Number.isFinite(n)) editor.gotoLine(n);
@@ -803,10 +814,10 @@ const ctx = {
       bridge?.postMessage({ type: "set-show-word-count", value: showWordCount });
     },
     openDevTools() { bridge?.postMessage({ type: "open-devtools" }); },
-    openFolder() {
+    async openFolder() {
       // フォルダ選択ダイアログ自体がC#側(WinForms)の機能のため、ブリッジが無い
       // ブラウザ単体動作では提供できない(仕様書 S-02/S-03はデスクトップアプリ前提)。
-      if (!bridge) { window.alert("フォルダを開く機能はデスクトップアプリ版でのみ利用できます。"); return; }
+      if (!bridge) { await paneAlert({ title: "開けません", message: "フォルダを開く機能はデスクトップアプリ版でのみ利用できます。" }); return; }
       bridge.postMessage({ type: "open-folder" });
     },
     openFileByPath(path, line) {
@@ -1604,7 +1615,7 @@ window.addEventListener("drop", async (e) => {
     return;
   }
   // ブラウザ単体時は新規ウィンドウを作れないため、確認のうえこのウィンドウで開く。
-  if (!isEmptyDocument && !window.confirm("現在の内容を閉じて、ドロップしたファイルを開きますか?")) return;
+  if (!isEmptyDocument && !(await paneConfirm({ title: "ドロップしたファイルを開きますか?", message: "現在の内容を閉じて、ドロップしたファイルを開きますか?", okLabel: "開く", danger: true }))) return;
   resetAutoDetectState();
   await editor.setFileMode(file.name);
   setEditorValueQuiet(await file.text());

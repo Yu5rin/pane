@@ -20,6 +20,7 @@
 //                        commands.js側の全域ショートカット発火を止めてもらう(bindShortcuts参照)。
 import { FILE_TYPES, CATEGORIES } from "./file-types.js";
 import { MENU_LABELS, isAssignableShortcut } from "./commands.js";
+import { paneConfirm, paneAlert } from "./dialog.js";
 
 // 本文フォントサイズの既定値(src/editor.js の DEFAULT_FONT_SIZE と同じ値)。
 // editor.jsから直接importしないのは、設定画面専用ウィンドウ(settings-entry.js)の
@@ -546,9 +547,9 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     if (e.key === "Escape") { e.preventDefault(); requestClose(); }
   }
 
-  function requestClose() {
+  async function requestClose() {
     cancelActiveCapture();
-    if (dirty && !window.confirm("保存されていない変更があります。閉じてもよろしいですか?")) return;
+    if (dirty && !(await paneConfirm({ title: "閉じますか?", message: "保存されていない変更があります。閉じてもよろしいですか?", okLabel: "閉じる", danger: true }))) return;
     destroy();
   }
 
@@ -664,12 +665,12 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     return result;
   }
 
-  function save() {
+  async function save() {
     cancelActiveCapture();
     if (!ctx.bridge) {
       // ブリッジが無いブラウザ単体動作では永続化先(C#側AppSettings)が無いため保存できない。
       // 画面自体は最後まで操作できるようにしておき、保存時にのみ案内する(仕様書の指示どおり)。
-      window.alert("設定の保存はデスクトップアプリ版でのみ利用できます。");
+      await paneAlert({ title: "保存できません", message: "設定の保存はデスクトップアプリ版でのみ利用できます。" });
       return;
     }
     if (!draft) return;
@@ -1480,7 +1481,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
 
   // ---- 詳細: 値ではなくアクションのボタン ----
   // 破壊的な操作(設定のリセット・履歴の消去)は、押してすぐには送らず、画面内に収まる
-  // 自前の確認表示(adv-confirm)を挟む。window.confirmは使わない(WebView2でブロックされうるため)。
+  // 自前の確認表示(adv-confirm)を挟む。ブラウザ標準の確認ダイアログは使わない(WebView2でブロックされうるため)。
   const NON_DESTRUCTIVE_ACTIONS = [
     { action: "open-settings-file", label: "設定ファイルの場所を開く" },
     { action: "open-default-apps-settings", label: "Windowsの「既定のアプリ」設定を開く" },

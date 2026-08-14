@@ -5,6 +5,7 @@
 import { extractHeadings } from "./markdown-extras.js";
 import { createGlobalSearch } from "./global-search.js";
 import { showContextMenu } from "./commands.js";
+import { paneConfirm, paneInput } from "./dialog.js";
 
 // 入力のたびに構文木を全走査(extractHeadings)しないためのデバウンス幅(仕様書 性能要件)。
 // 第10.5節の「パネルとタブの切替:160ms」はCSSトランジションの値であり、これとは別。
@@ -181,13 +182,13 @@ export function createSidebar(editor, ctx) {
   }
 
   // 4.2 記事リスト・ファイルツリーのファイル行(entry: { path, name, relativePath }相当)
-  function renameEntryFlow(entry) {
-    const name = window.prompt("新しい名前を入力してください", entry.name);
+  async function renameEntryFlow(entry) {
+    const name = await paneInput({ title: "名前の変更", message: "新しい名前を入力してください", value: entry.name, okLabel: "変更" });
     if (!name || name === entry.name) return;
     ctx.bridge.postMessage({ type: "rename-path", path: entry.path, newName: name });
   }
-  function deleteEntryFlow(entry) {
-    if (!window.confirm(`"${entry.name}" をごみ箱へ移動しますか?`)) return;
+  async function deleteEntryFlow(entry) {
+    if (!(await paneConfirm({ title: "ごみ箱へ移動しますか?", message: `"${entry.name}" をごみ箱へ移動しますか?`, okLabel: "ごみ箱へ移動", danger: true }))) return;
     ctx.bridge.postMessage({ type: "delete-path", path: entry.path });
   }
   function buildFileRowMenu(entry) {
@@ -204,8 +205,8 @@ export function createSidebar(editor, ctx) {
   }
 
   // 4.3 ファイルツリーのフォルダ行
-  function createFileFlow(dirEntry) {
-    const name = window.prompt("新しいファイル名を入力してください(例: memo.md)");
+  async function createFileFlow(dirEntry) {
+    const name = await paneInput({ title: "新しいファイルを作成", message: "新しいファイル名を入力してください(例: memo.md)", okLabel: "作成" });
     if (!name) return;
     ctx.bridge.postMessage({ type: "create-file-in-folder", dirPath: dirEntry.path, name });
   }
