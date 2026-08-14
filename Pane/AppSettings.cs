@@ -226,6 +226,10 @@ internal sealed class AppSettings
     /// <summary>スペルチェックの自動修正を有効化するか。既定false。JS `editor.js`。</summary>
     public bool SpellCheckAutoCorrect { get; set; }
 
+    /// <summary>コード中の色リテラル(#ff6600 等)に色見本と文字色を付けるか。既定true。
+    /// JS `editor.js` / `color-picker.js`(docs/カラープレビュー仕様.md)。</summary>
+    public bool ColorPreviewInCode { get; set; } = true;
+
     private int _readingSpeedWpm;
 
     /// <summary>読了時間計算用の読書速度(wpm)。0=自動。負値は0へ倒す。既定0。JS `text-stats.js`。</summary>
