@@ -155,6 +155,18 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// </summary>
     public void OpenWindow(string? path, AutoSaveSnapshot? recoverFrom = null, DroppedFileContent? droppedFile = null, string? initialFolderPath = null)
     {
+        // コマンドライン引数・多重起動時のパイプ経由でフォルダのパスが渡された場合
+        // (仕様書 F-14: `Pane.exe <folder>`)。pathをそのままファイルとして読もうとすると
+        // TextFileService.Load(File.ReadAllBytes)が失敗するため、フォルダを開く既存の経路
+        // (initialFolderPath、サイドバーで開く)へ転送する。復元・ドロップ経由(pathがファイル
+        // であることが確定している)はこの判定の対象外にする。
+        if (path is not null && recoverFrom is null && droppedFile is null && initialFolderPath is null && Directory.Exists(path))
+        {
+            Logger.Write($"OpenWindow: 起動引数がフォルダのためフォルダとして開く: {path}");
+            OpenWindow(null, initialFolderPath: path);
+            return;
+        }
+
         // タブ形式(仕様書 第2.10節 C-14、隠し設定): 既存のウィンドウがあれば新規ウィンドウを
         // 作らず、そちらへ新しいタブとして開くよう依頼する(ユーザー指示:
         // 「ファイルを開く要求は新しいウィンドウではなく既存ウィンドウの新しいタブへ送る」)。

@@ -202,8 +202,14 @@ const FIELD_DEFS = {
   editorFontFamily: { kind: "nullableString", def: "" },
   editorMonospaceFontFamily: { kind: "nullableString", def: "" },
   editorFontSize: { kind: "number", def: DEFAULT_FONT_SIZE, min: 8, max: 72 },
-  editorLineHeight: { kind: "number", def: 1.85, min: 1.0, max: 3.0, step: 0.05 },
-  editorMaxWidthPx: { kind: "number", def: 0, min: 0, max: 5000 },
+  // 仕様書 第10.3節: 本文の行送りは1.95(日本語のため現行の1.85から広げる)。
+  editorLineHeight: { kind: "number", def: 1.95, min: 1.0, max: 3.0, step: 0.05 },
+  // 仕様書 第10.3節: 本文の最大幅は42文字相当。全角文字はおおよそ正方形(幅=フォントサイズの
+  // 1em)とみなせるため、全角42文字分を「既定フォントサイズ(DEFAULT_FONT_SIZE) × 42」で
+  // 算出する(Pane/AppSettings.csの既定値と同じ計算式・同じ値に揃えること)。
+  // Markdownモードのときだけ適用する(コード/プレーンテキストは無制限のまま。src/style.css参照)。
+  // 0を指定すると従来どおり無制限になる。
+  editorMaxWidthPx: { kind: "number", def: DEFAULT_FONT_SIZE * 42, min: 0, max: 5000 },
   editorPaddingX: { kind: "number", def: 32, min: 0, max: 200 },
   showWordCount: { kind: "bool", def: true },
 
@@ -213,6 +219,7 @@ const FIELD_DEFS = {
   // ---- 詳細 ----
   enableDebug: { kind: "bool", def: false },
   showHiddenFilesInTree: { kind: "bool", def: false },
+  addToPath: { kind: "bool", def: false },
 };
 
 function coerceIncoming(def, raw) {
@@ -1505,6 +1512,9 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
       </div>
       <div class="settings-group">
         ${fieldTextarea("fileTreePatterns", "ファイルツリーの除外パターン", "1行に1パターン(glob)。<code>!</code>で始めると除外の否定になります。", { lines: true, rows: 4 })}
+      </div>
+      <div class="settings-group">
+        ${fieldCheckbox("addToPath", "コマンドラインからPaneを開けるようにする", "exeのあるフォルダをユーザー環境変数PATHへ追加します(管理者権限は不要)。インストーラは使わない方針のため、この設定からのみ登録・解除します。")}
       </div>
       <div class="settings-group">
         <div class="settings-group-title">操作</div>

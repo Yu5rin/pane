@@ -161,6 +161,7 @@ internal static class SettingsBridge
             enableDebug = settings.EnableDebug,
             showHiddenFilesInTree = settings.ShowHiddenFilesInTree,
             fileTreePatterns = settings.FileTreePatterns,
+            addToPath = settings.AddToPath,
 
             // ---- 送受信の約束: settingsにのみ含める一覧系・環境情報 ----
             installedFonts = FontService.AllFamilies,
@@ -234,6 +235,7 @@ internal static class SettingsBridge
         IReadOnlyCollection<string> previousExtensions = settings.GetEffectiveAssociatedExtensions();
         bool previousPreload = settings.PreloadOnStartup;
         bool previousExplorerNewMenuEnabled = settings.ExplorerNewMenuEnabled;
+        bool previousAddToPath = settings.AddToPath;
 
         // ---- 一般 ----
         if (TryGetString(s, "startupBehavior", out string startupBehavior)) settings.StartupBehavior = startupBehavior;
@@ -400,6 +402,7 @@ internal static class SettingsBridge
         if (TryGetBool(s, "showHiddenFilesInTree", out bool showHiddenFilesInTree)) settings.ShowHiddenFilesInTree = showHiddenFilesInTree;
         List<string>? fileTreePatterns = TryGetStringList(s, "fileTreePatterns");
         if (fileTreePatterns is not null) settings.FileTreePatterns = fileTreePatterns;
+        if (TryGetBool(s, "addToPath", out bool addToPath)) settings.AddToPath = addToPath;
 
         // ---- ファイルの関連付け ----
         List<string>? desiredExtensions = TryGetStringList(s, "associatedExtensions");
@@ -460,6 +463,22 @@ internal static class SettingsBridge
                 errorMessage = errorMessage is null
                     ? $"スタートアップ登録を変更できませんでした。{ex.Message}"
                     : $"{errorMessage}\nスタートアップ登録を変更できませんでした。{ex.Message}";
+            }
+        }
+
+        if (previousAddToPath != settings.AddToPath)
+        {
+            try
+            {
+                if (settings.AddToPath) PathEnvironmentService.Register();
+                else PathEnvironmentService.Unregister();
+            }
+            catch (Exception ex)
+            {
+                // PathEnvironmentService側で既にLogger.WriteException済み。
+                errorMessage = errorMessage is null
+                    ? $"PATHへの登録を変更できませんでした。{ex.Message}"
+                    : $"{errorMessage}\nPATHへの登録を変更できませんでした。{ex.Message}";
             }
         }
 

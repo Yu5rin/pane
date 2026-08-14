@@ -934,23 +934,30 @@ html[data-theme="dark"] .cm-table th { background: rgba(61,193,181,.14); }
   box-sizing: border-box;
 }
 
-/* ===== 本文の余白・最大幅・行の高さ(仕様書 C-08) =====
+/* ===== 本文の余白・最大幅・行の高さ(仕様書 C-08・第10.3節) =====
    本文が左端にぴったり付いて読みにくかったため、左右に余白を入れる。
    --editor-padding-x(設定 editorPaddingX、既定32px)がその余白の幅。
-   --editor-max-width(設定 editorMaxWidthPx)を指定すると本文の幅を制限して中央寄せする。
-   --editor-line-height(設定 editorLineHeight)は行の高さ。いずれも未設定なら既定のまま。
-   CodeMirrorのテーマは .cm-scroller に line-height を当てるため、そちらも上書きする。 */
+   --editor-line-height(設定 editorLineHeight)は行の高さ。未設定なら既定のまま。
+   CodeMirrorのテーマは .cm-scroller に line-height を当てるため、そちらも上書きする。
+   最大幅(--editor-max-width、設定 editorMaxWidthPx)は既定で無制限にしておき、
+   下のMarkdownモード限定ルールでだけ有効にする(コードモード・プレーンテキストモードで
+   幅を制限すると、横に長いコード行やログが折り返されて読みにくくなるため対象外にする)。 */
 #cm-host .cm-content {
   padding-left: var(--editor-padding-x, 32px) !important;
   padding-right: var(--editor-padding-x, 32px) !important;
   box-sizing: border-box;
-  max-width: var(--editor-max-width, none);
+  max-width: none;
   margin-left: auto;
   margin-right: auto;
 }
-#cm-host .cm-scroller { line-height: var(--editor-line-height, 1.85); }
+#cm-host .cm-scroller { line-height: var(--editor-line-height, 1.95); }
+/* 本文の最大幅は仕様書どおりMarkdownモードのときだけ適用する。data-editor-modeは
+   main.jsのupdateStatusMode()がモード切替のたびに<html>要素へ付け直す。 */
+:root[data-editor-mode="markdown"] #cm-host .cm-content {
+  max-width: var(--editor-max-width, none);
+}
 /* コードモードは行番号の余白があるので、本文ほど左を空けない。 */
-#cm-host.mode-code .cm-content { padding-left: 12px !important; padding-right: 12px !important; max-width: none; }
+#cm-host.mode-code .cm-content { padding-left: 12px !important; padding-right: 12px !important; }
 
 /* ===== コード中のカラープレビュー・カラーピッカー(docs/カラープレビュー仕様.md) =====
    スウォッチ・カラーピッカーパネルとも、色は--paper/--ink/--accent等の既存トークンから

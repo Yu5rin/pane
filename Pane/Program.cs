@@ -20,9 +20,13 @@ internal static class Program
         // .NET (Core以降) は既定でこれらのコードページを同梱していないため必須。
         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 
-        // コマンドライン引数でのファイル指定(仕様書 N-25 / F-14): Pane.exe <file>
+        // コマンドライン引数でのファイル・フォルダ指定(仕様書 N-25 / F-14):
+        // Pane.exe <file> / Pane.exe <folder> 。フォルダかどうかの判定は実際に開く段階
+        // (PaneApplicationContext.OpenWindow)でDirectory.Existsにより行うため、ここでは
+        // ファイルパスかフォルダパスかを区別せずそのまま渡す。
         // "--preload"(B-1: スタートアップ登録から起動されるプリロード常駐フラグ)は
-        // ファイルパスではなくフラグとして別扱いにし、それ以外の最初の引数をファイルパスとして扱う。
+        // ファイルパスではなくフラグとして別扱いにし、それ以外の最初の引数をファイル/フォルダの
+        // パスとして扱う。
         bool preload = false;
         string? initialPath = null;
         foreach (string arg in args)
