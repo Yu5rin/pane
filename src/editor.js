@@ -2443,6 +2443,37 @@ const foldGutterTheme = EditorView.theme({
   },
 });
 
+// 不具合修正(ユーザー報告「マーカーの位置がGraftと異なります。行番号と本文エリアの間には
+// 区切り線がありますが、区切り線の右側である本文エリア側にマーカーの位置を表示して」):
+// 実機のDOM構造を`getBoundingClientRect()`で実測したところ、区切り線(border-right)は
+// src/style.css の `#cm-host .cm-gutters { border-right: 1px solid var(--rule); }` が
+// 出しており、これは行番号ガター(.cm-lineNumbers)と折りたたみガター(.cm-foldGutter)の
+// 両方を包む.cm-gutters全体の右端、つまり折りたたみガターの直後(=本文の直前)に付いていた。
+// 一方マーカー自体は既にlineNumbers()→foldGutter()の順で登録済み(行番号の右)のため、
+// 実際の並びは [行番号][マーカー][区切り線][本文] だった。実測値(コード末尾コメント参照、
+// および.verify-codefold.mjsの検証項目参照)で「区切り線がマーカーより左にある」ことを確認済み
+// (foldGutterLeft=26.45, foldGutterRight(=区切り線の位置)=40.45 で、区切り線がマーカーの
+// 右端と同じ位置=マーカーの右にあるように見えて、実は.cm-gutters自体の右端いっぱいに
+// 区切り線が付いているだけであり、Graftの [行番号][区切り線][マーカー][本文] とは区切り線と
+// マーカーの前後関係が違う)。
+// Graftと同じ並びにするには、区切り線を行番号ガター(.cm-lineNumbers)の右端に移し、
+// マーカーは区切り線の右(=本文側)に見えるようにする必要がある。
+// src/style.cssは他エージェント編集中のため触れず、ここ(EditorView.theme())で完結させる。
+// ただしstyle.css側の`#cm-host .cm-gutters`はIDセレクタ(詳細度1,1,0)を使っており、
+// EditorView.theme()が生成するクラスベースのセレクタ(詳細度0,2,0程度)ではIDセレクタに
+// 詳細度で負けて上書きできない(実際に!important無しで試したところ区切り線が消えなかった
+// ことを実機で確認した)。そのため、ここだけ例外的に!importantを使ってstyle.css側の
+// border-rightを明示的に無効化し、代わりに.cm-lineNumbers(行番号ガター単体、他に
+// border-right指定が無いためこちらは!important無しでそのまま効く)に同じ罫線を移す。
+const gutterDividerTheme = EditorView.theme({
+  // .cm-gutters全体(行番号+折りたたみガターをまとめて包む要素)の右端に出ていた区切り線を消す。
+  ".cm-gutters": { borderRight: "none !important" },
+  // 行番号ガター単体の右端に区切り線を出す。これで折りたたみガター(マーカー)は区切り線より
+  // 右(本文エリア側)に見えるようになり、Graftと同じ [行番号][区切り線][マーカー][本文] の
+  // 並びになる。色はstyle.css側と同じ--ruleをそのまま使う(見た目を変えないため)。
+  ".cm-lineNumbers": { borderRight: "1px solid var(--rule)" },
+});
+
 // インデントガイド(縦線)。ユーザー報告「コードモードのインデントが小さすぎる」への対応の一部。
 // 実測の結果、Tabキーで新たに挿入されるインデント幅(indentUnit)と、既に書かれているスペース
 // インデントの見た目の幅は別物で、後者はCSS側では変えようがない(スペースは文字なのでフォントの
@@ -2460,28 +2491,51 @@ const foldGutterTheme = EditorView.theme({
 // 仕様書と食い違っていた。今回のユーザー報告を機に、仕様書どおりインデントガイドを実装する
 // (詳細な経緯は今回の対応報告を参照)。
 //
-// 不具合修正(ユーザー報告「インデントガイドが｜をつなげただけでチープです。Graftと同じく
-// きちんと繋がった線にしてください」): 実機のスクリーンショットを拡大して確認したところ、
-// ネストしたブロックの中に空行が挟まると、その空行の区間だけガイドが完全に消えて見えており
-// (VS Code/Graftはブロックの開き〜閉じの間、空行もまたいで1本の線が通ったまま)、これが
-// 「バラバラの短い棒を並べただけ」に見える主因だった。原因はmark decorationの性質: mark
-// decorationは実在する文字(行頭の空白文字列)にしか付けられないため、文字数0の空行には
-// 装飾のしようがなく、そこだけガイドの描画が完全に途切れていた(非空白行同士の間は、行の
-// 高さぶん隙間なく背景が続くため実際には繋がっており、途切れの原因は「空行」だけだった)。
-// 対策として、空行だけは別経路(widget decoration)で埋める: その空行の直前・直後にある
-// 最も近い非空白行それぞれの行頭空白幅を求め、小さいほう(=空行の前後どちらのブロックも
-// まだ閉じていない、共通して開いたままの深さ)をそのままガイドの本数として使い、実際の
-// 文字を持たない空行にも同じ縦線パターンの背景を持つ幅固定のダミーspanを差し込むことで、
-// 上下の非空白行のガイドと同じx位置・同じ見た目で繋がって見えるようにする(min()を使う
-// 理由: 空行の前後でブロックの深さが違う場合、より浅いほう=開いたままの範囲だけを描けば、
-// まだ閉じていないブロックの外まで線がはみ出すことがない)。
+// 不具合修正1回目(前任、ユーザー報告「インデントガイドが｜をつなげただけでチープです。
+// Graftと同じくきちんと繋がった線にしてください」): 空行の区間だけガイドが完全に消える
+// (mark decorationは実在する文字にしか付けられず、文字数0の空行には装飾しようがない)
+// ことを主因と見て、空行だけ別経路(widget decoration)で埋める対策を入れていた。前任は
+// 「拡大スクリーンショットで空行をまたいで連続していることを確認した」と報告していたが、
+// ユーザーの実機では依然として途切れて見える、との再指摘を受けた。
+//
+// 不具合修正2回目(今回、根本から実測し直した): 前任の見立て(=空行だけが特殊)は
+// 誤りで、実際には非空白行同士の間にも隙間があった。Playwrightで.cm-lineと.cm-indent-guide
+// のgetBoundingClientRect()を比較したところ、次の2つの不具合が独立して存在していた。
+//   (a) 非空白行のガイドは通常のmark decoration(displayが既定のinline)のため、背景の
+//       描画範囲がCSSのline-height(#cm-host .cm-scroller { line-height: var(--editor-
+//       line-height, 1.95) } = 実測29.25px)ではなく、フォント自体の行送り(実測18px、
+//       font-size 15pxの約1.2倍=ブラウザ既定のnormal)に閉じ込められていた。inline要素の
+//       背景はline-heightではなくフォントの行送りぶんしか塗られない、というCSSの仕様上の
+//       性質が原因(前任はここを見落としていた=空行以外は「隙間なく繋がっている」という
+//       前任の前提自体が誤りだった)。そのため、空行を挟まない普通の行同士の境目でも
+//       上下それぞれ(29.25-18)/2≈5.6pxずつ、計11px前後の隙間が毎行できていた。
+//   (b) 空行を埋めるIndentGuideBlankWidgetは`height: 100%`を指定していたが、
+//       inline-blockのheight:100%は「明示的な高さを持つ祖先」が無いと解決できず(通常の
+//       フロー内では祖先の.cm-lineはheight:autoのため基準が無い)、実測すると高さ0pxで
+//       全く塗られていなかった。つまり空行をまたぐ箇所は前任の対策後もなお完全に途切れた
+//       ままだった(「空行をまたいで連続していることを確認した」という前任の報告は、実際には
+//       確認できていなかったことになる)。
+// 対策: (a)は`.cm-indent-guide`をinline-block化しvertical-align:topにする。実測した
+// ところinline-blockは中身のテキスト(行頭の空白文字)による1行ぶんのline box(=line-height
+// どおりの高さ)を自動的に確保するため、height指定なしで29.25px(=行の高さそのもの)に
+// ぴったり一致することを確認済み(下記(a)の実測値: guideTop/guideBottomが.cm-lineの
+// lineTop/lineBottomと完全一致)。(b)は%指定をやめ、CodeMirrorが実際に測った行の高さ
+// `view.defaultLineHeight`(px)をJS側で直接読み取ってインラインstyleに焼き込む
+// (パーセント解決に依存しないため、editorLineHeight設定やフォントサイズ変更後も常に
+// 実際の行の高さと一致する)。
 class IndentGuideBlankWidget extends WidgetType {
-  constructor(chars) { super(); this.chars = chars; }
-  eq(o) { return o.chars === this.chars; }
+  // chars: ガイドの列数(幅=chars*1ch)。lineHeightPx: 実際に測った行の高さ(px、
+  // view.defaultLineHeightから)。両方をwidgetの同一性判定(eq)にも含める。
+  constructor(chars, lineHeightPx) { super(); this.chars = chars; this.lineHeightPx = lineHeightPx; }
+  eq(o) { return o.chars === this.chars && o.lineHeightPx === this.lineHeightPx; }
   toDOM() {
     const span = document.createElement("span");
     span.className = "cm-indent-guide cm-indent-guide-blank";
     span.style.width = `${this.chars}ch`;
+    // height:100%(パーセント指定)は祖先に明示的な高さが無いため解決できず0pxになっていた
+    // (不具合の実測結果、上記コメント参照)。実測したpx値を直接指定することで確実に行の
+    // 高さぶん塗る。
+    span.style.height = `${this.lineHeightPx}px`;
     return span;
   }
   ignoreEvent() { return true; }
@@ -2489,9 +2543,16 @@ class IndentGuideBlankWidget extends WidgetType {
 const indentGuideMarks = ViewPlugin.fromClass(class {
   constructor(view) { this.decorations = this.build(view); }
   update(u) {
-    if (u.docChanged || u.viewportChanged) this.decorations = this.build(u.view);
+    // docChanged/viewportChangedに加え、geometryChanged(フォントサイズ・行の高さ設定の
+    // 変更などでレイアウト寸法が変わった場合)でも再構築する。空行埋め用widgetの高さは
+    // view.defaultLineHeightを焼き込んだ値のため、行の高さが変わったのに再構築しないと
+    // 古い高さのまま隙間が復活してしまう。
+    if (u.docChanged || u.viewportChanged || u.geometryChanged) this.decorations = this.build(u.view);
   }
   build(view) {
+    // 空行埋め用widgetに焼き込む実際の行の高さ(px)。CodeMirrorが実測したデフォルト行高で、
+    // #cm-host .cm-scroller のline-height(既定1.95倍)を反映した値になる。
+    const lineHeightPx = view.defaultLineHeight;
     const marks = [];
     const { state } = view;
     const doc = state.doc;
@@ -2531,7 +2592,7 @@ const indentGuideMarks = ViewPlugin.fromClass(class {
         if (line.length === 0) {
           // 空行: 前後の非空白行のインデント幅のうち小さいほうをガイド幅として埋める
           const w = Math.min(prevNonBlankWidth(line.number), nextNonBlankWidth(line.number));
-          if (w > 0) marks.push(Decoration.widget({ widget: new IndentGuideBlankWidget(w), side: -1 }).range(line.from));
+          if (w > 0) marks.push(Decoration.widget({ widget: new IndentGuideBlankWidget(w, lineHeightPx), side: -1 }).range(line.from));
         } else {
           const m = /^[ \t]+/.exec(line.text);
           if (m && m[0].length > 0) marks.push(Decoration.mark({ class: "cm-indent-guide" }).range(line.from, line.from + m[0].length));
@@ -2547,22 +2608,29 @@ const indentGuideMarks = ViewPlugin.fromClass(class {
 // (codeModeExtras()がsetCodeIndentSize時にも呼び直されるため、都度最新値で再生成される)。
 function indentGuideTheme(size) {
   return EditorView.theme({
+    // display:inline-block + vertical-align:topが今回の根本修正の核心。既定のdisplay:inline
+    // のままだと、背景の描画範囲がline-height(#cm-host .cm-scroller側で設定、既定1.95倍)
+    // ではなくフォント自体の行送り(既定normalで約1.2倍)に閉じ込められ、上下に隙間ができる
+    // (実測: line-height由来の行の高さ29.25pxに対し、inline時の背景は18pxしか塗られず、
+    // 毎行11px前後の隙間ができていた)。inline-blockにすると、中身の空白文字が作る1行ぶんの
+    // line box(=line-heightどおりの高さ)がそのまま要素自身の高さになるため、height指定
+    // 無しで行の高さにぴったり一致する(実測値は今回の対応報告・.verify-codefold.mjs参照)。
+    // vertical-align:topは、inline-block化で発生するbaseline基準の縦位置ずれ(既定だと
+    // ベースライン合わせで上下にずれ、行の上端から始まらなくなる)を防ぎ、行の最上端から
+    // 塗り始めるようにする。
     ".cm-indent-guide": {
+      display: "inline-block",
+      verticalAlign: "top",
       backgroundImage: "linear-gradient(to right, var(--rule) 0, var(--rule) 1px, transparent 1px, transparent 100%)",
       backgroundRepeat: "repeat-x",
       backgroundSize: `calc(${size} * 1ch) 100%`,
     },
-    // 空行を埋めるダミーspan(IndentGuideBlankWidget)専用。mark decoration版(上の
-    // .cm-indent-guide、幅は実際の空白文字数で自然に決まる)と違い、こちらは中身が無い
-    // widgetのためwidthをJS側でインライン指定している。widthをCSSとして効かせるには
-    // 非置換インライン要素のままではだめ(width指定が無視される)なため、inline-blockに
-    // する。高さは行の高さいっぱいに広げ、非空白行のガイド(行の高さぶん背景が続く)と
-    // すきまなく繋がるようにする。
-    ".cm-indent-guide-blank": {
-      display: "inline-block",
-      height: "100%",
-      verticalAlign: "top",
-    },
+    // 空行を埋めるダミーspan(IndentGuideBlankWidget)は.cm-indent-guideのクラスも併せ持つため
+    // display:inline-block・vertical-align:topは上の指定がそのまま効く。高さは以前ここで
+    // `height: 100%`を指定していたが、祖先(.cm-line)に明示的な高さが無いためパーセントが
+    // 解決できず実測0pxになっていた(不具合の実測結果、IndentGuideBlankWidget側のコメント
+    // 参照)。今はwidget生成時にJS側でview.defaultLineHeightのpx値を直接インラインstyleへ
+    // 書き込むため、.cm-indent-guide-blank専用のCSSルールはもう不要になった。
   });
 }
 
@@ -2663,6 +2731,7 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
   // (ウィンドウ/タブ)ごとの状態のため、この関数自体もここ(createEditor内)で定義する。
   const codeModeExtras = () => [
     lineNumbers(),
+    gutterDividerTheme,
     ...(codeFoldingOn ? [foldGutter({ markerDOM: foldMarkerDOM }), foldGutterTheme, keymap.of(foldKeymapSafe)] : []),
     bracketMatching(),
     ...(codeIndentGuidesOn ? [indentGuideMarks, indentGuideTheme(codeIndentSizeValue)] : []),
