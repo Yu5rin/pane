@@ -7,7 +7,8 @@ namespace Pane;
 ///
 /// 設計方針(タスク指示どおり): 副作用(実ファイルコピー)を持つ部分と、
 /// パス文字列を組み立てるだけの純粋な部分を分離する。後者(<see cref="PlanDestination"/>・
-/// <see cref="BuildMarkdownPath"/>・<see cref="ResolveCustomFolder"/>・<see cref="EscapePath"/>)は
+/// <see cref="BuildMarkdownPath"/>・<see cref="ResolveCustomFolder"/>・<see cref="EscapePath"/>・
+/// <see cref="IntendedDestinationPath"/>・<see cref="IsSameAsSource"/>)は
 /// ファイルI/Oを一切行わないため、単体で(このプロジェクトの外からでも)検証しやすい。
 /// </summary>
 internal static class ImageInsertService
@@ -110,10 +111,20 @@ internal static class ImageInsertService
     }
 
     /// <summary>実際にファイルをコピー(またはバイト列を書き出し)する。同名ファイルがあれば
-    /// 上書きせず"名前-1.ext"のように連番を付ける。</summary>
+    /// 上書きせず"名前-1.ext"のように連番を付ける。ただし、コピー元と「本来の宛先パス」
+    /// (連番を振る前のパス)が同一ファイルを指している場合は、複製を作らずそのパスをそのまま返す
+    /// (例: 同じフォルダにある画像をドラッグ&amp;ドロップすると、元ファイル自身と名前が衝突して
+    /// "image-1.png"のような連番付きの複製ができてしまう不具合の対策)。</summary>
     internal static string CopyWithUniqueName(string destDir, string suggestedFileName, string? sourcePath, byte[]? bytes)
     {
         Directory.CreateDirectory(destDir);
+
+        string intendedPath = IntendedDestinationPath(destDir, suggestedFileName);
+        if (IsSameAsSource(sourcePath, intendedPath))
+        {
+            return Path.GetFullPath(intendedPath);
+        }
+
         string destPath = UniqueDestinationPath(destDir, suggestedFileName);
         if (sourcePath is not null)
         {
@@ -172,18 +183,44 @@ internal static class ImageInsertService
         return Path.GetFullPath(Path.Combine(docDir, expanded));
     }
 
+    /// <summary>連番を振る前の、本来のコピー先パス(dir + fileName)。拡張子だけ・空文字の
+    /// ファイル名は"image"にフォールバックする(<see cref="UniqueDestinationPath"/>と同じ規則)。</summary>
+    internal static string IntendedDestinationPath(string dir, string fileName)
+    {
+        string name = Path.GetFileNameWithoutExtension(fileName);
+        string ext = Path.GetExtension(fileName);
+        if (name.Length == 0) name = "image"; // 拡張子だけ・空文字のファイル名対策
+        return Path.Combine(dir, name + ext);
+    }
+
     /// <summary>コピー先が既存の場合、上書きせず"名前-1.ext"のように連番を付けた空きパスを返す。</summary>
     internal static string UniqueDestinationPath(string dir, string fileName)
     {
         string name = Path.GetFileNameWithoutExtension(fileName);
         string ext = Path.GetExtension(fileName);
         if (name.Length == 0) name = "image"; // 拡張子だけ・空文字のファイル名対策
-        string candidate = Path.Combine(dir, name + ext);
+        string candidate = IntendedDestinationPath(dir, fileName);
         for (int i = 1; File.Exists(candidate); i++)
         {
             candidate = Path.Combine(dir, $"{name}-{i}{ext}");
         }
         return candidate;
+    }
+
+    /// <summary>
+    /// コピー元パスと宛先パスが同一ファイルを指しているかどうかを判定する純粋関数。
+    /// 双方を<see cref="Path.GetFullPath(string)"/>で正規化し(相対表記・"./"・".."・
+    /// パス区切りの揺れを解消したうえで)、大文字小文字を無視して比較する。ファイルの中身は
+    /// 一切見ない(同名だが別物のファイルは、パスが異なる限りfalseになる)。
+    /// sourcePathがnull(クリップボードから貼り付けたバイト列など、実ファイルが元々存在しない
+    /// 経路)の場合は、比較しようがないため常にfalse。
+    /// </summary>
+    internal static bool IsSameAsSource(string? sourcePath, string destPath)
+    {
+        if (sourcePath is null) return false;
+        string normalizedSource = Path.GetFullPath(sourcePath);
+        string normalizedDest = Path.GetFullPath(destPath);
+        return string.Equals(normalizedSource, normalizedDest, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
