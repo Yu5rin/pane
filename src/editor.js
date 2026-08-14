@@ -1207,7 +1207,11 @@ function mutateTable(view, pos, fn) {
   const t = tableAt(view.state, pos);
   if (!t) return;
   fn(t);
-  view.dispatch({ changes: { from: t.from, to: t.to, insert: formatTableText(t) } });
+  // 不具合2の修正: userEvent未指定(デフォルトのundefined)だとCodeMirrorのhistory結合規則
+  // (!userEvent かつ変更範囲が隣接/重複)により、行/列操作を連続実行したときに1回の
+  // アンドゥですべて戻ってしまう。カラーピッカーのfinish()と同じ考え方で、
+  // "input.type"/"delete"系にマッチしないuserEventを付け、1操作=1アンドゥにする。
+  view.dispatch({ changes: { from: t.from, to: t.to, insert: formatTableText(t) }, userEvent: "input.table" });
 }
 // ---- 列幅のドラッグ調整(仕様書 M-08) ----
 // Markdownの表記法には列幅の概念が無いため、ドキュメントのテキストには一切書き込まない。
@@ -1351,6 +1355,16 @@ class TableWidget extends WidgetType {
 }
 // フォーカス状態をStateに反映(表ウィジェットの装飾はブロック装飾のためStateFieldからしか
 // 提供できず、view.hasFocusを直接読めない。キーボードを閉じたら表を描画するために必要)
+//
+// 不具合5の修正: 以前はfocusField/focusNotifierをlivePreviewExt()経由でlivePreviewComp
+// (モード切替のたびreconfigureで丸ごと入れ替わるCompartment)に載せていた。CodeMirror本体は
+// blur/focus発生の10ms後にsetTimeoutでview.stateを再取得し、EditorView.focusChangeEffect
+// facetに登録された各プロバイダ(focusNotifierもその1つ)を呼び直す。その10ms待ちの間に
+// setFileMode等でlivePreviewComp.reconfigure([])が実行されるとfocusField自体がstateから
+// 消え、CodeMirror本体側の処理と競合して`RangeError: Field is not present in this state`が
+// 発生していた(CodeMirror本体には手を入れられないため、こちら側で「常に存在する」ように
+// するしかない)。docContextField等と同じく、モードに関わらず常設の拡張(buildExtensions()側)
+// として登録することで、reconfigureのタイミングに関わらずfocusFieldが消えないようにする。
 const focusEffect = StateEffect.define();
 const focusField = StateField.define({ create: () => false, update: (v, tr) => { for (const ef of tr.effects) if (ef.is(focusEffect)) v = ef.value; return v; } });
 const focusNotifier = EditorView.focusChangeEffect.of((state, focusing) => focusEffect.of(focusing));
@@ -1608,7 +1622,13 @@ const colorPickerHighlightField = StateField.define({
   create: () => null,
   update(v, tr) {
     for (const e of tr.effects) if (e.is(setColorPickerHighlight)) v = e.value;
-    if (v && tr.docChanged) v = { from: tr.changes.mapPos(v.from), to: tr.changes.mapPos(v.to, 1) };
+    if (v && tr.docChanged) {
+      const from = tr.changes.mapPos(v.from), to = tr.changes.mapPos(v.to, 1);
+      // 不具合1の修正: 対象範囲を含む編集(全選択して削除等)で範囲そのものが潰れることがある。
+      // Decoration.mark()は空範囲を許さずthrowするため、潰れた場合はnullにしてハイライト無しに
+      // する(openColorPicker側のcurrentTarget()もこのnullを「対象消失」として扱う)。
+      v = from < to ? { from, to } : null;
+    }
     return v;
   },
   provide: (f) => EditorView.decorations.from(f, (v) => (v ? Decoration.set([Decoration.mark({ class: "cm-color-picker-target" }).range(v.from, v.to)]) : Decoration.none)),
@@ -1927,7 +1947,19 @@ function countSearchMatches(state) {
 // "auto"(既定)は従来どおり":"入力のたびに自動で候補を出す。拡張自体は常時マウントしたまま
 // (Compartmentでの着脱ではなく)状態に応じてsource関数がnullを返すだけにすることで、
 // 他のトグル設定と同じくextTogglesFieldのStateEffect経由で即時反映できるようにする。
+//
+// 不具合5の修正: 上のコメントが書かれた本来の意図に反して、実際にはemojiCompletion
+// (=autocompletion()拡張、completionStateフィールドを内部で持つ)がlivePreviewExt()経由で
+// livePreviewComp(モード切替のたびreconfigureされるCompartment)に載ってしまっていた。
+// CodeMirror本体(@codemirror/autocomplete)はユーザーの入力/フォーカス喪失から一定時間後に
+// setTimeoutでcompletionStateを読み直す処理を持つが、その待機中にsetFileMode等で
+// livePreviewComp.reconfigure([])が実行されるとcompletionStateごと消え、
+// `RangeError: Field is not present in this state`が発生していた(focusFieldと同種の原因)。
+// focusField同様、拡張自体は常設(buildExtensions()側)にし、代わりにmarkdownモード以外では
+// このsource関数がnullを返すことで「補完候補を出さない」を実現する
+// (docContextFieldも常設フィールドなので、モードに関わらず安全に参照できる)。
 function emojiCompletionSource(context) {
+  if ((context.state.field(docContextField, false)?.mode ?? "markdown") !== "markdown") return null;
   const mode = (context.state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES).emojiAutocomplete ?? "auto";
   if (mode === "off") return null;
   const word = context.matchBefore(/:[a-zA-Z0-9_+-]*$/);
@@ -2058,9 +2090,12 @@ const defaultCodeLangInputHandler = EditorView.inputHandler.of((view, from, to, 
 });
 
 const markdownLanguageExt = () => markdown({ extensions: [Strikethrough, Table, Superscript, Subscript, Emoji, Autolink], codeLanguages });
+// 不具合5の修正: focusField/focusNotifier/emojiCompletionはここには含めない(常設拡張として
+// buildExtensions()側に移した。理由はfocusField定義部・emojiCompletionSource定義部の
+// コメント参照)。
 const livePreviewExt = () => [
-  livePreview, focusField, focusNotifier, tableField, tableAutoFormat,
-  frontmatterField, tocField, extTogglesField, emojiCompletion,
+  livePreview, tableField, tableAutoFormat,
+  frontmatterField, tocField, extTogglesField,
   mathBlocksField, mathBlockDecoField,
   mermaidBlocksField, mermaidBlockDecoField, // Mermaid図(仕様書 第4.2節・第8.3節)
   codeMathBlocksField, codeMathBlockDecoField, // ```mathフェンス(仕様書 codeBlockMathEnabled)
@@ -2129,6 +2164,16 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
   const focusModeComp = new Compartment();
   const typewriterComp = new Compartment();
   let composing = false;
+  // 不具合3の修正: 世代トークン。setFileMode/setCodeLanguageはdesc.load()の完了を待つ間に
+  // (a)別のsetFileMode/setCodeLanguage呼び出しが割り込む、(b)タブ切替(setEditorState)で
+  // viewの中身がまるごと差し替わる、のいずれかが起きうる。どちらの場合も、awaitから
+  // 戻ってきた時点で「待機開始時にアクティブだった対象」はもう存在しないため、
+  // currentMode/currentCodeLanguageの書き換えやview.dispatchを行ってはいけない
+  // (書き換えると、待っている間に別タブへ切り替わった後のviewを誤って壊してしまう)。
+  // setFileMode/setCodeLanguage呼び出し開始時とsetEditorState(タブ切替)実行時の両方で
+  // インクリメントし、await復帰後に「開始時に取得した値のまま = 割り込みが無かった」ことを
+  // 確認してから適用する。
+  let modeGen = 0;
   let currentMode = "markdown";
   // コードモード時に実際に適用している言語ID(src/file-types.js の FILE_TYPES[].id と一致)。
   // ステータスバーの言語表示・言語ピッカー(仕様書 第1章の拡張)に使う。markdown/plainモードや、
@@ -2256,6 +2301,14 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
         // のようにモードで丸ごと入れ替わるCompartmentには載せない(常設。モード判定自体は
         // colorPreviewPlugin内でdocContextFieldを見て行う)。
         docContextField, colorPreviewEnabledField, colorPickerHighlightField, colorPreviewPlugin,
+        // フォーカス状態(不具合5の修正: focusField定義部のコメント参照)。モードに関わらず
+        // 常に存在させる必要があるため、livePreviewComp(モード切替のたびreconfigureされる
+        // Compartment)には載せず、ここに常設で置く。
+        focusField, focusNotifier,
+        // 絵文字ショートコード補完(不具合5の修正: emojiCompletionSource定義部のコメント参照)。
+        // completionStateフィールドがモード切替のたびに消えないよう常設にし、
+        // markdownモード以外での候補表示はsource関数側(emojiCompletionSource)で抑止する。
+        emojiCompletion,
         focusModeComp.of([]),
         typewriterComp.of([]),
         editable.of(EditorView.editable.of(true)),
@@ -2334,10 +2387,15 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
     // markdown: 従来どおりライブプレビュー一式。code: 該当言語を動的ロードして
     // シンタックスハイライトのみ適用(ライブプレビュー装飾は外す)。plain: 装飾なし。
     // filenameの拡張子で自動判定するが、forceModeを渡すと手動切替(第10.5節メニュー)にも使える。
+    // 戻り値: 実際に適用できたか(true)、待機中に別の呼び出し/タブ切替に割り込まれ
+    // 何もしなかったか(false)。呼び出し側(main.js)が「自分の結果はもう有効か」を
+    // 判断する材料として使う(不具合3・4の修正)。
     setFileMode: async (filename, forceMode) => {
+      const myGen = ++modeGen; // この呼び出し自身の世代を確保
       const mode = forceMode || resolveFileMode(filename);
-      currentMode = mode;
       if (mode === "markdown") {
+        // ここまで await を挟んでいないため myGen は必ず最新(割り込みは起こり得ない)。
+        currentMode = mode;
         currentCodeLanguage = null;
         view.dispatch({
           effects: [
@@ -2348,16 +2406,18 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
             setDocContext.of({ mode: "markdown", language: null }), // カラープレビュー(docs/カラープレビュー仕様.md)用
           ],
         });
-        return;
+        return true;
       }
       if (mode === "code") {
         const desc = LanguageDescription.matchFilename(codeLanguages, filename || "");
         let support = null;
         try {
-          support = desc ? await desc.load() : null;
+          support = desc ? await desc.load() : null; // ここで他の呼び出し/タブ切替が割り込みうる
         } catch {
           support = null; // 未対応/ロード失敗時はプレーン表示にフォールバックする
         }
+        if (myGen !== modeGen) return false; // 待っている間に割り込まれた → この結果はもう適用しない
+        currentMode = mode;
         currentCodeLanguage = support ? desc.name : null;
         view.dispatch({
           effects: [
@@ -2367,9 +2427,10 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
             setDocContext.of({ mode: "code", language: currentCodeLanguage }), // カラープレビュー用
           ],
         });
-        return;
+        return true;
       }
-      // plain
+      // plain(await を挟まないため割り込みの心配はない)
+      currentMode = mode;
       currentCodeLanguage = null;
       view.dispatch({
         effects: [
@@ -2379,20 +2440,24 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
           setDocContext.of({ mode: "plain", language: null }), // カラープレビュー用(plainには適用しない)
         ],
       });
+      return true;
     },
     // 拡張子ではなく言語IDを直接指定してコードモードにする(仕様書 第1章の拡張: 内容からの
     // 自動判定・ステータスバーの言語ピッカーから使う)。setFileMode(code分岐)と同じ流儀
     // (LanguageDescription.matchFilename → desc.load() → docModeComp.reconfigure)を、
     // ファイル名でなく言語IDでの一致に置き換えただけ。ロード失敗時はプレーン表示に
     // フォールバックする作法も同じ。
+    // 戻り値はsetFileModeと同じ意味(不具合3の修正)。
     setCodeLanguage: async (languageId) => {
+      const myGen = ++modeGen;
       const desc = codeLanguages.find((d) => d.name === languageId) || null;
       let support = null;
       try {
-        support = desc ? await desc.load() : null;
+        support = desc ? await desc.load() : null; // ここで他の呼び出し/タブ切替が割り込みうる
       } catch {
         support = null; // 未対応/ロード失敗時はプレーン表示にフォールバックする
       }
+      if (myGen !== modeGen) return false; // 待っている間に割り込まれた → この結果はもう適用しない
       currentMode = "code";
       currentCodeLanguage = support ? desc.name : null;
       view.dispatch({
@@ -2403,6 +2468,7 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
           setDocContext.of({ mode: "code", language: currentCodeLanguage }), // カラープレビュー用
         ],
       });
+      return true;
     },
     // 現在コードモードで適用している言語ID。markdown/plainモード時、またはハイライトの
     // ロードに失敗しプレーン表示へフォールバックした場合はnull。
@@ -2431,14 +2497,39 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
       };
       const hasAlpha = (parsed.notation.kind === "hex" && (parsed.notation.hexLen === 4 || parsed.notation.hexLen === 8))
         || (parsed.notation.kind !== "hex" && parsed.notation.kind !== "name" && !!parsed.notation.hasAlpha);
-      let curFrom = from, curTo = to;
       view.dispatch({ effects: setColorPickerHighlight.of({ from, to }) });
+      // 不具合1の修正: 以前はcurFrom/curTo(パネルを開いた時点の座標)をJS側のクロージャ変数として
+      // 保持し、そのまま書き込み先に使っていた。パネルを開いたまま別の場所で編集(例: 先頭への
+      // 行挿入)が起きても、この座標は追従せず、書き込み位置がズレて文書を壊していた。
+      // colorPickerHighlightField(枠線ハイライト用に既にmapPosで追従させているStateField)を
+      // 対象範囲の唯一の情報源として使い回すことで、パネルを開いた後に起きた任意の変更
+      // (自分の書き込みも他の編集も区別せず)に追従させる。
+      let ended = false; // finish()/対象消失時の後始末の二重実行防止
+      let panelHandle = null; // openColorPickerPanelの戻り値。対象消失時に強制クローズするのに使う
+      // 対象範囲の「今」の位置を返す。範囲が編集で潰れている、またはそこにある文字列が
+      // もはや色リテラルとして解釈できない場合はnull(=対象が壊れたとみなす)。
+      const currentTarget = () => {
+        const r = view.state.field(colorPickerHighlightField, false);
+        if (!r || r.from >= r.to || r.to > view.state.doc.length) return null;
+        if (!parseColorLiteral(view.state.sliceDoc(r.from, r.to))) return null;
+        return r;
+      };
+      // 対象が編集で失われた場合の後始末: それ以上書き込まず、ハイライトを消して
+      // (onCancel/onCommitを呼ばずに)パネルを強制的に閉じる。
+      const abandon = () => {
+        if (ended) return;
+        ended = true;
+        view.dispatch({ effects: setColorPickerHighlight.of(null) });
+        if (panelHandle) panelHandle.close();
+      };
       const writeLive = (text) => {
+        if (ended) return;
+        const target = currentTarget();
+        if (!target) { abandon(); return; } // 対象が消えた/色リテラルでなくなった → これ以上書き込まない
         view.dispatch({
-          changes: { from: curFrom, to: curTo, insert: text },
+          changes: { from: target.from, to: target.to, insert: text },
           annotations: Transaction.addToHistory.of(false), // 仕様書 4.3: 中間状態はアンドゥ履歴に積まない
         });
-        curTo = curFrom + text.length;
       };
       // ドラッグ中の中間状態はいずれもaddToHistory:falseで書き換えるだけ(履歴に一切残らない)。
       // そのため確定時、そのまま閉じただけでは「開いた時の色→最終的な色」の変更が履歴のどこにも
@@ -2447,19 +2538,29 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
       // 通常の(履歴に残る)1回のトランザクションとして発行する、という2段階にする。
       // (2)の時点でのtr.startState.docは(1)により既に「開いた時の色」に戻っているため、
       // その差分だけが正しく1回分のアンドゥ対象になる。
+      // (不具合1の修正)from/toの代わりに、この瞬間のcurrentTarget()を使う。対象が既に
+      // 失われていれば何も書き込まずパネルを閉じるだけにする。
       const finish = (finalText) => {
-        writeLive(colorText); // (1) 無履歴でいったん元へ戻す
-        if (finalText !== colorText) {
-          // (2) 履歴に残る1回の変更。userEventは既定の"input.type"系の結合対象外にする
-          // (直前の無関係な入力と同じグループへ自動結合され、アンドゥが1色ぶんを超えて
-          // 巻き戻ってしまうのを防ぐ。CodeMirrorの履歴結合はuserEvent未指定/"input.type"系だと
-          // 位置が隣接していれば直前のイベントへ自動的に結合されるため)。
-          view.dispatch({ changes: { from, to: from + colorText.length, insert: finalText }, userEvent: "input.colorPicker" });
+        if (ended) return;
+        ended = true;
+        const target = currentTarget();
+        if (target) {
+          view.dispatch({
+            changes: { from: target.from, to: target.to, insert: colorText },
+            annotations: Transaction.addToHistory.of(false), // (1) 無履歴でいったん元へ戻す
+          });
+          if (finalText !== colorText) {
+            // (2) 履歴に残る1回の変更。userEventは既定の"input.type"系の結合対象外にする
+            // (直前の無関係な入力と同じグループへ自動結合され、アンドゥが1色ぶんを超えて
+            // 巻き戻ってしまうのを防ぐ。CodeMirrorの履歴結合はuserEvent未指定/"input.type"系だと
+            // 位置が隣接していれば直前のイベントへ自動的に結合されるため)。
+            view.dispatch({ changes: { from: target.from, to: target.from + colorText.length, insert: finalText }, userEvent: "input.colorPicker" });
+          }
         }
         view.dispatch({ effects: setColorPickerHighlight.of(null) });
         view.focus();
       };
-      openColorPickerPanel({
+      panelHandle = openColorPickerPanel({
         anchorRect,
         initialColor: parsed,
         hasAlpha,
@@ -2622,6 +2723,11 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
     // 呼び出し側がgetModeSnapshot/applyModeSnapshotで別途同期する必要がある。
     getEditorState: () => view.state,
     setEditorState: (state) => {
+      // 不具合3の修正: タブ切替でviewの中身がまるごと差し替わるため、その時点で
+      // 実行中のsetFileMode/setCodeLanguageの世代を進めておく。これにより、待機中だった
+      // 古い呼び出しがawaitから戻ってきても「割り込まれた」と判定されてdispatchされず、
+      // 切り替わった後のタブ(=別のEditorState)を誤って書き換えることがなくなる。
+      modeGen++;
       view.setState(state);
       if (onRender) requestAnimationFrame(() => onRender());
     },
@@ -2701,9 +2807,11 @@ function shiftHeadingLevel(view, delta) {
   if (m) {
     const newLevel = Math.min(6, Math.max(1, m[2].length + delta));
     if (newLevel === m[2].length) return;
-    view.dispatch({ changes: { from: line.from + m[1].length, to: line.from + m[1].length + m[2].length, insert: "#".repeat(newLevel) } });
+    // 不具合2と同じ理由: メニュー/ツールバーからの明示操作なのでuserEventを付け、連続実行時に
+    // まとめて1回のアンドゥにならないようにする。
+    view.dispatch({ changes: { from: line.from + m[1].length, to: line.from + m[1].length + m[2].length, insert: "#".repeat(newLevel) }, userEvent: "input.mdAction" });
   } else if (delta > 0) {
-    view.dispatch({ changes: { from: line.from, insert: "# " } });
+    view.dispatch({ changes: { from: line.from, insert: "# " }, userEvent: "input.mdAction" });
   }
   view.focus();
 }
@@ -2719,7 +2827,8 @@ function convertListType(view, target) {
   if (!m) return;
   const indent = m[1];
   const marker = target === "bullet" ? indent + uMarker + " " : target === "ordered" ? indent + "1" + oSep + " " : indent + uMarker + " [ ] ";
-  view.dispatch({ changes: { from: line.from, to: line.from + m[0].length, insert: marker } });
+  // 不具合2と同じ理由でuserEventを付ける(連続実行時に1操作=1アンドゥにするため)。
+  view.dispatch({ changes: { from: line.from, to: line.from + m[0].length, insert: marker }, userEvent: "input.mdAction" });
   view.focus();
 }
 // Setext形式の見出し(仕様書 headingStyle="setext")。レベル1・2のみ表現できるため、
@@ -2733,11 +2842,12 @@ function applySetextHeading(view, level) {
   const nextLine = line.number < state.doc.lines ? state.doc.line(line.number + 1) : null;
   const nextTrim = nextLine ? nextLine.text.trim() : "";
   const alreadyUnderlined = nextTrim !== "" && [...nextTrim].every((c) => c === underlineChar);
+  // 不具合2と同じ理由でuserEventを付ける(連続実行時に1操作=1アンドゥにするため)。
   if (alreadyUnderlined) {
-    view.dispatch({ changes: { from: line.from, to: nextLine.to, insert: text } });
+    view.dispatch({ changes: { from: line.from, to: nextLine.to, insert: text }, userEvent: "input.mdAction" });
   } else {
     const underline = underlineChar.repeat(Math.max(3, [...text].length));
-    view.dispatch({ changes: { from: line.from, to: line.to, insert: `${text}\n${underline}` } });
+    view.dispatch({ changes: { from: line.from, to: line.to, insert: `${text}\n${underline}` }, userEvent: "input.mdAction" });
   }
   view.focus();
 }
@@ -2752,7 +2862,8 @@ function deleteTableRowAtCursor(view) {
   const bodyIdx = rowIdx - 2;
   if (bodyIdx < 0 || bodyIdx >= t.body.length) return;
   t.body.splice(bodyIdx, 1);
-  view.dispatch({ changes: { from: t.from, to: t.to, insert: formatTableText(t) } });
+  // mutateTableと同じ理由(不具合2)でuserEventを付け、連続実行時にアンドゥが1操作分だけ戻るようにする。
+  view.dispatch({ changes: { from: t.from, to: t.to, insert: formatTableText(t) }, userEvent: "input.table" });
   view.focus();
 }
 // 書式を消去(仕様書 R-08)。選択範囲のマークダウン記法をすべて除去する。
@@ -3001,23 +3112,29 @@ function applyMdAction(view, action, payload) {
   // メニューバーからの記法生成(仕様書「記法の書き方」節)。見出しの記法(setext/atx)は
   // 呼び出し元(h1/h2ケース)で個別に分岐するため、ここではリスト記号・番号の区切りのみを扱う。
   const toggles = state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
+  // 不具合2の修正: applyMdActionの各アクションはツールバー/メニュー/コンテキストメニューからの
+  // 明示操作であり、表操作と同じく1操作=1アンドゥであるべき。userEvent未指定のままだと
+  // CodeMirrorのhistory結合規則(!userEvent かつ変更範囲が隣接/重複)で連続実行時に
+  // まとめて1回のアンドゥ対象になってしまう(表操作で実際に再現したのと同じ原因)。
+  // "input.type"/"delete"系にマッチしない専用のuserEventを共通で付ける。
+  const MD_ACTION_USER_EVENT = "input.mdAction";
   const linePrefix = (p) => {
     // 既存の同種プレフィックスがあればトグル、無ければ付与。浅いインデント(3個まで)の後ろで判定する
     const ind = line.text.match(/^ {0,3}/)[0].length;
     const base = line.from + ind;
     const cur = line.text.slice(ind).match(/^(#{1,6}\s|[-*+]\s\[[ xX]\]\s|[-*+]\s|\d+[.)]\s|>\s)/);
     if (cur && cur[0] === p) {
-      view.dispatch({ changes: { from: base, to: base + p.length }, selection: { anchor: Math.max(base, s - p.length) } });
+      view.dispatch({ changes: { from: base, to: base + p.length }, selection: { anchor: Math.max(base, s - p.length) }, userEvent: MD_ACTION_USER_EVENT });
     } else if (cur) {
-      view.dispatch({ changes: { from: base, to: base + cur[0].length, insert: p }, selection: { anchor: s - cur[0].length + p.length } });
+      view.dispatch({ changes: { from: base, to: base + cur[0].length, insert: p }, selection: { anchor: s - cur[0].length + p.length }, userEvent: MD_ACTION_USER_EVENT });
     } else {
-      view.dispatch({ changes: { from: base, insert: p }, selection: { anchor: s + p.length } });
+      view.dispatch({ changes: { from: base, insert: p }, selection: { anchor: s + p.length }, userEvent: MD_ACTION_USER_EVENT });
     }
     view.focus();
   };
-  const insert = (t, cursorOffset) => view.dispatch({ changes: { from: s, to: e, insert: t }, selection: { anchor: s + (cursorOffset ?? t.length) } });
-  const wrapSel = (w) => view.dispatch({ changes: [{ from: s, insert: w }, { from: e, insert: w }], selection: { anchor: s + w.length, head: e + w.length } });
-  const wrapPair = (open, close) => view.dispatch({ changes: [{ from: s, insert: open }, { from: e, insert: close }], selection: { anchor: s + open.length, head: e + open.length } });
+  const insert = (t, cursorOffset) => view.dispatch({ changes: { from: s, to: e, insert: t }, selection: { anchor: s + (cursorOffset ?? t.length) }, userEvent: MD_ACTION_USER_EVENT });
+  const wrapSel = (w) => view.dispatch({ changes: [{ from: s, insert: w }, { from: e, insert: w }], selection: { anchor: s + w.length, head: e + w.length }, userEvent: MD_ACTION_USER_EVENT });
+  const wrapPair = (open, close) => view.dispatch({ changes: [{ from: s, insert: open }, { from: e, insert: close }], selection: { anchor: s + open.length, head: e + open.length }, userEvent: MD_ACTION_USER_EVENT });
 
   switch (action) {
     case "bold": wrapSel("**"); break;
@@ -3030,7 +3147,7 @@ function applyMdAction(view, action, payload) {
     case "subscript": wrapSel("~"); break;
     case "eraseFormat": {
       const cleaned = eraseFormatting(selText);
-      view.dispatch({ changes: { from: s, to: e, insert: cleaned }, selection: { anchor: s, head: s + cleaned.length } });
+      view.dispatch({ changes: { from: s, to: e, insert: cleaned }, selection: { anchor: s, head: s + cleaned.length }, userEvent: MD_ACTION_USER_EVENT });
       break; // 仕様書 R-08
     }
     case "softBreak": insertSoftBreak(view); break; // 仕様書 E-02・M-01(共通処理はinsertSoftBreak)
@@ -3072,7 +3189,7 @@ function applyMdAction(view, action, payload) {
     }); break;
     case "tableDelete": {
       const t = tableAt(state, s);
-      if (t) view.dispatch({ changes: { from: t.from, to: t.to, insert: "" } });
+      if (t) view.dispatch({ changes: { from: t.from, to: t.to, insert: "" }, userEvent: "input.table" }); // mutateTableと同じ理由(不具合2)
       break;
     }
     case "tableAlignLeft": mutateTable(view, s, (t) => { t.aligns[payload?.col ?? 0] = "left"; }); break;
@@ -3085,7 +3202,7 @@ function applyMdAction(view, action, payload) {
       if (!node) break;
       const m = state.sliceDoc(node.from, node.to).match(/^\[([^\]]*)\]\(([^)]*)\)$/);
       if (!m) break;
-      view.dispatch({ changes: { from: node.from, to: node.to, insert: m[1] } });
+      view.dispatch({ changes: { from: node.from, to: node.to, insert: m[1] }, userEvent: MD_ACTION_USER_EVENT });
       break;
     }
     case "linkEditUrl": { // URL部分を選択してキャレットを置く(直接編集できるように)
@@ -3100,7 +3217,7 @@ function applyMdAction(view, action, payload) {
     }
     case "imageDelete": {
       const node = findAncestorNode(state, s, "Image");
-      if (node) view.dispatch({ changes: { from: node.from, to: node.to, insert: "" } });
+      if (node) view.dispatch({ changes: { from: node.from, to: node.to, insert: "" }, userEvent: MD_ACTION_USER_EVENT });
       break;
     }
     case "imageEditPath": { // パス部分を選択してキャレットを置く
@@ -3118,13 +3235,13 @@ function applyMdAction(view, action, payload) {
       const cb = codeBlockAt(view, s);
       if (!cb) break;
       const lang = payload?.lang ?? "";
-      if (cb.infoNode) view.dispatch({ changes: { from: cb.infoNode.from, to: cb.infoNode.to, insert: lang } });
-      else if (cb.openMark) view.dispatch({ changes: { from: cb.openMark.to, insert: lang } });
+      if (cb.infoNode) view.dispatch({ changes: { from: cb.infoNode.from, to: cb.infoNode.to, insert: lang }, userEvent: MD_ACTION_USER_EVENT });
+      else if (cb.openMark) view.dispatch({ changes: { from: cb.openMark.to, insert: lang }, userEvent: MD_ACTION_USER_EVENT });
       break;
     }
     case "codeblockDelete": {
       const cb = codeBlockAt(view, s);
-      if (cb) view.dispatch({ changes: { from: cb.from, to: cb.to, insert: "" } });
+      if (cb) view.dispatch({ changes: { from: cb.from, to: cb.to, insert: "" }, userEvent: MD_ACTION_USER_EVENT });
       break;
     }
     // ---- 数式ブロック/インライン数式(第2.9節) ----
@@ -3144,7 +3261,7 @@ function applyMdAction(view, action, payload) {
     }
     case "mathDelete": {
       const m = mathAt(view, s);
-      if (m) view.dispatch({ changes: { from: m.from, to: m.to, insert: "" } });
+      if (m) view.dispatch({ changes: { from: m.from, to: m.to, insert: "" }, userEvent: MD_ACTION_USER_EVENT });
       break;
     }
     case "selectAll": selectAll(view); break; // 仕様書 第2.1節・第5節
@@ -3157,7 +3274,7 @@ function applyMdAction(view, action, payload) {
     case "mathBlock": insert("$$\n" + selText + "\n$$", 3); break; // 仕様書 P-07
     case "frontMatter": {
       if (state.doc.length > 0 && state.doc.line(1).text === "---") break; // 既にある場合は何もしない
-      view.dispatch({ changes: { from: 0, insert: "---\ntitle: \n---\n\n" }, selection: { anchor: 10 } });
+      view.dispatch({ changes: { from: 0, insert: "---\ntitle: \n---\n\n" }, selection: { anchor: 10 }, userEvent: MD_ACTION_USER_EVENT });
       break; // 仕様書 P-14
     }
     case "image": {
@@ -3165,7 +3282,7 @@ function applyMdAction(view, action, payload) {
       const alt = payload?.alt ?? "";
       const path = payload?.path ?? "";
       const md = `![${alt}](${path})`;
-      view.dispatch({ changes: { from: s, to: e, insert: md }, selection: { anchor: s + md.length } });
+      view.dispatch({ changes: { from: s, to: e, insert: md }, selection: { anchor: s + md.length }, userEvent: MD_ACTION_USER_EVENT });
       break; // 仕様書 R-07
     }
     case "h": linePrefix("## "); break;
@@ -3177,7 +3294,7 @@ function applyMdAction(view, action, payload) {
     case "h4": linePrefix("#### "); break;
     case "h5": linePrefix("##### "); break;
     case "h6": linePrefix("###### "); break;
-    case "h0": { const m0 = line.text.match(/^( {0,3})(#{1,6}\s)/); if (m0) view.dispatch({ changes: { from: line.from + m0[1].length, to: line.from + m0[0].length }, selection: { anchor: Math.max(line.from, s - m0[2].length) } }); break; }
+    case "h0": { const m0 = line.text.match(/^( {0,3})(#{1,6}\s)/); if (m0) view.dispatch({ changes: { from: line.from + m0[1].length, to: line.from + m0[0].length }, selection: { anchor: Math.max(line.from, s - m0[2].length) }, userEvent: MD_ACTION_USER_EVENT }); break; }
     case "moveUp": moveLineUp(view); break;
     case "moveDown": moveLineDown(view); break;
     case "dupLine": copyLineDown(view); break;
@@ -3210,13 +3327,13 @@ function applyMdAction(view, action, payload) {
     // 引用・リストのインデント幅(仕様書 indentSizeOnSave、既定4)。2/4/8以外の値は既定4にフォールバックする。
     case "indent": {
       const n = [2, 4, 8].includes(toggles.indentSizeOnSave) ? toggles.indentSizeOnSave : 4;
-      view.dispatch({ changes: { from: line.from, insert: " ".repeat(n) } });
+      view.dispatch({ changes: { from: line.from, insert: " ".repeat(n) }, userEvent: MD_ACTION_USER_EVENT });
       break;
     }
     case "outdent": {
       const n = [2, 4, 8].includes(toggles.indentSizeOnSave) ? toggles.indentSizeOnSave : 4;
       const m = line.text.match(new RegExp(`^( {1,${n}}|\\t)`));
-      if (m) view.dispatch({ changes: { from: line.from, to: line.from + m[0].length } });
+      if (m) view.dispatch({ changes: { from: line.from, to: line.from + m[0].length }, userEvent: MD_ACTION_USER_EVENT });
       break;
     }
 
