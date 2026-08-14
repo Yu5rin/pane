@@ -4,7 +4,7 @@
 // 使えない場合(単体のブラウザで動作確認する場合)は File System Access API /
 // File API による仮実装にフォールバックする(Phase 1からの経路をそのまま維持)。
 import { createEditor, DEFAULT_FONT_SIZE } from "./editor.js";
-import { buildCommands, initMenuBar, initCommandPalette, initContextMenu, routeNativeMenuCommand, routeNativeMenuClosed, bindShortcuts, applyKeyBindings } from "./commands.js";
+import { buildCommands, initMenuBar, initCommandPalette, initContextMenu, routeNativeMenuCommand, routeNativeMenuClosed, bindShortcuts, applyKeyBindings, showContextMenu } from "./commands.js";
 import { createSearchUI } from "./search-ui.js";
 import { createSidebar } from "./sidebar.js";
 import { createQuickOpen } from "./quick-open.js";
@@ -33,6 +33,10 @@ const statusLineEnding = document.getElementById("status-line-ending");
 const statusWrapBtn = document.getElementById("status-wrap");
 const fileInput = document.getElementById("file-input");
 const imageInput = document.getElementById("image-input");
+// タブバー(仕様書 第2.10節 C-14、隠し設定)。displayMode==="tab"のときだけ表示する。
+const tabbarEl = document.getElementById("tabbar");
+const tabbarListEl = document.getElementById("tabbar-list");
+const tabbarNewBtn = document.getElementById("tabbar-new");
 // 内容からの編集モード自動判定(仕様書 第1章の拡張)の通知バナー。モーダルにはしない
 // (常時ステータスバー付近に浮かべ、入力の邪魔をしない)。
 const adBanner = document.getElementById("ad-banner");
@@ -169,6 +173,36 @@ let initialSidebarAutoOpenDone = false;
 // switchFileFromSidebar()がbridge経由の保存完了("save-result")を待つためのresolve関数群。
 let pendingSaveResolvers = [];
 
+// ---- タブ形式(仕様書 第2.10節 C-14・第3章「表示形式」、隠し設定) ----
+// 既定は"window"(無効)。apply-settingsのmsg.displayModeでのみ更新する。設定画面には
+// 切替UIを一切置かない(ユーザー指示。docs/設定項目一覧.mdの隠し設定の注記を参照)。
+// "window"のままなら以下のtabs配列・関連関数は一切使わず、既存のグローバル変数
+// (currentPath等)だけで完結させる。これにより「ウィンドウ形式の挙動を一切変えない」
+// (絶対条件)を保証する。
+let displayMode = "window";
+// タブの配列。displayMode==="tab"のときだけ使う。各要素:
+//   { id(連番。DOM紐付け用), guid(C#側のAutoSaveService用の識別子文字列),
+//     path, fileName, encoding, lineEnding, readOnly, dirty,
+//     editorState(CodeMirrorのEditorState。doc・選択範囲・アンドゥ履歴を含む),
+//     mode, codeLanguage, sourceMode(いずれもeditor.getModeSnapshot()相当),
+//     scrollTop, scrollLeft }
+// 「いま画面に出ている」内容(doc・選択・スクロール等)はアクティブタブの分だけ常にeditor側が
+// 持っており、tabs配列側のeditorState/scrollTop等は「非アクティブになった時点のスナップショット」
+// でしかない(タブ切替のたびsaveActiveTabSnapshotで同期する)。
+let tabs = [];
+let activeTabId = null;
+let tabIdSeq = 1;
+// ドラッグ中のタブID(ドラッグ&ドロップ並べ替え用)。
+let draggingTabId = null;
+function makeTabGuid() {
+  // crypto.randomUUID()はWebView2(Chromiumベース)・主要ブラウザいずれでも利用できるが、
+  // 念のため未対応環境向けの簡易フォールバックを用意する(C#側はGuid.Parseできれば良いだけ
+  // なので、ハイフン区切りの16進数であれば十分)。
+  if (window.crypto?.randomUUID) return window.crypto.randomUUID();
+  const hex = () => Math.floor(Math.random() * 0x10000).toString(16).padStart(4, "0");
+  return `${hex()}${hex()}-${hex()}-${hex()}-${hex()}-${hex()}${hex()}${hex()}`;
+}
+
 // 日時の挿入(仕様書 第3章 N-14)・「.LOG」自動追記(N-15)で共通して使う書式。
 // Windowsのメモ帳(日本語環境)に合わせ YYYY/MM/DD HH:mm とする。
 function formatDateTimeStamp(d) {
@@ -206,6 +240,15 @@ function setDirty(v) {
   // ステータスバー側にも出しておく。
   if (statusDirty) statusDirty.hidden = !v;
   bridge?.postMessage({ type: "dirty", value: v });
+  // タブ形式(仕様書 第2.10節 C-14): アクティブタブの●インジケータ・C#側への通知も同期する。
+  if (displayMode === "tab") {
+    const tab = tabs.find((t) => t.id === activeTabId);
+    if (tab && tab.dirty !== v) {
+      tab.dirty = v;
+      renderTabs();
+      notifyTabsChanged();
+    }
+  }
 }
 function setName(name) {
   currentName = name;
@@ -628,6 +671,7 @@ function getState() {
     alwaysOnTop: windowState.alwaysOnTop,
     showWordCount,
     keyBindings,
+    displayMode,
   };
 }
 
@@ -650,6 +694,9 @@ const ctx = {
       if (bridge) bridge.postMessage({ type: "new-window" });
       else window.open(location.href, "_blank", "noopener");
     },
+    // タブ形式(仕様書 第2.10節 C-14、隠し設定)。displayMode!=="tab"のときはcommands.js側の
+    // grayedで無効表示になっているため、ここへ到達するのは有効時のみ。
+    newTab,
     openFile,
     save: () => saveFile(false),
     saveAs: () => saveFile(true),
@@ -1157,6 +1204,326 @@ function decideFileMode(path, fileName) {
   return autoFileMode(fileName);
 }
 
+// ---- タブ形式(仕様書 第2.10節 C-14、隠し設定)本体 ----
+// 単一のCodeMirrorインスタンス(editor)を使い回し、タブ切替のたびeditor.setEditorState()で
+// EditorStateを丸ごと差し替える(タブごとにエディタを作らない。メモリと初期化コストのため)。
+// 「いま画面に出ている」タブの状態は既存のグローバル変数(currentPath/currentName/
+// currentEncoding/currentLineEnding/isDirty/isReadOnly)がそのまま兼ねる。これらは
+// ウィンドウ形式でも使われている変数のため、タブ切替のたびにここへ書き戻すことで、
+// ステータスバー・タイトルバー通知("dirty"等)・自動判定など既存のロジックを
+// タブ形式かどうかに関わらずそのまま使い回せる。
+function activeTab() {
+  return tabs.find((t) => t.id === activeTabId) ?? null;
+}
+// 現在アクティブなタブへ、いま画面に出ている内容(doc・選択・履歴・スクロール位置・
+// モード等)をスナップショットとして書き戻す。タブを切り替える/閉じる/自動保存へ返す前に
+// 必ず呼ぶ。
+function saveActiveTabSnapshot() {
+  const tab = activeTab();
+  if (!tab) return;
+  tab.editorState = editor.getEditorState();
+  Object.assign(tab, editor.getModeSnapshot());
+  tab.scrollTop = editor.view.scrollDOM.scrollTop;
+  tab.scrollLeft = editor.view.scrollDOM.scrollLeft;
+  tab.path = currentPath;
+  tab.fileName = currentName;
+  tab.encoding = currentEncoding;
+  tab.lineEnding = currentLineEnding;
+  tab.readOnly = isReadOnly;
+  tab.dirty = isDirty;
+}
+// C#側(タイトル・自動保存対象・セッション復元用パスの追跡)へ、タブの一覧を送る。
+// 頻度は「タブが増減した/切り替わった/dirty状態が変わった」時だけで、入力のたびには送らない。
+function notifyTabsChanged() {
+  if (!bridge || displayMode !== "tab") return;
+  bridge.postMessage({
+    type: "tabs-changed",
+    activeGuid: activeTab()?.guid ?? null,
+    tabs: tabs.map((t) => ({
+      guid: t.guid, path: t.path, fileName: t.fileName, dirty: t.dirty,
+      readOnly: t.readOnly, encoding: t.encoding, lineEnding: t.lineEnding,
+    })),
+  });
+}
+// タブバー(HTML)を丸ごと再描画する。タブ数は現実的に多くても数十件程度のため、
+// 差分更新はせず毎回作り直す(既存のsidebar.js等の一覧描画と同じ簡潔さを優先する)。
+function renderTabs() {
+  if (!tabbarEl) return;
+  tabbarEl.hidden = displayMode !== "tab";
+  if (tabbarEl.hidden) return;
+  tabbarListEl.innerHTML = "";
+  for (const tab of tabs) {
+    const el = document.createElement("div");
+    el.className = "tab-item" + (tab.id === activeTabId ? " active" : "");
+    el.setAttribute("role", "tab");
+    el.setAttribute("aria-selected", tab.id === activeTabId ? "true" : "false");
+    el.setAttribute("draggable", "true");
+    el.dataset.tabId = String(tab.id);
+    el.title = tab.path || tab.fileName;
+
+    const nameEl = document.createElement("span");
+    nameEl.className = "tab-item-name";
+    nameEl.textContent = tab.fileName;
+    el.appendChild(nameEl);
+
+    const dirtyEl = document.createElement("span");
+    dirtyEl.className = "tab-item-dirty";
+    dirtyEl.textContent = tab.dirty ? "●" : "";
+    el.appendChild(dirtyEl);
+
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "tab-item-close";
+    closeBtn.title = "閉じる";
+    closeBtn.setAttribute("aria-label", "閉じる");
+    closeBtn.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6 6 18"/></svg>';
+    closeBtn.addEventListener("click", (e) => { e.stopPropagation(); closeTab(tab.id); });
+    el.appendChild(closeBtn);
+
+    el.addEventListener("click", () => switchToTab(tab.id));
+    // 中クリックで閉じる。auxclickではなくmousedown(button===1)で処理することで、
+    // ブラウザ既定のオートスクロール開始より確実に先着させる。
+    el.addEventListener("mousedown", (e) => {
+      if (e.button === 1) { e.preventDefault(); closeTab(tab.id); }
+    });
+    el.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      showContextMenu(ctx, e.clientX, e.clientY, buildTabContextMenu(tab));
+    });
+
+    // ドラッグ&ドロップでの並べ替え。
+    el.addEventListener("dragstart", (e) => {
+      draggingTabId = tab.id;
+      el.classList.add("dragging");
+      e.dataTransfer.effectAllowed = "move";
+      // FirefoxやWebView2の一部実装ではsetDataを呼ばないとdragstart自体が成立しないことがあるため、
+      // 実際には使わないダミー値を入れておく(タブの並べ替えはdraggingTabId経由で行う)。
+      try { e.dataTransfer.setData("text/plain", String(tab.id)); } catch { /* 一部環境で例外時は無視 */ }
+    });
+    el.addEventListener("dragend", () => {
+      draggingTabId = null;
+      el.classList.remove("dragging");
+      clearTabDragOverClasses();
+    });
+    el.addEventListener("dragover", (e) => {
+      if (draggingTabId == null || draggingTabId === tab.id) return;
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const before = e.clientX - rect.left < rect.width / 2;
+      clearTabDragOverClasses();
+      el.classList.add(before ? "drag-over-before" : "drag-over-after");
+    });
+    el.addEventListener("drop", (e) => {
+      if (draggingTabId == null) return;
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const before = e.clientX - rect.left < rect.width / 2;
+      reorderTab(draggingTabId, tab.id, before);
+      clearTabDragOverClasses();
+    });
+
+    tabbarListEl.appendChild(el);
+  }
+}
+function clearTabDragOverClasses() {
+  tabbarListEl.querySelectorAll(".drag-over-before, .drag-over-after")
+    .forEach((el) => el.classList.remove("drag-over-before", "drag-over-after"));
+}
+function reorderTab(draggedId, targetId, before) {
+  if (draggedId === targetId) return;
+  const fromIdx = tabs.findIndex((t) => t.id === draggedId);
+  if (fromIdx < 0) return;
+  const [moved] = tabs.splice(fromIdx, 1);
+  let toIdx = tabs.findIndex((t) => t.id === targetId);
+  if (toIdx < 0) toIdx = tabs.length;
+  if (!before) toIdx += 1;
+  tabs.splice(toIdx, 0, moved);
+  renderTabs();
+  notifyTabsChanged();
+}
+// タブの右クリックメニュー(docs/コンテキストメニュー仕様.md の作法どおり、ネイティブポップアップ経由。
+// showContextMenuはブリッジが無い環境ではHTMLフォールバックにもなる)。
+function buildTabContextMenu(tab) {
+  const hasBridge = !!bridge;
+  return [
+    { label: "閉じる", run: () => closeTab(tab.id) },
+    { label: "他のタブを閉じる", enabled: tabs.length > 1, run: () => closeOtherTabs(tab.id) },
+    { label: "右側のタブを閉じる", enabled: tabs.indexOf(tab) < tabs.length - 1, run: () => closeTabsToRight(tab.id), separatorAfter: true },
+    { label: "フルパスをコピー", enabled: !!tab.path, run: () => navigator.clipboard.writeText(tab.path).catch(() => {}) },
+    { label: "エクスプローラーで表示", enabled: hasBridge && !!tab.path, run: () => bridge.postMessage({ type: "reveal-in-explorer", path: tab.path }) },
+  ];
+}
+async function closeOtherTabs(keepId) {
+  for (const id of tabs.filter((t) => t.id !== keepId).map((t) => t.id)) await closeTab(id);
+}
+async function closeTabsToRight(fromId) {
+  const idx = tabs.findIndex((t) => t.id === fromId);
+  if (idx < 0) return;
+  for (const id of tabs.slice(idx + 1).map((t) => t.id)) await closeTab(id);
+}
+// 新規タブ用の空のタブオブジェクトを作る(共通部分。newTab/openInNewTab/closeTabの補充から使う)。
+function makeEmptyTab() {
+  return {
+    id: tabIdSeq++,
+    guid: makeTabGuid(),
+    path: null,
+    fileName: "無題",
+    encoding: null,
+    lineEnding: null,
+    readOnly: false,
+    dirty: false,
+    editorState: editor.createFreshState(""),
+    mode: "markdown",
+    codeLanguage: null,
+    sourceMode: false,
+    scrollTop: 0,
+    scrollLeft: 0,
+  };
+}
+// タブ切替。skipSaveCurrent:trueは、閉じた直後の補充など「もう現在の内容を保存する意味がない」
+// 場合に使う(閉じたタブの内容をうっかり別タブへ上書きしないようにするため)。
+function switchToTab(id, { skipSaveCurrent = false } = {}) {
+  if (id === activeTabId) return;
+  const next = tabs.find((t) => t.id === id);
+  if (!next) return;
+  if (!skipSaveCurrent) saveActiveTabSnapshot();
+  activeTabId = id;
+  editor.setEditorState(next.editorState);
+  editor.applyModeSnapshot({ mode: next.mode, codeLanguage: next.codeLanguage, sourceMode: next.sourceMode });
+  resetAutoDetectState(); // 文書が変わるので内容からの自動判定の状態もタブごとにリセットする
+  currentPath = next.path;
+  setName(next.fileName);
+  currentEncoding = next.encoding;
+  currentLineEnding = next.lineEnding;
+  setReadOnly(next.readOnly);
+  setDirty(next.dirty);
+  const scrollTop = next.scrollTop, scrollLeft = next.scrollLeft;
+  requestAnimationFrame(() => {
+    editor.view.scrollDOM.scrollTop = scrollTop || 0;
+    editor.view.scrollDOM.scrollLeft = scrollLeft || 0;
+  });
+  updateCount();
+  updateStatusMeta();
+  updateStatusMode();
+  sidebar.setCurrentPath(currentPath);
+  renderTabs();
+  notifyTabsChanged();
+  // タブ見出し(ボタン)のクリックでフォーカスがそちらへ移ったままだと、キー入力や
+  // Ctrl+Z等のショートカット(CodeMirrorのkeymapはcontentDOMへフォーカスがある時だけ働く)が
+  // 効かなくなるため、切替のたび本文へフォーカスを戻す。
+  editor.focus();
+}
+// 新しいタブ(File > 新しいタブ、"+"ボタン)。空のMarkdown文書を追加してそこへ切り替える。
+async function newTab() {
+  saveActiveTabSnapshot();
+  const tab = makeEmptyTab();
+  tabs.push(tab);
+  switchToTab(tab.id, { skipSaveCurrent: true });
+  editor.focus();
+}
+// タブを閉じる。未保存(dirty)なら確認する(ブラウザ標準ダイアログは使わず、必ずpaneConfirmを使う)。
+// キャンセルすれば何もしない。最後の1タブを閉じようとした場合は、空の新規タブで補充する
+// (タブ形式でも「タブが0枚」という状態は作らない。ウィンドウ自体を閉じたい場合は
+// 従来どおりFile>閉じる/Ctrl+Wを使う)。
+async function closeTab(id) {
+  const tab = tabs.find((t) => t.id === id);
+  if (!tab) return;
+  if (id === activeTabId) saveActiveTabSnapshot();
+  if (tab.dirty) {
+    const ok = await paneConfirm({
+      title: "閉じますか?",
+      message: `「${tab.fileName}」には保存されていない変更があります。閉じてもよろしいですか?`,
+      okLabel: "閉じる",
+      danger: true,
+    });
+    if (!ok) return;
+  }
+  // 確認待ちの間にタブ自体が既に閉じられている(多重操作)可能性への保険。
+  const idx = tabs.indexOf(tab);
+  if (idx < 0) return;
+  tabs.splice(idx, 1);
+  if (tabs.length === 0) tabs.push(makeEmptyTab());
+  if (id === activeTabId) {
+    const nextIdx = Math.min(idx, tabs.length - 1);
+    switchToTab(tabs[nextIdx].id, { skipSaveCurrent: true });
+  } else {
+    renderTabs();
+    notifyTabsChanged();
+  }
+}
+// displayModeの反映(apply-settingsのたび呼ばれる)。タブ形式が初めて有効になった時点で、
+// 現在ウィンドウ形式で表示していた文書をそのまま最初のタブへ移行する。既にタブ運用中に
+// 再度apply-settingsが届いた場合(通常の設定変更等)はtabsを一切いじらない
+// (再構築すると編集中の内容・カーソル位置等を失ってしまうため)。
+function applyDisplayMode(next) {
+  const wasTab = displayMode === "tab";
+  displayMode = next === "tab" ? "tab" : "window";
+  if (displayMode === "tab" && !wasTab) {
+    const tab = {
+      id: tabIdSeq++,
+      guid: makeTabGuid(),
+      path: currentPath,
+      fileName: currentName,
+      encoding: currentEncoding,
+      lineEnding: currentLineEnding,
+      readOnly: isReadOnly,
+      dirty: isDirty,
+      editorState: editor.getEditorState(),
+      ...editor.getModeSnapshot(),
+      scrollTop: editor.view.scrollDOM.scrollTop,
+      scrollLeft: editor.view.scrollDOM.scrollLeft,
+    };
+    tabs = [tab];
+    activeTabId = tab.id;
+    notifyTabsChanged();
+  }
+  renderTabs();
+}
+// C#側からのタブ追加要求("open-in-tab": コマンドライン引数・D&D・多重起動時のパイプ・
+// 「最近使ったファイル」・サイドバー・グローバル検索・クイックオープン等、ファイルを開く
+// 要求全般。C#側がdisplayMode==="tab"のときだけこのメッセージ型を使う)。
+async function applyOpenInTab(msg) {
+  if (displayMode !== "tab") {
+    // 通常は届かないはずだが、設定の反映タイミングのずれ等への保険として
+    // 従来のfile-openedと同じ挙動にフォールバックする。
+    await applyFileOpened(msg);
+    return;
+  }
+  saveActiveTabSnapshot();
+  const tab = makeEmptyTab();
+  tab.editorState = editor.createFreshState(msg.text ?? "");
+  tab.path = msg.path ?? null;
+  tab.fileName = msg.fileName;
+  tab.encoding = msg.encoding;
+  tab.lineEnding = msg.lineEnding;
+  tab.readOnly = !!msg.readOnly;
+  tab.dirty = false;
+  tabs.push(tab);
+  switchToTab(tab.id, { skipSaveCurrent: true });
+  // createFreshStateは常にMarkdown初期状態のため、拡張子・記憶に基づく実際のモードを
+  // 改めて適用する(applyFileOpenedと同じ決定ロジック)。
+  await editor.setFileMode(msg.fileName, decideFileMode(msg.path ?? null, msg.fileName));
+  Object.assign(tab, editor.getModeSnapshot());
+  updateStatusMode();
+}
+// 自動保存(仕様書 N-06)のタブ全件対応。C#側から"request-all-tabs-text"が届いたら、
+// 全タブの本文をまとめて返す(request-text/text-responseの単一文書版と同じ役割)。
+function respondAllTabsText() {
+  saveActiveTabSnapshot();
+  bridge.postMessage({
+    type: "all-tabs-text-response",
+    tabs: tabs.map((t) => ({
+      guid: t.guid,
+      path: t.path,
+      dirty: t.dirty,
+      text: t.id === activeTabId ? editor.getValue() : t.editorState.doc.toString(),
+      encoding: t.encoding,
+      lineEnding: t.lineEnding,
+    })),
+  });
+}
+tabbarNewBtn?.addEventListener("click", () => newTab());
+
 async function applyFileOpened(msg) {
   pushClosedFile(currentPath);
   resetAutoDetectState(); // 文書が変わるので内容からの自動判定の状態(仕様書 第1章の拡張)もリセット
@@ -1223,6 +1590,16 @@ async function handleHostMessage(msg) {
     case "new-document":
       pushClosedFile(currentPath);
       await applyNewDocumentLocal();
+      break;
+    case "open-in-tab":
+      // タブ形式(仕様書 第2.10節 C-14): コマンドライン引数・D&D・多重起動時のパイプ・
+      // 「最近使ったファイル」等、C#側がdisplayMode==="tab"のときにファイルを開く要求を
+      // 新規ウィンドウの代わりにここへ送ってくる。
+      await applyOpenInTab(msg);
+      break;
+    case "request-all-tabs-text":
+      // 自動保存(仕様書 N-06)のタブ全件対応。request-text/text-responseの複数タブ版。
+      respondAllTabsText();
       break;
     case "save-result":
       if (msg.ok) {
@@ -1321,6 +1698,9 @@ async function handleHostMessage(msg) {
       defaultCopyFormat = msg.defaultCopyFormat ?? "markdown";
       pandocAvailable = !!msg.pandocAvailable;
       recentFiles = msg.recentFiles ?? [];
+      // 表示形式(仕様書 第2.10節 C-14、隠し設定)。設定画面には切替UIが無いため、
+      // settings.jsonを直接編集した場合のみ"tab"になる。
+      applyDisplayMode(msg.displayMode);
       // エクスポート・印刷の詳細設定(仕様書「エクスポート・印刷」節)。届いたキーだけ上書きし、
       // 未指定のキーは既定値(exportSettingsの初期値)を保つ。
       for (const key of Object.keys(exportSettings)) {

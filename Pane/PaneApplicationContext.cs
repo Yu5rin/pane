@@ -113,6 +113,11 @@ internal sealed class PaneApplicationContext : ApplicationContext
         }
         else if (_settings.StartupBehavior == "restoreSession" && _settings.OpenFilePaths.Count > 0)
         {
+            // タブ形式(仕様書 第2.10節 C-14、隠し設定)のときは、前回終了時に開いていた
+            // 全パスを1つのウィンドウへまとめてタブとして復元する(ウィンドウ形式では
+            // 従来どおりパスごとに別ウィンドウを開く)。1件目はOpenWindowで最初のウィンドウを
+            // 作り、以後はそのウィンドウのOpenWindow内タブ振り分け(_windows.Count > 0)に
+            // 自然に乗るため、2件目以降も同じOpenWindow呼び出しで構わない。
             foreach (string path in _settings.OpenFilePaths)
             {
                 if (!File.Exists(path)) continue;
@@ -150,6 +155,22 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// </summary>
     public void OpenWindow(string? path, AutoSaveSnapshot? recoverFrom = null, DroppedFileContent? droppedFile = null, string? initialFolderPath = null)
     {
+        // タブ形式(仕様書 第2.10節 C-14、隠し設定): 既存のウィンドウがあれば新規ウィンドウを
+        // 作らず、そちらへ新しいタブとして開くよう依頼する(ユーザー指示:
+        // 「ファイルを開く要求は新しいウィンドウではなく既存ウィンドウの新しいタブへ送る」)。
+        // 異常終了からの復元(recoverFrom)・起動時のカスタムフォルダ(initialFolderPath)は
+        // タブ1枚には収まらない情報のため対象外とし、従来どおり新規ウィンドウを作る。
+        // 起動直後(_windows.Count==0)は当然対象外(振り分け先が無いため)。
+        if (_settings.DisplayMode == "tab" && recoverFrom is null && initialFolderPath is null && _windows.Count > 0)
+        {
+            MainForm target = _windows[^1];
+            target.OpenInNewTab(path);
+            if (target.WindowState == FormWindowState.Minimized) target.WindowState = FormWindowState.Normal;
+            target.Activate();
+            Logger.Write($"OpenWindow: タブ形式のため既存ウィンドウへ新しいタブとして開く(path={path ?? "(なし)"})");
+            return;
+        }
+
         var form = new MainForm(
             path,
             recoverFrom,
@@ -285,9 +306,10 @@ internal sealed class PaneApplicationContext : ApplicationContext
         {
             // アプリ全体としての終了。次回のセッション復元用に、開いていたファイルパスを保存する
             // (仕様書 N-07: 復元スコープはファイルパスのみ、スクロール位置等は含めない)。
+            // タブ形式(第2.10節 C-14)ではGetOpenFilePathsが各ウィンドウの全タブぶんのパスを
+            // 返すため、ウィンドウ形式・タブ形式どちらでも同じ呼び出しで正しく集まる。
             openFilePaths = _windows
-                .Where(w => w.CurrentPath is not null)
-                .Select(w => w.CurrentPath!)
+                .SelectMany(w => w.GetOpenFilePaths())
                 .ToList();
         }
 

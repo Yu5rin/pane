@@ -77,6 +77,13 @@ internal sealed class MainForm : Form
     private bool _isDirty;
     private bool _isReadOnly;
 
+    /// <summary>タブ形式(仕様書 第2.10節 C-14、隠し設定)のとき、JS側(main.js)の"tabs-changed"で
+    /// 更新される、現在このウィンドウで開いている全タブの情報。タブ形式でない、またはまだ
+    /// 一度もtabs-changedを受信していない間は空のまま(この場合は_currentPath等、従来どおり
+    /// 「1ウィンドウ=1ファイル」のフィールドだけを見ればよい)。</summary>
+    private readonly record struct TabInfo(string Guid, string? Path, bool Dirty);
+    private List<TabInfo> _tabInfos = new();
+
     /// <summary>現在サイドバーに読み込み済みのフォルダのルートパス(仕様書 第2.8節)。
     /// ファイルを開くたびに同じフォルダを再走査しないよう、これと比較する。</summary>
     private string? _loadedFolderRootPath;
@@ -102,6 +109,20 @@ internal sealed class MainForm : Form
     public string? CurrentPath => _currentPath;
 
     public bool IsDirty => _isDirty;
+
+    /// <summary>
+    /// セッション復元(仕様書 N-07)用。タブ形式(第2.10節 C-14)ならこのウィンドウで開いている
+    /// 全タブのパス(パスがあるものだけ)を、そうでなければ従来どおり<see cref="CurrentPath"/>
+    /// 1件(あれば)を返す。<see cref="PaneApplicationContext"/>が全ウィンドウぶんを集約する。
+    /// </summary>
+    public IReadOnlyList<string> GetOpenFilePaths()
+    {
+        if (_tabInfos.Count > 0)
+        {
+            return _tabInfos.Where(t => t.Path is not null).Select(t => t.Path!).ToList();
+        }
+        return _currentPath is not null ? new List<string> { _currentPath } : Array.Empty<string>();
+    }
 
     public MainForm(
         string? initialPath,
@@ -428,6 +449,15 @@ internal sealed class MainForm : Form
                 {
                     WriteAutoSaveSnapshot(textProp.GetString() ?? "");
                 }
+                break;
+            case "tabs-changed":
+                // タブ形式(仕様書 第2.10節 C-14、隠し設定)。タブの一覧・アクティブタブが
+                // 変わるたびJS側(main.js)から届く。
+                HandleTabsChanged(root);
+                break;
+            case "all-tabs-text-response":
+                // タブ形式の自動保存(仕様書 N-06)。"request-all-tabs-text"の応答。
+                HandleAllTabsTextResponse(root);
                 break;
             case "open-settings":
                 ShowSettingsDialog();
@@ -808,6 +838,15 @@ internal sealed class MainForm : Form
 
     private async Task HandleOpenPathRequestAsync(string path)
     {
+        // タブ形式(仕様書 第2.10節 C-14、隠し設定)のときは、現在のタブを置き換えず
+        // 新しいタブとして開く(保存確認も不要。既存の文書はそのまま残るため)。
+        // 「最近使ったファイル」・サイドバーのファイル一覧/ツリー・クイックオープン・
+        // グローバル検索結果のクリックは、いずれもこの経路(open-path)を通る。
+        if (SettingsService.Load().DisplayMode == "tab")
+        {
+            OpenInNewTab(path);
+            return;
+        }
         if (!await ConfirmDiscardDirtyAsync()) return;
         OpenFile(path);
     }
@@ -969,6 +1008,169 @@ internal sealed class MainForm : Form
                 "Pane",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
+        }
+    }
+
+    /// <summary>
+    /// タブ形式(仕様書 第2.10節 C-14、隠し設定)のとき、新規ウィンドウの代わりにこのウィンドウへ
+    /// 新しいタブとしてファイルを開く。<see cref="OpenFile"/>と違い、このウィンドウの現在の文書
+    /// (アクティブタブ)には一切触れない(_currentPath等は更新しない。アクティブタブの情報は
+    /// JS側からの直後の"tabs-changed"で反映される)。
+    /// 呼び出し元: <see cref="PaneApplicationContext.OpenWindow"/>(コマンドライン引数・
+    /// 多重起動時のパイプ・File&gt;開く等、本来新規ウィンドウを作る経路すべて)、
+    /// <see cref="HandleOpenPathRequestAsync"/>(最近使ったファイル・サイドバー・
+    /// クイックオープン・グローバル検索結果等)、<see cref="OnDragDrop"/>(D&amp;D)。
+    /// pathがnullなら新規の空文書タブを開く(File&gt;新規作成に相当)。
+    /// </summary>
+    public void OpenInNewTab(string? path)
+    {
+        if (path is null)
+        {
+            AppSettings newDocSettings = SettingsService.Load();
+            PostToWeb(new
+            {
+                type = "open-in-tab",
+                text = "",
+                fileName = "無題",
+                path = (string?)null,
+                encoding = TextFileService.EncodingLabel(TextFileService.ParseEncodingKey(newDocSettings.DefaultEncoding)),
+                lineEnding = TextFileService.LineEndingLabel(TextFileService.ParseLineEndingKey(newDocSettings.DefaultLineEnding)),
+                readOnly = false,
+            });
+            return;
+        }
+
+        Logger.Write($"OpenInNewTab: {path}");
+        try
+        {
+            LoadResult result = TextFileService.Load(path);
+            bool readOnly = IsFileReadOnly(path);
+            AddRecentFile(path);
+            PostToWeb(new
+            {
+                type = "open-in-tab",
+                text = result.Text,
+                fileName = Path.GetFileName(path),
+                path,
+                encoding = TextFileService.EncodingLabel(result.Encoding),
+                lineEnding = TextFileService.LineEndingLabel(result.LineEnding),
+                readOnly,
+            });
+            AutoLoadParentFolder(path);
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException($"タブとして開けなかった: {path}", ex);
+            MessageBox.Show(
+                this,
+                $"ファイルを開けませんでした。\n{ex.Message}",
+                "Pane",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+    }
+
+    /// <summary>
+    /// タブ形式(仕様書 第2.10節 C-14)。JS側(main.js)からタブの一覧・アクティブタブが
+    /// 変わるたびに届く"tabs-changed"を受け取り、(1)セッション復元・自動保存対象として
+    /// <see cref="_tabInfos"/>を更新し、(2)アクティブタブの情報でこのクラスが元々持っている
+    /// 「現在の文書」を表すフィールド(_currentPath等)を更新する。これにより
+    /// <see cref="UpdateTitle"/>・外部変更監視(<see cref="StartWatching"/>)など、
+    /// 元々1ウィンドウ=1ファイル前提だったロジックをタブ形式でもそのまま使い回せる。
+    /// </summary>
+    private void HandleTabsChanged(JsonElement root)
+    {
+        string? activeGuid = root.TryGetProperty("activeGuid", out JsonElement agProp) && agProp.ValueKind == JsonValueKind.String
+            ? agProp.GetString()
+            : null;
+
+        var tabInfos = new List<TabInfo>();
+        string? activePath = null;
+        bool activeDirty = false;
+        bool activeReadOnly = false;
+        FileEncodingKind activeEncoding = _currentEncoding;
+        LineEndingKind activeLineEnding = _currentLineEnding;
+        bool foundActive = false;
+
+        if (root.TryGetProperty("tabs", out JsonElement tabsProp) && tabsProp.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement t in tabsProp.EnumerateArray())
+            {
+                string guid = t.TryGetProperty("guid", out JsonElement gProp) ? gProp.GetString() ?? "" : "";
+                string? tPath = t.TryGetProperty("path", out JsonElement pProp) && pProp.ValueKind == JsonValueKind.String ? pProp.GetString() : null;
+                bool dirty = t.TryGetProperty("dirty", out JsonElement dProp) && dProp.GetBoolean();
+                tabInfos.Add(new TabInfo(guid, tPath, dirty));
+
+                if (activeGuid is not null && guid == activeGuid)
+                {
+                    foundActive = true;
+                    activePath = tPath;
+                    activeDirty = dirty;
+                    activeReadOnly = t.TryGetProperty("readOnly", out JsonElement rProp) && rProp.GetBoolean();
+                    if (t.TryGetProperty("encoding", out JsonElement eProp) && eProp.ValueKind == JsonValueKind.String)
+                    {
+                        activeEncoding = TextFileService.ParseEncodingLabel(eProp.GetString() ?? "");
+                    }
+                    if (t.TryGetProperty("lineEnding", out JsonElement leProp) && leProp.ValueKind == JsonValueKind.String)
+                    {
+                        activeLineEnding = TextFileService.ParseLineEndingLabel(leProp.GetString() ?? "");
+                    }
+                }
+            }
+        }
+
+        _tabInfos = tabInfos;
+        if (!foundActive) return; // アクティブタブ不明時は_currentPath等を不用意に消さない
+
+        bool pathChanged = !string.Equals(_currentPath, activePath, StringComparison.OrdinalIgnoreCase);
+        _currentPath = activePath;
+        _currentEncoding = activeEncoding;
+        _currentLineEnding = activeLineEnding;
+        _isReadOnly = activeReadOnly;
+        _isDirty = activeDirty;
+        UpdateTitle();
+        // アクティブタブが切り替わった/パスが変わった場合のみ外部変更監視を張り直す
+        // (同じタブのdirty変化だけで毎回FileSystemWatcherを作り直すのは無駄なため)。
+        if (pathChanged)
+        {
+            if (activePath is not null) StartWatching(activePath);
+            else StopWatching();
+        }
+    }
+
+    /// <summary>
+    /// タブ形式の自動保存(仕様書 N-06)。<see cref="RequestAutoSaveSnapshot"/>が送った
+    /// "request-all-tabs-text"の応答。タブごとにdirtyならスナップショットを書き、
+    /// dirtyでなければ(明示保存済み・元々未変更)残っているスナップショットを消す。
+    /// タブのGuidはJS側(main.js)がタブ作成時に発行した文字列をそのまま使う。
+    /// </summary>
+    private void HandleAllTabsTextResponse(JsonElement root)
+    {
+        if (!root.TryGetProperty("tabs", out JsonElement tabsProp) || tabsProp.ValueKind != JsonValueKind.Array) return;
+
+        foreach (JsonElement t in tabsProp.EnumerateArray())
+        {
+            string? guidStr = t.TryGetProperty("guid", out JsonElement gProp) ? gProp.GetString() : null;
+            if (guidStr is null || !Guid.TryParse(guidStr, out Guid tabId)) continue;
+
+            bool dirty = t.TryGetProperty("dirty", out JsonElement dProp) && dProp.GetBoolean();
+            if (!dirty)
+            {
+                AutoSaveService.DeleteSnapshot(tabId);
+                continue;
+            }
+
+            string text = t.TryGetProperty("text", out JsonElement textProp) ? textProp.GetString() ?? "" : "";
+            string? path = t.TryGetProperty("path", out JsonElement pProp) && pProp.ValueKind == JsonValueKind.String ? pProp.GetString() : null;
+            FileEncodingKind encoding = t.TryGetProperty("encoding", out JsonElement eProp) && eProp.ValueKind == JsonValueKind.String
+                ? TextFileService.ParseEncodingLabel(eProp.GetString() ?? "")
+                : FileEncodingKind.Utf8;
+            LineEndingKind lineEnding = t.TryGetProperty("lineEnding", out JsonElement leProp) && leProp.ValueKind == JsonValueKind.String
+                ? TextFileService.ParseLineEndingLabel(leProp.GetString() ?? "")
+                : LineEndingKind.Crlf;
+
+            var snapshot = new AutoSaveSnapshot(path, text, encoding, lineEnding, true, DateTime.UtcNow);
+            AutoSaveService.WriteSnapshot(tabId, snapshot);
         }
     }
 
@@ -1346,6 +1548,13 @@ internal sealed class MainForm : Form
         if (e.Data?.GetData(DataFormats.FileDrop) is string[] { Length: > 0 } paths)
         {
             Logger.Write($"OnDragDrop: paths=[{string.Join(",", paths)}]");
+            // タブ形式(仕様書 第2.10節 C-14、隠し設定)のときは、現在の文書を保存確認なしに
+            // 置き換えず、新しいタブとして開く。
+            if (SettingsService.Load().DisplayMode == "tab")
+            {
+                OpenInNewTab(paths[0]);
+                return;
+            }
             if (!await ConfirmDiscardDirtyAsync()) return;
             // このウィンドウには先頭の1件を開く。複数ファイルは呼び出し元(D&D)が
             // 別ウィンドウとして開くかどうかを判断する(Phase 3のカスケード配置)。
@@ -1381,6 +1590,14 @@ internal sealed class MainForm : Form
 
     private void RequestAutoSaveSnapshot()
     {
+        // タブ形式(仕様書 第2.10節 C-14)。一度でもtabs-changedを受信していれば
+        // (=タブ形式で運用中)、全タブぶんまとめて要求する(request-text/text-responseの
+        // 単一文書版とは別経路。HandleAllTabsTextResponse参照)。
+        if (_tabInfos.Count > 0)
+        {
+            if (_tabInfos.Any(t => t.Dirty)) PostToWeb(new { type = "request-all-tabs-text" });
+            return;
+        }
         if (!_isDirty) return;
         // 本文はJS(CodeMirror)側にしかないため、都度取得を依頼する。
         // 頻繁なキー入力のたびには送らず、タイマー間隔(既定30秒)でのみ発生させる。

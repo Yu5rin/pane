@@ -241,6 +241,27 @@ html[data-theme="dark"] #theme-moon { display: none; }
 .menu-theme-btn { border: none; background: transparent; color: var(--ink-mute); font: inherit; cursor: pointer; padding: 4px 8px; border-radius: 6px; display: inline-flex; align-items: center; }
 .menu-theme-btn:hover { color: var(--ink); background: var(--accent-soft); }
 
+/* ===== タブバー(仕様書 第2.10節 C-14、隠し設定) =====
+   settings.jsonを直接編集してdisplayMode:"tab"にしたときだけmain.jsがhiddenを外して表示する
+   (設定画面には切替UIを置かない。main.js側のapplyDisplayMode参照)。
+   横に並ぶタブ一覧(#tabbar-list)は項目数が多いときoverflow-xでスクロールさせるが、
+   *{scrollbar-width:thin}が全体に効いているため専用のスクロールバー抑制は不要。 */
+#tabbar { display: flex; align-items: stretch; height: 32px; border-bottom: 1px solid var(--rule); flex: none; font-size: 12.5px; }
+#tabbar[hidden] { display: none; }
+.tabbar-list { flex: 1; min-width: 0; display: flex; align-items: stretch; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
+.tab-item { display: flex; align-items: center; gap: 6px; min-width: 120px; max-width: 220px; padding: 0 6px 0 12px; border-right: 1px solid var(--rule); background: transparent; color: var(--ink-mute); cursor: pointer; flex: none; user-select: none; }
+.tab-item:hover { background: var(--accent-soft); color: var(--ink); }
+.tab-item.active { background: var(--paper); color: var(--ink); box-shadow: inset 0 -2px 0 var(--accent); }
+.tab-item.drag-over-before { box-shadow: inset 2px 0 0 var(--accent); }
+.tab-item.drag-over-after { box-shadow: inset -2px 0 0 var(--accent); }
+.tab-item.dragging { opacity: .5; }
+.tab-item-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tab-item-dirty { flex: none; width: 8px; text-align: center; color: var(--accent); }
+.tab-item-close { flex: none; border: none; background: transparent; color: inherit; opacity: .6; cursor: pointer; padding: 3px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; }
+.tab-item-close:hover { opacity: 1; background: var(--accent-soft); color: var(--accent); }
+.tabbar-new-btn { flex: none; width: 32px; border: none; border-left: 1px solid var(--rule); background: transparent; color: var(--ink-mute); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+.tabbar-new-btn:hover { color: var(--accent); background: var(--accent-soft); }
+
 /* ===== 文字数カウントの詳細ポップアップ(仕様書 W-02) =====
    見た目は既存の.menu-dropdown(--surface背景・--line枠・--shadow-pop)と揃える。 */
 .wc-pop { min-width: 260px; padding: 6px 4px; gap: 0; }
