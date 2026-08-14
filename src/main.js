@@ -9,7 +9,6 @@ import { createSearchUI } from "./search-ui.js";
 import { createSidebar } from "./sidebar.js";
 import { createQuickOpen } from "./quick-open.js";
 import { createWordCountPopup } from "./word-count.js";
-import { createSettings } from "./settings.js";
 import { htmlToMarkdown } from "./html-to-markdown.js";
 import { parseFrontMatterOverrides } from "./md-to-html.js";
 import { resolveFileMode, codeLanguages } from "./languages.js";
@@ -159,9 +158,25 @@ const AUTO_DETECT_CONFIDENCE_MIN = 0.55;
 // 全画面表示・常に手前に表示(仕様書 V-08/V-12)の状態。実際のトグルはC#側(WinForms)が
 // 持っており、"window-state"で都度届く値をそのまま保持するだけ(第10.5節: JS側は表示専用)。
 let windowState = { fullscreen: false, alwaysOnTop: false };
-// 設定画面(仕様書 第2.10節)。ctx構築後(buildCommands()でctx.commandsが揃ってから)生成するため、
-// ctx.actions.openSettingsは変数越しに参照するだけにしておく(sidebar/quickOpenと同じ遅延生成の形)。
+// 設定画面(仕様書 第2.10節)。実機(WebView2、bridgeあり)では常にC#側の専用ウィンドウ
+// (Pane/SettingsWindow.cs)を開かせるため、ここのsettingsUI(settings.js製のHTMLモーダル)は
+// ブリッジが無いブラウザ単体動作(開発確認用)のフォールバックとしてしか使われない。
+// settings.js自体は90KB超あり(第8.4節、初期ロードJS)、本体では出番が無いことが多いため、
+// ctx構築後(buildCommands()でctx.commandsが揃ってから)即座に生成せず、実際に必要になった
+// 瞬間(=ブリッジ無しでopenSettings()が呼ばれた最初の1回)にだけ動的importする
+// (math.js/mermaid-render.js/color-picker-panel.jsと同じ作法)。
 let settingsUI = null;
+let settingsUIPromise = null;
+function ensureSettingsUI() {
+  if (settingsUI) return Promise.resolve(settingsUI);
+  if (!settingsUIPromise) {
+    settingsUIPromise = import("./settings.js").then(({ createSettings }) => {
+      settingsUI = createSettings(ctx);
+      return settingsUI;
+    });
+  }
+  return settingsUIPromise;
+}
 // Ctrl+マウスホイールでの文字サイズ変更(仕様書 zoomWithCtrlWheel、既定true)。
 let zoomWithCtrlWheelOn = true;
 // サイドバーのファイル一覧・ツリーからの切替時、未保存の変更を確認せず保存してから
@@ -908,10 +923,11 @@ const ctx = {
     // 独立した専用ウィンドウ(Pane/SettingsWindow.cs、src/settings-entry.js)をC#側に
     // 開かせる(同時に1つしか開かない。既に開いていればC#側が前面に出す)。
     // ブリッジが無いブラウザ単体動作(開発確認用)では専用ウィンドウを開かせようが無いため、
-    // 従来どおりHTML製のモーダル(settings.js)を出すフォールバックを残す。
+    // 従来どおりHTML製のモーダル(settings.js)を出すフォールバックを残す
+    // (settings.js自体はここで初めて動的importする。ensureSettingsUI()参照)。
     openSettings(category) {
       if (bridge) { bridge.postMessage({ type: "open-settings-window" }); return; }
-      settingsUI?.open(category);
+      ensureSettingsUI().then((ui) => ui.open(category));
     },
     async closeWindow() {
       // 未保存の変更がある場合の保存確認はC#側(FormClosing)が一元的に行う
@@ -1094,9 +1110,9 @@ statusLineEnding.addEventListener("click", () => {
 });
 
 // 設定画面(仕様書 第2.10節)。キーバインドタブがコマンド一覧を必要とするため、
-// buildCommands()の後でctx.commandsとして公開してから生成する。
+// buildCommands()の後でctx.commandsとして公開しておく(settings.js自体の読み込み・生成は
+// ensureSettingsUI()により実際に必要になるまで遅延する。上のコメント参照)。
 ctx.commands = commands;
-settingsUI = createSettings(ctx);
 
 // 検証用の入口。ブリッジが無いとき(=WebView2ではなく素のブラウザで開いたとき)だけ公開する。
 // Pane本体(WebView2)では window.chrome.webview が必ず存在するため、この分岐は常に偽になり
