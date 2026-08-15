@@ -95,7 +95,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// <see cref="OpenWindowFromPipeRequest"/> から)呼ぶ、異常終了からのリカバリー提案・
     /// セッション復元・最初のウィンドウを開く処理本体。
     /// </summary>
-    private void RunRecoveryAndInitialOpen(string? cliInitialPath)
+    private void RunRecoveryAndInitialOpen(string? cliInitialPath, bool forceActivate = false)
     {
         var openedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         bool openedAny = false;
@@ -124,7 +124,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
 
             if (choice == DialogResult.Yes)
             {
-                OpenWindow(snapshot.OriginalPath, snapshot);
+                OpenWindow(snapshot.OriginalPath, snapshot, forceActivate: forceActivate);
                 openedAny = true;
                 if (snapshot.OriginalPath is not null) openedPaths.Add(snapshot.OriginalPath);
             }
@@ -140,7 +140,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
         {
             if (openedPaths.Add(cliInitialPath))
             {
-                OpenWindow(cliInitialPath);
+                OpenWindow(cliInitialPath, forceActivate: forceActivate);
                 openedAny = true;
             }
         }
@@ -155,7 +155,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
             {
                 if (!File.Exists(path)) continue;
                 if (!openedPaths.Add(path)) continue;
-                OpenWindow(path);
+                OpenWindow(path, forceActivate: forceActivate);
                 openedAny = true;
             }
         }
@@ -165,7 +165,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
             if (!string.IsNullOrWhiteSpace(folder) && Directory.Exists(folder))
             {
                 Logger.Write($"起動時のカスタムフォルダを読み込む: {folder}");
-                OpenWindow(null, initialFolderPath: folder);
+                OpenWindow(null, initialFolderPath: folder, forceActivate: forceActivate);
                 openedAny = true;
             }
             else
@@ -177,7 +177,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
 
         if (!openedAny)
         {
-            OpenWindow(null);
+            OpenWindow(null, forceActivate: forceActivate);
         }
     }
 
@@ -186,7 +186,13 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// 実際には新規ウィンドウとして扱う)からも、起動時の複数ファイルオープンからも、ここを通る。
     /// UIスレッド上で呼び出すこと(<see cref="SingleInstanceServer"/> はSynchronizationContext経由で保証する)。
     /// </summary>
-    public void OpenWindow(string? path, AutoSaveSnapshot? recoverFrom = null, DroppedFileContent? droppedFile = null, string? initialFolderPath = null)
+    /// <param name="forceActivate">trueの場合、開いた(または既存の)ウィンドウを
+    /// <see cref="WindowChrome.ForceActivate"/>で確実に前面化する。名前付きパイプ経由の要求
+    /// (<see cref="OpenWindowFromPipeRequest"/>)由来のときだけtrueを渡す。受信側プロセスは
+    /// フォアグラウンド権を持たないことがあり(不具合修正: エクスプローラからファイルを
+    /// 開いたときにPaneのウィンドウが前面に来ないことがある対策)、通常起動(自プロセスが
+    /// ユーザー操作で起動されフォアグラウンド権を持つ)では余計な副作用を避けるため既定はfalse。</param>
+    public void OpenWindow(string? path, AutoSaveSnapshot? recoverFrom = null, DroppedFileContent? droppedFile = null, string? initialFolderPath = null, bool forceActivate = false)
     {
         // コマンドライン引数・多重起動時のパイプ経由でフォルダのパスが渡された場合
         // (仕様書 F-14: `Pane.exe <folder>`)。pathをそのままファイルとして読もうとすると
@@ -196,7 +202,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
         if (path is not null && recoverFrom is null && droppedFile is null && initialFolderPath is null && Directory.Exists(path))
         {
             Logger.Write($"OpenWindow: 起動引数がフォルダのためフォルダとして開く: {path}");
-            OpenWindow(null, initialFolderPath: path);
+            OpenWindow(null, initialFolderPath: path, forceActivate: forceActivate);
             return;
         }
 
@@ -210,8 +216,11 @@ internal sealed class PaneApplicationContext : ApplicationContext
         {
             MainForm target = _windows[^1];
             target.OpenInNewTab(path);
-            if (target.WindowState == FormWindowState.Minimized) target.WindowState = FormWindowState.Normal;
-            target.Activate();
+            // 不具合修正: 従来はActivate()のみだったため、受信側プロセスにフォアグラウンド権が
+            // 無いと前面化が失効することがあった。WindowChrome.ForceActivateへ統一する
+            // (最小化復元+Activate+SetForegroundWindow)。通常起動時の呼び出しでも副作用は無い
+            // (自プロセスが既にフォアグラウンド権を持つため、単にActivate相当が成功するだけ)。
+            WindowChrome.ForceActivate(target);
             Logger.Write($"OpenWindow: タブ形式のため既存ウィンドウへ新しいタブとして開く(path={path ?? "(なし)"})");
             return;
         }
@@ -280,6 +289,17 @@ internal sealed class PaneApplicationContext : ApplicationContext
 
         _windows.Add(form);
         form.Show();
+
+        // 不具合修正: パイプ要求由来(forceActivate=true)のときだけ、確実な前面化を行う。
+        // Show()呼び出しの時点でForm本体のWin32ウィンドウハンドルは既に生成されており、
+        // WebView2の初期化(OnLoadAsync/EnsureCoreWebView2Async)は非同期で後から進むため、
+        // その完了を待つ必要は無い(タイトルバー等の枠は既に存在し、前面化はハンドル操作
+        // だけで完結する)。通常起動(forceActivate=false)では何もせず、Show()自体が
+        // 新プロセスの持つフォアグラウンド権で自然にアクティブ化するのに任せる。
+        if (forceActivate)
+        {
+            WindowChrome.ForceActivate(form);
+        }
     }
 
     /// <summary>
@@ -292,14 +312,19 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// </summary>
     public void OpenWindowFromPipeRequest(string? path)
     {
+        // 不具合修正: パイプ経由の要求は常に、送信元プロセス(フォアグラウンド権を持つ)が
+        // 自分自身を即終了させた後に届く。受信側の本プロセスはバックグラウンドにいる
+        // (または--preloadで非表示常駐している)ことが多く、Windowsの仕様上
+        // SetForegroundWindow(Form.Activate()が内部で呼ぶ)は失敗し得るため、
+        // forceActivate: trueを渡して WindowChrome.ForceActivate による確実な前面化を通す。
         if (_initialOpenPending)
         {
             _initialOpenPending = false;
             Logger.Write($"preload: 最初のウィンドウ要求を受信(path={path ?? "(なし)"})。復元確認・セッション復元を行う");
-            RunRecoveryAndInitialOpen(path);
+            RunRecoveryAndInitialOpen(path, forceActivate: true);
             return;
         }
-        OpenWindow(path);
+        OpenWindow(path, forceActivate: true);
     }
 
     /// <summary>
@@ -314,11 +339,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
         if (index < 0) return;
 
         MainForm next = _windows[(index + 1) % _windows.Count];
-        if (next.WindowState == FormWindowState.Minimized)
-        {
-            next.WindowState = FormWindowState.Normal;
-        }
-        next.Activate();
+        WindowChrome.ForceActivate(next);
         Logger.Write($"SwitchToNextWindow: {index} -> {_windows.IndexOf(next)}");
     }
 
