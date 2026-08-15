@@ -697,15 +697,65 @@ internal sealed class AppSettings
         set => _editorMaxWidthPx = Math.Max(0, value);
     }
 
+    /// <summary>
+    /// 本文の左右の余白(旧・仕様書 editorPaddingX)。
+    /// [廃止予定] 左右を個別に指定できる<see cref="EditorPaddingLeft"/>/<see cref="EditorPaddingRight"/>に
+    /// 置き換えられた(ユーザー要望: 左右で余白を変えたい)。旧設定ファイルからの移行のためだけに
+    /// 残す(このプロパティ自体は以後どこからも新規に書き込まれない)。読み書きは
+    /// <see cref="GetEffectiveEditorPaddingLeft"/>/<see cref="GetEffectiveEditorPaddingRight"/>経由で
+    /// 行うこと。
+    /// </summary>
     private int _editorPaddingX = 32;
-
-    /// <summary>本文の左右の余白(px)。0〜200の範囲でクランプする。既定32。
-    /// CSS変数 --editor-padding-x として src/style.css の #cm-host .cm-content へ反映される
-    /// (実際にCSS変数へ設定する処理はJS側main.jsが担当。ここでは値の保持と検証のみ)。</summary>
     public int EditorPaddingX
     {
         get => _editorPaddingX;
         set => _editorPaddingX = Math.Clamp(value, 0, 200);
+    }
+
+    private int _editorPaddingLeft = 32;
+
+    /// <summary>本文の左余白(px)。0〜200の範囲でクランプする。既定32。
+    /// CSS変数 --editor-padding-left として src/style.css の #cm-host .cm-content へ反映される
+    /// (実際にCSS変数へ設定する処理はJS側main.jsが担当。ここでは値の保持と検証のみ)。
+    /// 旧バージョンからの移行は<see cref="GetEffectiveEditorPaddingLeft"/>を参照。</summary>
+    public int EditorPaddingLeft
+    {
+        get => _editorPaddingLeft;
+        set => _editorPaddingLeft = Math.Clamp(value, 0, 200);
+    }
+
+    private int _editorPaddingRight = 32;
+
+    /// <summary>本文の右余白(px)。0〜200の範囲でクランプする。既定32。
+    /// CSS変数 --editor-padding-right として src/style.css の #cm-host .cm-content へ反映される。
+    /// 旧バージョンからの移行は<see cref="GetEffectiveEditorPaddingRight"/>を参照。</summary>
+    public int EditorPaddingRight
+    {
+        get => _editorPaddingRight;
+        set => _editorPaddingRight = Math.Clamp(value, 0, 200);
+    }
+
+    /// <summary>
+    /// 実際に使う本文の左余白を返す。
+    /// 移行措置: この改修より前のバージョンでは<see cref="EditorPaddingX"/>(左右共通の1値)しか
+    /// 存在しなかった。EditorPaddingXが既定値(32)以外に設定済みで、かつEditorPaddingLeft/Rightが
+    /// どちらもまだ既定値(32)のまま(=新しいキーがまだ一度も書き込まれていない、旧バージョンの
+    /// 設定ファイルをそのまま読み込んだ状態)であれば、旧設定の値を左右どちらにも適用する
+    /// (<see cref="GetEffectiveMathAutoNumber"/>と同じ考え方)。どちらか一方でも既定値以外へ
+    /// 明示的に変更されていれば(=新しい設定画面で一度でも保存されていれば)、以後はこの
+    /// 移行判定を行わず、EditorPaddingLeft/Rightをそのまま使う。
+    /// </summary>
+    public int GetEffectiveEditorPaddingLeft()
+    {
+        if (EditorPaddingX != 32 && EditorPaddingLeft == 32 && EditorPaddingRight == 32) return EditorPaddingX;
+        return EditorPaddingLeft;
+    }
+
+    /// <summary>実際に使う本文の右余白を返す。移行の考え方は<see cref="GetEffectiveEditorPaddingLeft"/>と同じ。</summary>
+    public int GetEffectiveEditorPaddingRight()
+    {
+        if (EditorPaddingX != 32 && EditorPaddingLeft == 32 && EditorPaddingRight == 32) return EditorPaddingX;
+        return EditorPaddingRight;
     }
 
     /// <summary>文字数カウントの常時表示(仕様書 C-09)。既定ON。</summary>

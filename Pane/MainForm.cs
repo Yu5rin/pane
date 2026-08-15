@@ -45,14 +45,6 @@ internal sealed class MainForm : Form
     /// サイズ上限(不具合修正: 従来は前者にだけ上限が無く非対称だった)。エクスポート側と
     /// 同じ25MBに揃える。</summary>
     private const long LocalFileMaxServeBytes = 25 * 1024 * 1024;
-    /// <summary>メニューバーのホバー切り替え(<see cref="HandleMenuBarHoverMouseMove"/>参照)で、
-    /// 隣の見出しの上にカーソルが乗ってから実際に切り替えるまで待つ猶予(ミリ秒)。
-    /// Windows標準のメニューバーは体感上ほぼ即座に切り替わるが、0にすると「メニュー行を
-    /// 素通りしただけ」でもちらつきながら切り替わってしまう(例: 見出し行の上を通過して
-    /// さらに下のツールバー等へ向かう動線)。切り替え自体に「前のポップアップを閉じてJSへ
-    /// 通知→JSがopen-menuを送り直す→C#が新しいポップアップを開く」という往復が挟まるため、
-    /// 数十ms程度の遅延は体感の即時性を損なわずに素通りのちらつきだけを抑えられる。</summary>
-    private const int MenuHoverSwitchDelayMs = 80;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -85,25 +77,12 @@ internal sealed class MainForm : Form
     /// どちらが先に来ても二重に処理しないためのガード(<see cref="RevealWebView"/>参照)。</summary>
     private bool _webViewRevealed;
 
-    // ---- メニューバーのホバー切り替え(ユーザー要望: クリックしなくても隣の見出しへ切り替わる) ----
-    // ネイティブのポップアップ(ToolStripDropDownMenu)は表示中にマウスをキャプチャするため、
-    // HTML側の見出しボタンのmouseenterはそもそも発火しない(WebView2は、画面上のどこに
-    // カーソルがあってもポップアップ表示中はマウスメッセージを受け取れない。詳細は
-    // Pane/NativeMenu.cs Show()のコメント参照)。そのためポップアップ自身が受け取るマウス移動
-    // (キャプチャにより画面全体で発火する)を見て、JS側(src/commands.js)から届いた見出し
-    // ボタンの画面座標(下記_menuBarHeaderRects)と突き合わせて判定し、一定時間その状態が
-    // 続いたら"menu-hover-switch"でJSへ知らせる。実際の切り替え(前のポップアップを閉じて
-    // 新しいポップアップを開く)はJS側がopen-menuを送り直すことで行う(クリックしたときと
-    // 全く同じ経路に乗るため、既存の「連打しても1回で消えない」対策をそのまま利用できる)。
-    /// <summary>直近のopen-menuで届いた、メニューバー見出しボタンの画面座標(スクリーン座標)。
-    /// メニューが開いていない間(=ポップアップのMouseMoveが来ない間)は参照されない。</summary>
-    private List<(string Menu, Rectangle ScreenRect)> _menuBarHeaderRects = new();
-    /// <summary>いまポップアップとして開いているメニュー名。この見出し自身へのホバーは無視する。</summary>
-    private string? _menuBarCurrentMenu;
-    /// <summary>ホバーで切り替え待ちになっている隣の見出し名。<see cref="_menuHoverTimer"/>が
-    /// この時間だけ経過してもまだ同じ見出しの上にカーソルがあれば実際に切り替える。</summary>
-    private string? _menuHoverCandidate;
-    private readonly System.Windows.Forms.Timer _menuHoverTimer;
+    // メニューバーのホバー切り替え(ユーザー要望: クリックしなくても隣の見出しへ切り替わる)は、
+    // 以前はここ(C#側)でネイティブポップアップのMouseMoveを監視して実装していたが、実機で
+    // 一度も発火せず機能していなかったため撤去した。現在はJS側(src/commands.js)がメニューバーの
+    // 見出しボタン自体のmouseenterでホバーを検知し、クリックと同じopenNativeMenu()経路で
+    // 開き直す方式に変更している(詳細はPane/NativeMenu.cs Show()のコメント参照)。C#側は
+    // 判定・タイマー等の状態を一切持たなくなった。
 
     // ---- 全画面表示(仕様書 第2.5節 V-08)。解除時に元のスタイル・状態へ正確に戻すため退避しておく。 ----
     private bool _isFullscreen;
@@ -282,9 +261,6 @@ internal sealed class MainForm : Form
         _externalChangeDebounceTimer = new System.Windows.Forms.Timer { Interval = ExternalChangeDebounceMs };
         _externalChangeDebounceTimer.Tick += OnExternalChangeDebounceElapsed;
 
-        _menuHoverTimer = new System.Windows.Forms.Timer { Interval = MenuHoverSwitchDelayMs };
-        _menuHoverTimer.Tick += OnMenuHoverTimerElapsed;
-
         Load += OnLoadAsync;
         // ウィンドウを閉じる操作(Xボタン・Alt+F4・File>閉じる)すべてがここを通る。
         // 未保存の変更があれば保存するか確認してから閉じる(仕様書: 編集中のファイルを
@@ -296,7 +272,7 @@ internal sealed class MainForm : Form
             // タイマーの停止漏れ対策(不具合修正)。従来は_autoSaveTimerのStopのみで、
             // _externalChangeDebounceTimerはStop/Disposeともに行っていなかった。
             // 閉じた直後にTickが走ると、破棄済みのFormに対してOnExternalChangeDebounceElapsedから
-            // PaneDialog.Show(this, ...)を呼ぶ経路が残ってしまう。また、どちらのTimerも
+            // PaneDialog.Show(this, ...)を呼ぶ経路が残ってしまう。また、どのTimerも
             // コンポーネントコレクションに登録していないためForm.Dispose()では解放されず、
             // ここで明示的にDisposeしておく必要がある。
             _autoSaveTimer.Stop();
@@ -1300,16 +1276,6 @@ internal sealed class MainForm : Form
         Point screenPoint = CssPointToScreenPoint(cssX, cssY);
         Logger.Write($"open-menu: menu={menuName}, 項目数={items.Count}, cssPoint=({cssX},{cssY}), DeviceDpi={DeviceDpi}, screenPoint=({screenPoint.X},{screenPoint.Y})");
 
-        // メニューバーのホバー切り替え用: 見出しボタン一覧(headers)が届いていれば画面座標へ
-        // 変換して覚えておく。開き直すたびに(クリックでもホバー切り替えでも)ここを必ず通るため、
-        // 前回分の状態(ホバー待ちタイマー含む)はここで確実にリセットされる。
-        _menuBarHeaderRects = root.TryGetProperty("headers", out JsonElement headersProp) && headersProp.ValueKind == JsonValueKind.Array
-            ? ParseMenuBarHeaderRects(headersProp)
-            : new List<(string, Rectangle)>();
-        _menuBarCurrentMenu = menuName;
-        _menuHoverCandidate = null;
-        _menuHoverTimer.Stop();
-
         AppSettings menuSettings = SettingsService.Load();
         bool isDark = ResolveIsDarkTheme(menuSettings.Theme);
         string themeId = ResolveThemeId(menuSettings, isDark);
@@ -1320,69 +1286,17 @@ internal sealed class MainForm : Form
             items,
             onCommand: id => PostToWeb(new { type = "menu-command", id }),
             onClosed: () => PostToWeb(new { type = "menu-closed", menu = menuName }),
-            onMouseMove: HandleMenuBarHoverMouseMove);
-    }
-
-    /// <summary>"headers"(見出しボタンのCSSピクセル矩形の配列)をJSONから画面座標の矩形へ変換する。
-    /// 座標変換は<see cref="CssPointToScreenPoint"/>と同じ2段階(DeviceDpi→PointToScreen)。</summary>
-    private List<(string Menu, Rectangle ScreenRect)> ParseMenuBarHeaderRects(JsonElement arrayElement)
-    {
-        var list = new List<(string, Rectangle)>();
-        foreach (JsonElement el in arrayElement.EnumerateArray())
-        {
-            if (!TryGetString(el, "menu", out string menu) || menu.Length == 0) continue;
-            double left = el.TryGetProperty("left", out JsonElement l) && l.ValueKind == JsonValueKind.Number ? l.GetDouble() : 0;
-            double top = el.TryGetProperty("top", out JsonElement t) && t.ValueKind == JsonValueKind.Number ? t.GetDouble() : 0;
-            double right = el.TryGetProperty("right", out JsonElement r) && r.ValueKind == JsonValueKind.Number ? r.GetDouble() : 0;
-            double bottom = el.TryGetProperty("bottom", out JsonElement b) && b.ValueKind == JsonValueKind.Number ? b.GetDouble() : 0;
-            Point topLeft = CssPointToScreenPoint(left, top);
-            Point bottomRight = CssPointToScreenPoint(right, bottom);
-            var rect = Rectangle.FromLTRB(topLeft.X, topLeft.Y, bottomRight.X, bottomRight.Y);
-            list.Add((menu, rect));
-        }
-        return list;
-    }
-
-    /// <summary>ポップアップ表示中のマウス移動(<see cref="NativeMenu.Show"/>のonMouseMove、画面座標)を
-    /// 見出しボタンの矩形と突き合わせる。現在開いているメニュー自身の上は対象外(切り替え不要のため)。
-    /// 一致する見出しが変わるたびタイマーを仕切り直し、<see cref="MenuHoverSwitchDelayMs"/>だけ
-    /// 同じ見出しの上に留まり続けたら<see cref="OnMenuHoverTimerElapsed"/>で実際に切り替えを要求する。</summary>
-    private void HandleMenuBarHoverMouseMove(Point screenPoint)
-    {
-        string? hit = null;
-        foreach ((string menu, Rectangle rect) in _menuBarHeaderRects)
-        {
-            if (menu == _menuBarCurrentMenu) continue; // 自分自身の上は無視
-            if (rect.Contains(screenPoint)) { hit = menu; break; }
-        }
-
-        if (hit is null)
-        {
-            if (_menuHoverCandidate is not null)
+            onArrowSwitch: direction =>
             {
-                _menuHoverCandidate = null;
-                _menuHoverTimer.Stop();
-            }
-            return;
-        }
-
-        if (hit == _menuHoverCandidate) return; // 既に同じ見出しへ切り替え待ち中
-        _menuHoverCandidate = hit;
-        _menuHoverTimer.Stop();
-        _menuHoverTimer.Start();
-    }
-
-    /// <summary>_menuHoverCandidateの上に<see cref="MenuHoverSwitchDelayMs"/>だけ留まり続けた。
-    /// JSへ切り替えを要求する(実際にポップアップを開き直すのはJS側がopen-menuを送り直すことで行う。
-    /// クリックしたときと全く同じ経路のため、既存の連打対策と競合しない)。</summary>
-    private void OnMenuHoverTimerElapsed(object? sender, EventArgs e)
-    {
-        _menuHoverTimer.Stop();
-        string? candidate = _menuHoverCandidate;
-        _menuHoverCandidate = null;
-        if (candidate is null) return;
-        Logger.Write($"ホバーでメニュー切り替え要求: {_menuBarCurrentMenu ?? "(なし)"} → {candidate}");
-        PostToWeb(new { type = "menu-hover-switch", menu = candidate });
+                // ←→キーでの隣のメニューへの切り替え要求(NativeMenu.Show onArrowSwitch参照)。
+                // どのメニュー名が「次/前」にあたるかはメニューバーの並び順(JS側のcommands.js
+                // が唯一保持している)次第のため、ここでは方向だけをJSへ伝え、実際にどの
+                // メニュー名へ切り替えるかの決定と実行(openNativeMenu)はJS側(handleMenuHoverSwitch
+                // と同じ経路を再利用するhandleMenuArrowSwitch)に委ねる。
+                string dirLabel = direction == NativeMenu.MenuArrowDirection.Next ? "次" : "前";
+                Logger.Write($"キーボードでメニュー切り替え要求: {menuName} → {dirLabel}");
+                PostToWeb(new { type = "menu-arrow-switch", menu = menuName, direction = direction == NativeMenu.MenuArrowDirection.Next ? "next" : "prev" });
+            });
     }
 
     /// <summary>
@@ -2747,7 +2661,8 @@ internal sealed class MainForm : Form
             editorFontSize = settings.EditorFontSize,
             editorLineHeight = settings.EditorLineHeight,
             editorMaxWidthPx = settings.EditorMaxWidthPx,
-            editorPaddingX = settings.EditorPaddingX,
+            editorPaddingLeft = settings.GetEffectiveEditorPaddingLeft(),
+            editorPaddingRight = settings.GetEffectiveEditorPaddingRight(),
             showWordCount = settings.ShowWordCount,
 
             // ---- キーボード ----

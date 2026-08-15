@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace Pane;
 
 /// <summary>
@@ -13,13 +15,29 @@ internal sealed class PaneApplicationContext : ApplicationContext
     private const int DefaultWidth = 960;
     private const int DefaultHeight = 720;
 
+    /// <summary>設定ウィンドウの事前生成(体感速度対策)を始めるまでの待ち時間。起動直後の
+    /// 輻輳(本体ウィンドウ自身のWebView2初期化・Navigate)を避けるため、少し間を置いてから
+    /// 裏で作り始める。この値自体の妥当性(短すぎ・長すぎ)は実機ログ(SettingsWindow側の
+    /// 各段階のタイムスタンプ)を見てから調整する。</summary>
+    private const int SettingsPregenerateDelayMs = 2500;
+
     private readonly List<MainForm> _windows = new();
     private readonly AppSettings _settings;
 
     /// <summary>設定画面(独立ウィンドウ)。同時に1つしか開かないため単一の参照で持つ。
     /// <see cref="_windows"/>には含めない(ウィンドウ数の勘定・終了判定の対象外にするため。
-    /// 詳細は<see cref="OpenSettingsWindow"/>と<see cref="OnWindowClosed"/>を参照)。</summary>
+    /// 詳細は<see cref="OpenSettingsWindow"/>と<see cref="OnWindowClosed"/>を参照)。
+    /// 体感速度対策により、閉じても(ユーザー操作による通常のCloseでは)破棄されず
+    /// このフィールドが指したままになる(<see cref="SettingsWindow"/>のクラスコメント参照)。
+    /// nullに戻るのはアプリ終了時(<see cref="SettingsWindow.CloseForReal"/>経由)のみ。</summary>
     private SettingsWindow? _settingsWindow;
+
+    /// <summary>設定ウィンドウの事前生成を1回だけ・遅延して行うためのワンショットタイマー。
+    /// Timerのコールバックはメッセージループ経由でこのオブジェクトを作ったスレッド(UIスレッド)
+    /// 上で発火するため、Application.Run()より前(コンストラクタ内)にStartしても安全。
+    /// (preload起動時のWebView2環境事前生成と違い、こちらはUIスレッド上でForm/WebView2
+    /// コントロールを直接作る必要があるため、Task.ContinueWithでの後続処理は使わない。)</summary>
+    private readonly System.Windows.Forms.Timer _settingsPregenerateTimer;
 
     /// <summary>--preloadで起動されたプロセスかどうか(B-1)。trueの間は、最後のウィンドウが
     /// 閉じられてもプロセスを終了させず、ウィンドウ0枚の常駐状態へ戻す(OnWindowClosed参照)。
@@ -34,6 +52,19 @@ internal sealed class PaneApplicationContext : ApplicationContext
     {
         _settings = SettingsService.Load();
         _preload = preload;
+
+        // 設定ウィンドウの事前生成(体感速度対策)。preload起動・通常起動のどちらでも同じ
+        // タイマーで賄う。preload起動時は下のEnsureEnvironmentAsync(WebView2環境の事前生成)と
+        // 並行して走ることになるが、EnsureEnvironmentAsync自体がロックで多重呼び出しに
+        // 対応しているため競合しない(SettingsWindow.OnLoadAsyncも同じEnsureEnvironmentAsyncを
+        // 呼ぶので、先に完了していればそのままキャッシュを使う)。
+        _settingsPregenerateTimer = new System.Windows.Forms.Timer { Interval = SettingsPregenerateDelayMs };
+        _settingsPregenerateTimer.Tick += (_, _) =>
+        {
+            _settingsPregenerateTimer.Stop();
+            PregenerateSettingsWindow();
+        };
+        _settingsPregenerateTimer.Start();
 
         if (preload)
         {
@@ -313,21 +344,56 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// </summary>
     public void OpenSettingsWindow(Form owner)
     {
-        if (_settingsWindow is { IsDisposed: false })
+        var sw = Stopwatch.StartNew();
+        if (_settingsWindow is { IsDisposed: false } existing)
         {
-            if (_settingsWindow.WindowState == FormWindowState.Minimized)
-            {
-                _settingsWindow.WindowState = FormWindowState.Normal;
-            }
-            _settingsWindow.Activate();
-            Logger.Write("OpenSettingsWindow: 既に開いているため前面へ");
+            // 既に開いている(前面に出すだけ)か、事前生成済み/前回閉じた(非表示化されただけ)の
+            // インスタンスが残っているかのどちらか。Revealはどちらのケースも同じ経路で扱える
+            // (既に表示中でもShow()/Activate()は無害)。
+            existing.Reveal(owner);
+            Logger.Write($"OpenSettingsWindow: 既存インスタンスを表示({(existing.IsRevealed ? "事前生成/前回分の読み込み完了済み" : "まだ読み込み中")}, {sw.ElapsedMilliseconds}ms)");
             return;
         }
 
         _settingsWindow = new SettingsWindow(owner, BroadcastSettingsChanged);
         _settingsWindow.FormClosed += (_, _) => _settingsWindow = null;
         _settingsWindow.Show();
-        Logger.Write("OpenSettingsWindow: 新規に開いた");
+        Logger.Write($"OpenSettingsWindow: 新規に開いた(事前生成は間に合っていなかった, {sw.ElapsedMilliseconds}ms)");
+    }
+
+    /// <summary>
+    /// 設定ウィンドウをユーザーがまだ開いていない段階で裏で作っておく(体感速度対策)。
+    /// <see cref="_settingsPregenerateTimer"/>から遅延して1回だけ呼ばれる。呼び出し時点で
+    /// 本体ウィンドウが1つも無い場合(preload起動の待機中)はowner無しで作る
+    /// (<see cref="SettingsWindow"/>はowner無しでも動作し、実際に表示する際の
+    /// <see cref="SettingsWindow.Reveal"/>がその時点の実オーナーに合わせて位置を計算し直す)。
+    /// ユーザーが既に手動で設定を開いていれば(_settingsWindowが既にある)何もしない。
+    /// 例外が起きても致命的ではない: _settingsWindowをnullのままにしておけば、次回の
+    /// <see cref="OpenSettingsWindow"/>が従来どおり(その場で新規作成)にフォールバックする。
+    /// </summary>
+    private void PregenerateSettingsWindow()
+    {
+        if (_settingsWindow is not null) return;
+        SettingsWindow? window = null;
+        try
+        {
+            Form? owner = _windows.Count > 0 ? _windows[0] : null;
+            window = new SettingsWindow(owner, BroadcastSettingsChanged);
+            window.FormClosed += (_, _) => _settingsWindow = null;
+            _settingsWindow = window;
+            window.Prewarm();
+            Logger.Write("PregenerateSettingsWindow: アイドル時の事前生成を開始した");
+        }
+        catch (Exception ex)
+        {
+            // 失敗しても致命的ではない: _settingsWindowをnullのままにしておけば、次回の
+            // OpenSettingsWindowが従来どおり(その場で新規作成)にフォールバックする。
+            // 途中まで作られたインスタンス(ネイティブハンドルが作られていた場合を含む)は
+            // 取り残さずここで破棄する。
+            Logger.WriteException("PregenerateSettingsWindow: 事前生成に失敗(次回OpenSettingsWindowで通常経路にフォールバック)", ex);
+            _settingsWindow = null;
+            window?.Dispose();
+        }
     }
 
     private void OnWindowClosed(MainForm form)
@@ -383,8 +449,12 @@ internal sealed class PaneApplicationContext : ApplicationContext
             {
                 // アプリ全体を終了する。設定画面はウィンドウ数の勘定に含めていないため
                 // (_windowsに含まれない)、開いたままExitThreadすると取り残されてしまう。
-                // 明示的に閉じてからスレッドを終了する。
-                _settingsWindow?.Close();
+                // 明示的に閉じてからスレッドを終了する。体感速度対策(インスタンス再利用)により
+                // 通常のCloseは非表示化に読み替えられてしまうため、ここでは本当に破棄する
+                // CloseForRealを使う(事前生成の途中で終了した場合も含め、確実に破棄する)。
+                _settingsPregenerateTimer.Stop();
+                _settingsPregenerateTimer.Dispose();
+                _settingsWindow?.CloseForReal();
                 ExitThread();
             }
         }

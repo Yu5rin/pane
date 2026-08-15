@@ -32,6 +32,9 @@ internal static class NativeMenu
         string Note,
         IReadOnlyList<MenuItemData>? Submenu);
 
+    /// <summary>←→キーでの隣のメニューへの切り替え方向(<see cref="Show"/>のonArrowSwitch参照)。</summary>
+    public enum MenuArrowDirection { Previous, Next }
+
     /// <summary>
     /// 指定した画面座標(<paramref name="screenLocation"/>)にポップアップを表示する。
     /// ・配色は<see cref="PaneMenuRenderer"/>でPaneの配色(src/style.cssの実値)に合わせる。
@@ -58,14 +61,26 @@ internal static class NativeMenu
     }
 
     /// <summary>
-    /// メニューバーのホバー切り替え(ユーザー要望: クリックしなくても隣の見出しへ切り替わる)用。
-    /// <paramref name="onMouseMove"/>を渡すと、表示中のポップアップが受け取るマウス移動を
-    /// 画面座標に変換して都度通知する。<see cref="ToolStripDropDown"/>は表示中マウスを
-    /// キャプチャする(下記Showのコメント参照)ため、この移動通知はポップアップの外・画面の
-    /// どこにカーソルがあっても発火する。判定(どの見出しの上か)・遅延・実際の切り替えは
-    /// すべて呼び出し側(<see cref="MainForm"/>・src/commands.js)の責務とし、ここでは一切持たない
-    /// (コマンドの実装はここに持たせない、というこのクラスの原則と同じ)。
+    /// メニューバーのホバー切り替え(ユーザー要望: クリックしなくても隣の見出しへ切り替わる)は、
+    /// 以前はここで<see cref="ToolStripDropDown"/>のMouseMove(表示中マウスをキャプチャするため
+    /// 画面全体で発火する、という前提)を使って実装していたが、実機ではこのMouseMove自体が
+    /// 一度も発火せず、ホバー切り替えが機能していないことが確認された(実機ログに
+    /// 切り替え要求の記録が皆無だった)。代わりにJS側(src/commands.js)がメニューバーの
+    /// 見出しボタン自体のmouseenterでホバーを検知するよう変更したため、このクラスは
+    /// マウス移動の監視という責務を一切持たなくなった(コマンドの実装を持たせない、という
+    /// このクラスの原則どおり、判定・切り替えの実処理は引き続き呼び出し側の責務のまま)。
     /// </summary>
+    /// <param name="onArrowSwitch">
+    /// メニューのキーボード操作(ユーザー報告: ↑↓/Enter/Esc/←→がすべて効かない)対応の一部。
+    /// ←→キーで隣の見出し(メニューバー全体で言えば「ファイル」の次は「編集」等)へ切り替えたい
+    /// という要求を呼び出し側(MainForm)へ伝える。<see cref="ToolStripDropDownMenu"/>単体には
+    /// 「隣のメニューへ移る」機能が無い(それは<see cref="MenuStrip"/>が持つ機能で、単発の
+    /// ドロップダウンには無い)ため、判定はここ(どちらのキーが押されたか・いまサブメニューが
+    /// 開いているか)で行い、実際にどのメニュー名へ切り替えるか(メニューバーの並び順)は
+    /// 呼び出し側(最終的にはJS側のcommands.js、hoverLog/handleMenuHoverSwitchと同じ経路を
+    /// 共通利用する)に委ねる。ホバー切り替えと同じ「判定はここ、実際の切り替えは呼び出し側」
+    /// という役割分担。
+    /// </param>
     public static void Show(
         Point screenLocation,
         bool isDark,
@@ -73,7 +88,7 @@ internal static class NativeMenu
         IReadOnlyList<MenuItemData> items,
         Action<string> onCommand,
         Action onClosed,
-        Action<Point>? onMouseMove = null)
+        Action<MenuArrowDirection>? onArrowSwitch = null)
     {
         var renderer = new PaneMenuRenderer(isDark, themeId);
         var dropDown = new ToolStripDropDownMenu
@@ -137,17 +152,48 @@ internal static class NativeMenu
 
         AddItems(dropDown, items);
 
-        if (onMouseMove is not null)
+        // ---- キーボード操作(ユーザー報告: ↑↓/Enter/Esc/←→がすべて効かない) ----
+        // ↑↓(項目移動)・Enter(実行)・Esc(閉じる)はToolStripDropDownMenuが標準で持っている
+        // 機能であり、本来ここで何かを実装する必要は無いはずである。効いていない実機報告の
+        // 最有力な原因は、このポップアップがShow()後もキーボードフォーカスを得られておらず
+        // (WebView2側がOSのキーボードフォーカスを持ったままになっている)、矢印キー等の
+        // キーメッセージがそもそもこのコントロールへ届いていないことだと考えられる
+        // (この環境では実機のWebView2を動かせず検証できないため、理屈で確実な対策を選ぶ:
+        // マウスイベントの発火待ちのような「起きるはず」の前提に頼らず、Focus()という
+        // 直接的なWin32 SetFocus相当の命令的APIでフォーカスを明示的に要求する)。
+        if (onArrowSwitch is not null)
         {
-            // ToolStripDropDownは表示中(Show後)マウスをキャプチャするため(Windowsの
-            // メニュー全般の既定動作。画面のどこをクリックしても「メニューの外へのクリック」を
-            // 検知できるようにするための挙動)、MouseMoveは画面全体で発火する。逆に言うと
-            // この間、WebView2側は(ポップアップの真上にカーソルがあろうがなかろうが)
-            // マウスメッセージを一切受け取れない。e.Locationはポップアップのクライアント座標
-            // (カーソルがポップアップの外にあれば負値・外側の値になる)なので、呼び出し側が
-            // 使いやすいよう画面座標へ変換してから渡す。
-            dropDown.MouseMove += (_, e) => onMouseMove(dropDown.PointToScreen(e.Location));
+            // ←→(隣のメニューへの切り替え)はToolStripDropDownMenu単体には無い機能のため、
+            // ここで判定して呼び出し側(MainForm→JS)へ委ねる。
+            dropDown.KeyDown += (_, e) =>
+            {
+                if (e.KeyCode != Keys.Left && e.KeyCode != Keys.Right) return;
+                // いま選択中の項目がサブメニューを持つなら、→でそのサブメニューを開く・
+                // サブメニューが既に開いていれば←でそれを閉じる、という標準の
+                // ToolStripDropDownMenuの挙動を優先し、ここでは何もしない(トップレベルの
+                // 見出し切り替えとサブメニューの開閉が競合しないようにする)。
+                bool anySubmenuOpen = dropDown.Items.OfType<ToolStripMenuItem>().Any(i => i.HasDropDownItems && i.DropDown.Visible);
+                if (anySubmenuOpen) return;
+                ToolStripItem? selected = dropDown.Items.Cast<ToolStripItem>().FirstOrDefault(i => i.Selected);
+                if (e.KeyCode == Keys.Right && selected is ToolStripMenuItem { HasDropDownItems: true }) return; // →はサブメニューを開く標準動作に任せる
+                e.Handled = true;
+                onArrowSwitch(e.KeyCode == Keys.Right ? MenuArrowDirection.Next : MenuArrowDirection.Previous);
+            };
         }
+        // Tabキーでも項目移動できるようにする(要望: 「なお良い」程度の追加要望)。
+        // ToolStripDropDownMenuは既定でTabに反応しないため、↓/↑と同じ移動として扱う
+        // (Shift+Tabは逆方向)。SelectNextToolStripItem はToolStripの保護メソッドのため、
+        // 代わりに項目一覧を単純に前後へ辿って選択し直す。
+        dropDown.KeyDown += (_, e) =>
+        {
+            if (e.KeyCode != Keys.Tab) return;
+            e.Handled = true;
+            var selectable = dropDown.Items.Cast<ToolStripItem>().Where(i => i.Enabled && i.Available && i is not ToolStripSeparator).ToList();
+            if (selectable.Count == 0) return;
+            int idx = selectable.FindIndex(i => i.Selected);
+            int next = idx < 0 ? 0 : (e.Shift ? (idx - 1 + selectable.Count) % selectable.Count : (idx + 1) % selectable.Count);
+            selectable[next].Select();
+        };
 
         dropDown.Closed += (_, _) =>
         {
@@ -172,6 +218,24 @@ internal static class NativeMenu
         CloseCurrent();
         _current = dropDown;
         dropDown.Show(screenLocation, ToolStripDropDownDirection.BelowRight);
+
+        // キーボード操作(↑↓/Enter/Esc)が効くようにする。上のコメントのとおり、これらは
+        // ToolStripDropDownMenu自体が標準で持っている機能なので、ここで新しく実装するのは
+        // 「フォーカスを明示的にこのポップアップへ移す」ことと「最初の項目を選択状態にして
+        // 矢印キーの移動に足場を与える」ことの2点だけでよいはずである。
+        //   ・Focus(): Control.Focus()は最終的にWin32のSetFocus相当を呼ぶ命令的なAPIであり、
+        //     「何らかのイベントが発火するのを待つ」類の仕組みではない。直前のホバー切り替え
+        //     不具合(ToolStripDropDownのMouseMoveが実機で一度も発火しなかった)と同じ轍を
+        //     踏まないよう、イベント発火に依存しないこの方式を選んだ。
+        //   ・最初の項目の選択: ToolStripDropDownMenuを(MenuStripの項目からではなく)単体で
+        //     Show()しただけの状態だと、「現在選択中の項目」が無く、最初の↑↓キー入力に
+        //     反応しないことがある(既定のツールストリップキーボードメニューモードへ
+        //     正しく入っていない可能性があるため)。あらかじめ先頭の有効な項目を選択済みに
+        //     しておくことで、以降の↑↓はToolStripDropDownMenu自身の標準動作に委ねられる。
+        dropDown.Focus();
+        ToolStripItem? firstSelectable = dropDown.Items.Cast<ToolStripItem>()
+            .FirstOrDefault(i => i.Enabled && i.Available && i is not ToolStripSeparator);
+        firstSelectable?.Select();
     }
 }
 

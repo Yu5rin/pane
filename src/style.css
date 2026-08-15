@@ -393,6 +393,13 @@ html[data-theme="dark"] #theme-moon { display: none; }
    個別に定義した(style.css既定2つ・themes.css7プリセット)。未定義のテーマが
    将来増えてもvar(--accent)へ自動的にフォールバックする。 */
 .menu-top:hover, .menu-top.open { background: var(--accent-soft); color: var(--menu-hover-fg, var(--accent)); }
+/* Tabキーで選んだときの枠を、ボタンの内側に描く。
+   既定の :focus-visible は outline-offset:2px + 太さ2px = 要素の外側4pxに描くため、
+   高さ28pxのメニューバーに高さ26pxのボタンが入っているこの場所では、実測で
+   -3.5px〜30.5px となり上下ともバーからはみ出していた(実機で「囲みが汚い・はみ出る」
+   という指摘を受けた箇所)。負のoffsetで内側に寄せれば、ボタンの寸法やフォントが
+   変わってもはみ出しようがない。 */
+#menubar .menu-top:focus-visible { outline-offset: -2px; }
 /* max-height / overflow-y は、ウィンドウの高さが足りないときにメニューが画面外へ
    はみ出して下の方の項目に永久に届かなくなるのを防ぐためのもの。
    メニューバーの高さと下端の余白を差し引いた高さに収め、超える分はスクロールさせる
@@ -1139,15 +1146,18 @@ html[data-theme="dark"] .cm-search-hit { background: rgba(61,193,181,.25); color
 
 /* ===== 本文の余白・最大幅・行の高さ(仕様書 C-08・第10.3節) =====
    本文が左端にぴったり付いて読みにくかったため、左右に余白を入れる。
-   --editor-padding-x(設定 editorPaddingX、既定32px)がその余白の幅。
+   --editor-padding-left / --editor-padding-right(設定 editorPaddingLeft/editorPaddingRight、
+   既定どちらも32px)がその余白の幅。左右を個別に指定できるようにした(ユーザー要望。
+   旧・editorPaddingXは左右共通の1値しか持てなかった。移行はPane/AppSettings.cs
+   GetEffectiveEditorPaddingLeft/Right参照)。
    --editor-line-height(設定 editorLineHeight)は行の高さ。未設定なら既定のまま。
    CodeMirrorのテーマは .cm-scroller に line-height を当てるため、そちらも上書きする。
    最大幅(--editor-max-width、設定 editorMaxWidthPx)は既定で無制限にしておき、
    下のMarkdownモード限定ルールでだけ有効にする(コードモード・プレーンテキストモードで
    幅を制限すると、横に長いコード行やログが折り返されて読みにくくなるため対象外にする)。 */
 #cm-host .cm-content {
-  padding-left: var(--editor-padding-x, 32px) !important;
-  padding-right: var(--editor-padding-x, 32px) !important;
+  padding-left: var(--editor-padding-left, 32px) !important;
+  padding-right: var(--editor-padding-right, 32px) !important;
   box-sizing: border-box;
   max-width: none;
   margin-left: auto;

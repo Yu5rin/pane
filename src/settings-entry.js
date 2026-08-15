@@ -40,14 +40,19 @@ let initialRenderReadySent = false;
 function signalInitialRenderReady() {
   if (initialRenderReadySent) return;
   initialRenderReadySent = true;
-  // main.js側と同じ理由でrequestAnimationFrameを2回挟む(直前のDOM変更が確実に
-  // 一度ペイントされてから通知する)。
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      logToHost("log", "initial-render-ready送信(設定画面の初期描画完了)");
-      bridge?.postMessage({ type: "initial-render-ready" });
-    });
-  });
+  // 【設定ウィンドウの体感速度低下の修正】以前はここでrequestAnimationFrameを2回挟んで
+  // から通知していた(「直前のDOM変更が確実に一度ペイントされてから通知する」ため)。
+  // main.js側の実バグ1(f14f56f)と全く同じ理由でこれは自己矛盾している: C#側
+  // (Pane/SettingsWindow.cs)はこの通知を受け取るまでWebView2コントロール自体を
+  // 非表示(Visible=false)のままにしており、非表示の間はブラウザの描画パイプラインが
+  // 完全に止まっているためrequestAnimationFrameのコールバックが一切発火しない。結果、
+  // 通知が永久に送れないまま3秒のフォールバックタイマー(WebViewRevealFallbackMs)が
+  // 必ず先に発動して強制表示され、設定ウィンドウを開くたびに常に3秒待たされていた
+  // (「準備ができるまで表示しない」対策を入れてから遅くなった、というユーザー報告の
+  // 主因はこれ)。main.jsと同じ修正: ペイント完了を待つこと自体が非表示中は無意味
+  // なので、rAF/setTimeoutを一切使わず、条件が揃った瞬間に同期的に通知する。
+  logToHost("log", "initial-render-ready送信(設定画面の初期描画完了)");
+  bridge?.postMessage({ type: "initial-render-ready" });
 }
 
 // キーバインドタブ(「キーボード」カテゴリのコマンド一覧)専用の最小ctx。

@@ -1210,6 +1210,107 @@ function insertSoftBreak(view) {
   return true;
 }
 
+// ---- 引用・リストの空行でEnter2回で抜けられるようにする(ラウンド2の追加依頼) ----
+// @codemirror/lang-markdownの標準Enter処理(insertNewlineContinueMarkupCommand、
+// markdownLanguageExt()にPrec.highで同梱)は、空の項目でのEnterを次の2段階で扱う:
+//   1回目: タイトな(項目間に空行の無い)リストを「非タイトへ変換」するだけで、見た目上
+//          何も終了しない(内部的には空行を1つ余分に挿す)。
+//   2回目: ようやく1段のマーカーを取り除く。
+// つまりリストは実質3回Enterを押さないと抜けられない。引用も、直前の行が既に空の引用行に
+// なっていないと解除しない(=最初の空行では素通り)という別の理由で同様に3回かかる。
+// 一般的なMarkdownエディタ(Typora等)は「マーカーだけで中身が空の行でEnter」を押した
+// 時点で即座に1段浅くする(それ以上浅くできなければプレーンな行になる)。この挙動を
+// ライブラリより高い優先度(Prec.highest、下のkeymap登録箇所参照)で差し込む。
+// 対象を「マーカーだけで中身が空の行」に厳密に絞ることで、中身のある行の通常継続・
+// チェックボックスの継続・番号付けの繰り上げ等(すべて正しく動いている)は一切ここで
+// 扱わずライブラリ側(Prec.high)・その次の素のhandleEnter()に素通しする(false を返す)。
+//
+// 引用の中のリスト・リストの中の引用・多段引用・ネストしたリストのいずれでも「1段だけ
+// 浅くする」ため、カーソル位置の祖先(Blockquote/ListItem)を外側→内側の順に集め、各階層の
+// 幅とマーカー文字列を求める。
+//
+// 引用と箇条書きでは、深い階層の行にその祖先の分がどう現れるかが根本的に違う点に注意
+// (実機でsyntaxTree()の実際のノード範囲を調べて確認済み):
+//   ・引用: ネストのどの深さでも、そのぶんの">"が文字どおり繰り返される
+//     (例: "> > 入れ子"の2つの"> "はどちらも実在する文字)。
+//   ・リスト: 浅い階層のリストは、深い行では自分のマーカー文字を再掲せず、
+//     内容開始列に合わせた「幅ぶんの空白」としてしか現れない(実際にマーカー文字が
+//     見えるのは最も深い階層だけ)。例えば"- outer\n    - inner"の2行目("    - inner")は、
+//     外側の"- "の代わりに単なる空白(先頭2〜4文字ぶん)を挟んでいるだけで、"- "という
+//     文字列そのものは2行目には存在しない。
+// そのため各階層の「幅」(その階層ぶんが専有する列数)は、その階層のノード自身が最初に
+// 現れた行(node.from)で実測する(@codemirror/lang-markdown内部のgetContext()と同じ
+// 考え方。内部APIは非公開のためここで作り直す)必要があるが、「1段浅くした後の新しい
+// 最深部」を表す文字列は、階層の種類によって組み立て方を変える:
+//   ・その階層が引用なら、常に実際の">"文字列(自分の行からスライスしたもの)を使う。
+//   ・その階層がリストで、かつ「1段浅くした後に一番深い階層になる」場合は、そのノード
+//     自身の行から実測したマーカー文字列(例: "- ")をそのまま使う(それより浅いリストの
+//     空白ではなく、正しいマーカー文字を見せる必要があるため)。
+//   ・その階層がリストで、かつそれより深い階層がまだ残る(=最深部ではない)場合は、
+//     幅ぶんの空白にする(リストの浅い階層は常に空白でしか表現されないため)。
+function markupContext(state, pos) {
+  const nodes = [];
+  for (let cur = syntaxTree(state).resolveInner(pos, -1); cur; cur = cur.parent) {
+    if (cur.name === "FencedCode") return []; // コードフェンス内は対象外
+    if (cur.name === "ListItem" || cur.name === "Blockquote") nodes.push(cur);
+  }
+  if (!nodes.length) return [];
+  nodes.reverse(); // 外側→内側の順にする
+  const doc = state.doc;
+  const infos = []; // { kind: "quote"|"list", width, marker(そのノード自身の行から実測した文字列) }
+  for (const node of nodes) {
+    const nodeLine = doc.lineAt(node.from);
+    const tail = nodeLine.text.slice(node.from - nodeLine.from);
+    let m;
+    if (node.name === "Blockquote" && (m = /^ {0,3}>( ?)/.exec(tail))) {
+      infos.push({ kind: "quote", width: m[0].length, marker: m[0] });
+    } else if (node.name === "ListItem" && node.parent?.name === "OrderedList" && (m = /^( *)\d+[.)]( *)/.exec(tail))) {
+      infos.push({ kind: "list", width: m[0].length, marker: m[0] });
+    } else if (node.name === "ListItem" && node.parent?.name === "BulletList" && (m = /^( *)[-+*]( {1,4}\[[ xX]\])?( +)/.exec(tail))) {
+      infos.push({ kind: "list", width: m[0].length, marker: m[0] });
+    } else {
+      return []; // 想定外の構造(パーサーの遅延継続等) → 対象外、通常の処理に委ねる
+    }
+  }
+  // カーソルのある行が「幅の合計ぶんのマーカー(またはその空白)だけで、中身が無い」ことを
+  // 確認する。ネストしたリストの浅い階層は空白としてしか現れないため、内容を厳密に
+  // 突き合わせるのではなく幅の合計とその後が空白のみであることだけを見る。
+  const totalWidth = infos.reduce((n, t) => n + t.width, 0);
+  const line = doc.lineAt(pos);
+  if (totalWidth > line.text.length) return [];
+  if (line.text.slice(totalWidth).trim() !== "") return [];
+  return infos;
+}
+// 1段浅くした後の行の先頭に置くべき文字列を組み立てる(markupContext()のコメント参照)。
+function renderMarkupPrefix(infos) {
+  return infos.map((t, i) => {
+    const isDeepest = i === infos.length - 1;
+    if (t.kind === "quote" || isDeepest) return t.marker;
+    return " ".repeat(t.width); // それより浅いリスト階層は常に空白でしか表現されない
+  }).join("");
+}
+// 中身の無いマーカー行でEnterが押されたときの実処理。1段浅くする(最も内側の
+// 階層を1つ取り除く。それ以上無ければプレーンな行になる)。行を分割はしない
+// (ライブラリ側の解除処理と同じく、いまの行のマーカー部分を書き換えるだけ)。
+function handleEnterExitEmptyMarkup(view) {
+  const { state } = view;
+  const sel = state.selection.main;
+  if (!sel.empty) return false; // 選択がある場合は通常の処理へ
+  const line = state.doc.lineAt(sel.from);
+  if (line.text.slice(sel.from - line.from).trim() !== "") return false; // カーソルの後ろに中身が残るなら対象外
+  const context = markupContext(state, sel.from);
+  if (!context.length) return false;
+  const totalWidth = context.reduce((n, t) => n + t.width, 0);
+  if (sel.from - line.from < totalWidth) return false; // カーソルがまだマーカーの途中
+  const newPrefix = renderMarkupPrefix(context.slice(0, -1)); // 最も内側の階層を1つ取り除く
+  view.dispatch({
+    changes: { from: line.from, to: sel.from, insert: newPrefix },
+    selection: { anchor: line.from + newPrefix.length },
+    userEvent: "input",
+  });
+  return true;
+}
+
 // Enter処理: リスト/チェックリスト/番号を自動継続、空項目なら継続を終了。それ以外はインデントなし改行。
 function handleEnter(view) {
   const { state } = view;
@@ -1688,16 +1789,13 @@ function buildMathBlockDeco(state, blocks) {
 }
 const mathBlocksField = StateField.define({
   create: (state) => findMathBlocks(state),
+  // 他5つ(表・[toc]・Mermaid・コードブロック内数式・生HTML)と同じくblockListNeedsRecompute経由の
+  // 窓方式にする(バグ1の修正: 従来は挿入テキストのみに"$"を含むかで判定しており、削除だけで
+  // "$$"が完成する操作(例: "$Ax$"→"x"を削除→"A"を削除→"$$")を検知できず、以降"$"を含まない
+  // 編集をいくら重ねても再計算されないという不具合があった)。
   update: (v, tr) => {
     if (!tr.docChanged) return v;
-    let needsRecompute = false;
-    tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
-      if (needsRecompute) return;
-      if (inserted.toString().includes("$")) { needsRecompute = true; return; }
-      for (const b of v) { if (fromA <= b.to && toA >= b.from) { needsRecompute = true; return; } }
-    });
-    if (needsRecompute) return findMathBlocks(tr.state);
-    return v.map((b) => ({ from: tr.changes.mapPos(b.from), to: tr.changes.mapPos(b.to, 1), text: b.text }));
+    return blockListNeedsRecompute(v, tr, ["$"]) ? findMathBlocks(tr.state) : remapBlockRanges(v, tr.changes);
   },
 });
 const mathBlockDecoField = StateField.define({
@@ -2271,11 +2369,31 @@ const smartTypingInputHandler = Prec.highest(EditorView.inputHandler.of((view, f
 }));
 
 // ---- Markdown記法の自動ペア(仕様書 autoPairMarkdown) ----
-// **/_/~~/==のような対称マーカーの自動ペア。既存のautoPairing(closeBrackets、括弧・引用符)とは
-// 完全に独立した仕組みにする(autoPairComp/closeBrackets()の対象ペアには含めず、ここで自前実装する)。
+// */_/~のような、1文字だけでも意味を持つ対称マーカー(*斜体*・_斜体_・~下付き~)の自動ペア。
+// 既存のautoPairing(closeBrackets、括弧・引用符)とは完全に独立した仕組みにする
+// (autoPairComp/closeBrackets()の対象ペアには含めず、ここで自前実装する)。
 // トグルはsmartTypingInputHandlerと同じくextTogglesField経由でその都度読む(Compartmentの
 // 着脱は使わない)ため、設定変更が次のキー入力から即座に反映される。
-const MD_PAIR_CHARS = { "*": "*", "_": "_", "~": "~", "=": "=" };
+//
+// "="はここに含めない(ラウンド2で見つかったバグ・データ破壊の修正)。従来は"="も同じ
+// MD_PAIR_CHARSに入れており、単独の"="を1回打っただけで即座に閉じ側の"="を追加していた。
+// しかし"="は"=="(ハイライト)としてのみ意味を持ち、*・_・~と違って単独の"="には
+// Markdown上何の意味も無い。にもかかわらず単独入力に反応していたため、"x=1"のようなごく
+// 普通の文章・URLのクエリ文字列・base64画像("...AAA=)"のようなパディング)など、"="を含む
+// ほぼすべての文書がタイプするだけで壊れていた(base64の場合はパディングが崩れて画像が
+// 読み込めなくなる実害を確認済み)。
+//
+// 「ちょうど2つ連続した"="が確定した瞬間にだけ閉じ側の"=="を足す」という様子見方式も
+// 検討したが、それでも"a==b"のような、ハイライトを意図しない普通の"=="(比較演算子を
+// 説明する文章・注釈・整形されたテキスト等)を打つだけで誤発火し、同じ種類のデータ破壊が
+// 形を変えて残ることを確認した(調査時に実測: "a==b==c==d==e"が"abcde========"になる等)。
+// "="はプログラミングやURLで極めて高頻度に単独でも連続でも現れる文字であり、"(""["のような
+// 括弧類ほど「対になっている方が圧倒的に多い」とは言えないため、自動ペアの都合の良さより
+// 安全側を優先し、"="の自動ペアはここでは一切行わないことにする(タイプ中の自動ペアという
+// 利便性は失うが、ツールバー/ショートカットの「ハイライト」操作(applyMdAction「highlight」→
+// wrapSel("==")、こちらは選択範囲を明示的に"=="で囲むだけなので誤発火しようがない)で
+// "==highlight=="を挿入する経路は従来どおり使える)。
+const MD_PAIR_CHARS = { "*": "*", "_": "_", "~": "~" };
 const mdAutoPairInputHandler = EditorView.inputHandler.of((view, from, to, text) => {
   const toggles = view.state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
   if (toggles.autoPairMarkdown === false) return false;
@@ -2344,7 +2462,7 @@ const livePreviewExt = () => [
   htmlBlocksField, htmlBlockDecoField, // ブロックHTML(M-27〜M-31)
   softBreaksField, softBreakDecoField, // 仕様書 whitespaceWhenWriting="ignore"
   smartTypingInputHandler, // 仕様書 smartQuotes="input"・smartDashes
-  mdAutoPairInputHandler, // 仕様書 autoPairMarkdown
+  mdAutoPairInputHandler, // 仕様書 autoPairMarkdown("="は含まない。理由はMD_PAIR_CHARS定義部参照)
   defaultCodeLangInputHandler, // 仕様書 defaultCodeLanguage・defaultCodeLanguageApplyWhen="markdown"
 ];
 
@@ -2956,6 +3074,10 @@ const MAX_FONT_SIZE = 40;
 export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionChange, onRender, onPaste, onCopy, onSelectionChange } = {}) {
   const editable = new Compartment();
   const themeComp = new Compartment();
+  // Undo履歴(@codemirror/commandsのhistory())をCompartmentに載せる(ラウンド2で見つかった
+  // バグ・データ破損の修正)。setValue()定義部のコメント参照。Compartmentに載せていないと
+  // reconfigureで履歴フィールドを一度外して付け直す、という「履歴クリア」の定番手段が使えない。
+  const historyComp = new Compartment();
   // ファイル種別ごとの編集モード切り替え(仕様書 第1章: markdown / code / plain)。
   // コード/プレーンテキストのファイルではMarkdownの言語解析とライブプレビュー装飾を外す。
   const docModeComp = new Compartment();
@@ -2974,6 +3096,14 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
   const focusModeComp = new Compartment();
   const typewriterComp = new Compartment();
   let composing = false;
+  // 検索パネル(search-ui.js)の件数自動更新用の購読先(バグ2の修正)。以前は
+  // search-ui.js側がStateEffect.appendConfigで自前のupdateListenerをその時点の
+  // state.configにだけ追加していたため、タブ切替(setEditorState→view.setState)で
+  // configが丸ごと差し替わると購読が失われていた。この配列は(state.configではなく)
+  // createEditor()のクロージャに属し、EditorState/configが何度差し替わっても
+  // 生き続けるため、下のbuildExtensions()内の常設updateListener(常にどのconfigにも
+  // 含まれる)経由で呼べば、タブ切替をまたいでも購読が切れない。
+  const docChangeListeners = new Set();
   // 不具合3の修正: 世代トークン。setFileMode/setCodeLanguageはdesc.load()の完了を待つ間に
   // (a)別のsetFileMode/setCodeLanguage呼び出しが割り込む、(b)タブ切替(setEditorState)で
   // viewの中身がまるごと差し替わる、のいずれかが起きうる。どちらの場合も、awaitから
@@ -3095,7 +3225,17 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
   // 新規タブもここで一度だけ現在の設定を継承すれば以後は個別に切り替わっていく)。
   function buildExtensions() {
     return [
-        history(),
+        historyComp.of(history()),
+        // 引用・リストの空行でEnter2回で抜けられるようにする(ラウンド2の追加依頼、
+        // handleEnterExitEmptyMarkup定義部のコメント参照)。@codemirror/lang-markdownの
+        // 標準Enter処理はmarkdownLanguageExt()内でPrec.highのkeymapとして登録されるため、
+        // それより先に評価されるようPrec.highestにする。対象を「マーカーだけで中身が
+        // 空の行」に厳密に絞ってあり、それ以外は必ずfalseを返して素通しする(下のkeymap.of
+        // 内のEnterバインディング・ライブラリ側のEnter処理へそのまま委ねる)ため、通常の
+        // リスト継続・番号の繰り上げ・チェックボックスの継続には一切影響しない。
+        // ソースコードモード(sourceMode)でもdocModeComp自体は変わらない(構文木は生きている)
+        // ため、livePreviewComp配下ではなくここ(常設)に置く。
+        Prec.highest(keymap.of([{ key: "Enter", run: (v) => (v.composing ? false : handleEnterExitEmptyMarkup(v)) }])),
         keymap.of([
           // Shift+Enterのソフトブレーク(仕様書 M-01)はEnter(リスト継続のhandleEnter)より
           // 先に評価する必要があるため先頭に置く(配列の先頭ほど優先。実際にはキー文字列が
@@ -3181,6 +3321,10 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
           // 文書全体を文字列化する無駄なコストになっていたため引数を渡すのをやめる。
           // 本文の文字列が必要な呼び出し元はeditor.getValue()を都度呼ぶこと。
           if (u.docChanged && onChange) onChange();
+          // 検索パネルの件数自動更新(バグ2の修正)。この常設リスナーはbuildExtensions()の
+          // 戻り値としてどのEditorState(=どのタブ)にも常に含まれるため、docChangeListeners
+          // に登録した購読者はタブ切替をまたいでも呼ばれ続ける。
+          if (u.docChanged && docChangeListeners.size) for (const fn of docChangeListeners) fn(u);
           if (u.focusChanged) { (view.hasFocus ? onFocus : onBlur)?.(); }
           if ((u.docChanged || u.viewportChanged || u.selectionSet) && onRender) requestAnimationFrame(() => onRender());
           // 行/列・文字数カウント(ステータスバー)用の軽量な通知。doc変化でもカーソル位置は
@@ -3225,6 +3369,47 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
     ];
   }
 
+  // setValue()専用: 文書を丸ごと差し替えつつ、Undo履歴だけは新規にする(下のsetValue定義部の
+  // コメント参照)。当初はview.dispatch()でhistoryComp(Compartment)をreconfigure([])→
+  // reconfigure(history())と2段階で切り替えていたが、実機不具合調査(ラウンド2)の過程で、
+  // 「極端に深い(60,000段)ネストのHTMLを一度でも処理した直後に、どのCompartmentであれ
+  // 1回でもreconfigureすると、以降その状態の構文木(@lezer/markdown)がブロック要素
+  // (生HTMLブロック等)を正しく検出できなくなる」という、CodeMirrorの増分パースに関する
+  // 別の不具合(このアプリのコードの外、ライブラリ側の相互作用によるもの)を新たに引き当てて
+  // しまうことが発覚した(検証用スクリプトで再現・原因を特定済み。詳細は今回の対応報告参照)。
+  // 60,000段ネストのような極端な入力は稀だが、「setValue()を呼ぶたびに何かをreconfigureする」
+  // という設計そのものがこの地雷を踏みやすくするため、Compartmentのreconfigureは一切使わず、
+  // view.setState()による全面差し替え(タブ切替と同じ方式。タブ切替でCtrl+Zが前のタブへ
+  // 漏れないのと同じ理屈でUndo履歴が自然に空になる)に切り替える。
+  // ただし全面差し替えは「その時点のアプリ全体設定」で作り直したbuildExtensions()を使うため、
+  // 何もしなければモード(Markdown/コード/プレーン)やマークダウン記法トグル等、直前まで
+  // 設定されていた値が既定値へ巻き戻ってしまう(buildExtensions()はdocModeComp等を常に
+  // 既定のMarkdownモードで組み立てるため)。setValue()の呼び出し元(main.js)は必ず
+  // editor.setFileMode(...)を先に呼んでからsetValue()を呼ぶ設計になっており、その結果
+  // (どのCompartmentに何が設定されたか)を失ってはいけない。そのため:
+  //   ・Compartmentの現在値はCompartment.get(state)で読み取り、そのままof()し直す
+  //     (historyCompだけは対象から外し、常に新しいhistory()にする=これが履歴クリアの本体)。
+  //   ・Compartmentではなく素のStateFieldにStateEffectで設定されている値
+  //     (extTogglesField・colorPreviewEnabledField・docContextField。いずれも「文書の内容から
+  //     導出される」のではなく「アプリ設定/ファイルの種別として外から注入される」値)は、
+  //     buildExtensions()の既定値のままだと巻き戻ってしまうため、setState()の直後に
+  //     同じ値を効果(StateEffect)として再度dispatchして復元する(これはCompartmentの
+  //     reconfigureではない普通のdispatchなので、上記の不具合を踏まない)。
+  const PRESERVED_COMPARTMENTS = [
+    editable, themeComp, docModeComp, livePreviewComp, codeModeExtrasComp,
+    wrapComp, autoPairComp, codeIndentComp, spellCheckComp, focusModeComp, typewriterComp,
+  ]; // historyCompは意図的に含めない(常に新しいhistory()にする=履歴クリアの本体)。
+  function buildExtensionsForSetValue(prevState) {
+    return buildExtensions().map((item) => {
+      const comp = item?.compartment;
+      if (comp && PRESERVED_COMPARTMENTS.includes(comp)) {
+        const current = comp.get(prevState);
+        if (current !== undefined) return comp.of(current);
+      }
+      return item;
+    });
+  }
+
   const view = new EditorView({
     parent,
     state: EditorState.create({
@@ -3236,8 +3421,40 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
   return {
     view,
     getValue: () => view.state.doc.toString(),
+    // 新規文書・別ファイルを開く・ドラッグ&ドロップで別ファイルを開く等、「文書そのものが
+    // 入れ替わる」ときに本文を丸ごと差し替える入口(main.jsのsetEditorValueQuiet経由でのみ
+    // 呼ばれる)。Undo履歴も明示的にクリアする(ラウンド2で見つかったバグ・データ破損の修正)。
+    // 従来はここが単なる「本文を丸ごと差し替えるだけの、履歴上は普通の1回の変更」として
+    // 実装されており、Undo履歴をクリアしていなかった。そのため、モード切替(表示メニューで
+    // コードモード⇔Markdownモードを行き来する操作。setFileMode参照)を挟んだ後に新規作成や
+    // 別ファイルを開いてから数文字入力してCtrl+Zを繰り返すと、この「文書の入れ替わり」の
+    // 境界を飛び越えて前の(無関係な)文書の内容が復元されてしまっていた(実機再現・
+    // 保存すればデータ破損に直結する不具合として報告された)。
+    // 履歴のクリアはview.setState()による全面差し替えで行う(buildExtensionsForSetValue定義部の
+    // コメント参照。Compartmentのreconfigureは、極端に深いネストのHTMLを処理した直後に限って
+    // 構文木の検出を壊す別の不具合を踏むことが分かったため、あえて避けている)。
+    // タブ切替(setEditorState)と同様、待機中のsetFileMode/setCodeLanguageが後から古い結果を
+    // 適用してしまわないようmodeGenも進めておく。
     setValue: (text) => {
-      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text || "" }, selection: { anchor: 0 } });
+      modeGen++;
+      const prevState = view.state;
+      // Compartmentではなく素のStateFieldにStateEffectで設定されている値(アプリ設定/
+      // ファイル種別として外から注入され、文書の内容そのものからは導出されない値)は、
+      // buildExtensions()の既定値のままだと巻き戻ってしまうため、先に読み取っておいて
+      // setState()の後で同じ値を再度効果として当て直す。
+      const prevExtToggles = prevState.field(extTogglesField, false);
+      const prevColorPreviewEnabled = prevState.field(colorPreviewEnabledField, false);
+      const prevDocContext = prevState.field(docContextField, false);
+      view.setState(EditorState.create({
+        doc: text || "",
+        selection: { anchor: 0 },
+        extensions: buildExtensionsForSetValue(prevState),
+      }));
+      const restoreEffects = [];
+      if (prevExtToggles !== undefined) restoreEffects.push(setExtToggles.of(prevExtToggles));
+      if (prevColorPreviewEnabled !== undefined) restoreEffects.push(setColorPreviewEnabled.of(prevColorPreviewEnabled));
+      if (prevDocContext !== undefined) restoreEffects.push(setDocContext.of(prevDocContext));
+      if (restoreEffects.length) view.dispatch({ effects: restoreEffects });
       if (onRender) requestAnimationFrame(() => onRender());
     },
     focus: () => view.focus(),
@@ -3680,6 +3897,13 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
     // 現在のview構築に使ったCompartmentインスタンスをそのまま使うため、この戻り値は
     // 同じcreateEditor()のview(=同じエディタインスタンス)へのみsetEditorStateできる。
     createFreshState: (text) => EditorState.create({ doc: text || "", extensions: buildExtensions() }),
+    // 検索パネル(search-ui.js)向け: 本文変更の通知を購読する(バグ2の修正、docChangeListeners
+    // 定義部のコメント参照)。タブ切替でEditorStateが差し替わっても購読は切れない。
+    // 戻り値は購読解除用の関数。
+    onDocChange: (fn) => {
+      docChangeListeners.add(fn);
+      return () => docChangeListeners.delete(fn);
+    },
     getModeSnapshot: () => ({ mode: currentMode, codeLanguage: currentCodeLanguage, sourceMode }),
     applyModeSnapshot: (snap) => {
       currentMode = snap?.mode ?? "markdown";
