@@ -2571,6 +2571,7 @@ internal sealed class MainForm : Form
             indentSizeOnSave = settings.IndentSizeOnSave,
             codeIndentSize = settings.CodeIndentSize,
             codeFoldingEnabled = settings.CodeFoldingEnabled,
+            codeIndentGuides = settings.CodeIndentGuides,
             codeAutoWrap = settings.CodeAutoWrap,
             shiftTabAutoIndent = settings.ShiftTabAutoIndent,
             autoPairing = settings.AutoPairing,

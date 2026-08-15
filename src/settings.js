@@ -138,6 +138,7 @@ const FIELD_DEFS = {
   indentSizeOnSave: { kind: "number", def: 4, values: [2, 4, 8] },
   codeIndentSize: { kind: "number", def: 4, values: [2, 4, 8] },
   codeFoldingEnabled: { kind: "bool", def: true },
+  codeIndentGuides: { kind: "enum", values: ["none", "fold", "all"], def: "fold" },
   codeAutoWrap: { kind: "bool", def: true },
   colorPreviewInCode: { kind: "bool", def: true },
   shiftTabAutoIndent: { kind: "bool", def: false },
@@ -1211,6 +1212,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
         ${fieldNumericSelect("indentSizeOnSave", "引用・リストのインデント幅")}
         ${fieldNumericSelect("codeIndentSize", "コードモードのインデント幅", "Tabキーで挿入するスペースの数と、タブ文字の表示幅です。半角スペースで書かれた既存のインデントの見た目は変わりません")}
         ${fieldCheckbox("codeFoldingEnabled", "コードモードの折りたたみ", "関数・オブジェクト・配列などの行番号の左に折りたたみマーカーを表示します")}
+        ${fieldSelect("codeIndentGuides", "インデントガイド(縦線)", [["none", "表示しない"], ["fold", "折りたたみできる範囲のみ"], ["all", "すべてのインデント"]], "コードモードで、インデントの深さを示す縦線をどこまで表示するかです")}
         ${fieldCheckbox("codeAutoWrap", "コードブロックの長い行を折り返し")}
         ${fieldCheckbox("colorPreviewInCode", "コード中の色をプレビュー表示", "16進・rgb・hsl等の色指定にスウォッチと文字色を付けます")}
         ${fieldCheckbox("shiftTabAutoIndent", "Shift+Tabでインデントを解除")}

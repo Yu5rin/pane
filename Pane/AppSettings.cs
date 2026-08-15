@@ -263,6 +263,20 @@ internal sealed class AppSettings
     /// <summary>コードモードでの折りたたみ(関数・オブジェクト・配列等)を有効にするか。既定true。JS `editor.js`。</summary>
     public bool CodeFoldingEnabled { get; set; } = true;
 
+    private string _codeIndentGuides = "fold";
+
+    /// <summary>
+    /// コードモードのインデントガイド(縦線)の表示モード。"none" | "fold" | "all"。既定"fold"。
+    /// JS `editor.js`。ユーザー意見「マーカーをつなぐために使用しているだけで、インデントごとに
+    /// 罫線する必要はないと考えている」を受けて設定化した(以前は常時表示のみだった)。
+    /// "none"=表示しない、"fold"=折りたたみできる範囲のみ、"all"=すべてのインデント(旧来の挙動)。
+    /// </summary>
+    public string CodeIndentGuides
+    {
+        get => _codeIndentGuides;
+        set => _codeIndentGuides = ValidateEnum(value, "fold", "none", "fold", "all");
+    }
+
     /// <summary>コードブロック内の長い行を折り返すか。既定true。JS `editor.js`。</summary>
     public bool CodeAutoWrap { get; set; } = true;
 
