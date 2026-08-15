@@ -241,6 +241,16 @@ html[data-theme="dark"] {
 :root {
   --panel-bg: color-mix(in srgb, var(--ink) 6%, var(--paper));
   --frontmatter-bg: var(--panel-bg);
+  /* 現在行の強調表示(依頼②、コードモード限定、設定 codeActiveLineHighlight)。
+     --panel-bgと同じ「文字色をわずかに混ぜて本文よりほんの少しだけ沈ませる」考え方だが、
+     こちらはカーソル移動のたびに常時どこかの行へ掛かり続ける(ほぼ常に視界に入る)ため、
+     --panel-bg(6%)よりさらに弱い5%にして目に負担をかけないようにした。--ink/--paperは
+     テーマプリセット(themes.css)側で個別に上書きされるため、この1つの定義のまま9テーマ
+     すべてに異なる実効色として反映される(--panel-bgと同じ仕組み)。実測した結果、
+     本文色との差(コントラスト比)は9テーマとも1.07〜1.19程度(わずかに持ち上がる程度)、
+     文字色との差(コントラスト比)は最も低いsolarized-darkでも5.2程度でAA基準(4.5)を
+     余裕を持って満たす。実測の内訳は今回の対応報告を参照。 */
+  --active-line-bg: color-mix(in srgb, var(--ink) 5%, var(--paper));
 
   --callout-note: var(--accent);
   --callout-tip: color-mix(in srgb, var(--accent) 70%, var(--ink-mute) 30%);
@@ -611,6 +621,14 @@ body.export-layout .cm-scroller { overflow: visible !important; }
 #cm-host .cm-lineNumbers .cm-gutterElement { padding: 0 8px 0 4px; font-family: var(--font-mono); font-size: 12px; }
 #cm-host .cm-matchingBracket { background: var(--accent-soft); color: var(--accent); border-radius: 3px; }
 #cm-host.mode-code .cm-content, #cm-host.mode-code .cm-gutters { font-family: var(--font-mono); }
+/* 現在行の強調表示(依頼②、設定 codeActiveLineHighlight・既定true・コードモード限定)。
+   editor.js側のactiveLineHighlightPlugin/activeLineGutterHighlighterがcm-active-line
+   (本文の行全体)/cm-active-line-gutter(行番号ガターのそのセル)を付け外しする。どちらも
+   選択範囲がある間は付かない(空の選択=カーソルだけの行が対象。理由はeditor.js側の
+   activeLineHighlightPlugin定義部のコメント参照)。色は--active-line-bg(本文色を5%だけ
+   混ぜた極めて淡い帯、定義・実測はstyle.css冒頭の:rootブロック参照)を本文・ガター共通で使う。 */
+#cm-host.mode-code .cm-line.cm-active-line { background: var(--active-line-bg); }
+#cm-host.mode-code .cm-gutterElement.cm-active-line-gutter { background: var(--active-line-bg); }
 
 /* モバイル: キーボード上部ツールバー */
 .mobile-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; height: var(--bar-h, 48px); box-sizing: border-box; display: flex; align-items: center; background: var(--surface); border-top: 1px solid var(--line); box-shadow: 0 -2px 10px rgba(16,24,32,.08); }
@@ -752,12 +770,27 @@ html[data-theme="dark"] .cm-line.cm-codeblock-line { background: var(--code-bg);
 .cm-line.cm-cb-fence-hidden { font-size: 0; line-height: 5px; }
 .cm-line.cm-cb-first.cm-cb-fence-hidden { padding-top: 2px !important; }
 .cm-line.cm-cb-last.cm-cb-fence-hidden { padding-bottom: 2px !important; }
-.cm-code-copy { position: absolute; top: 4px; right: 6px; z-index: 2; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; color: var(--ink-sub); cursor: pointer; padding: 0; transition: color .15s, transform .15s; }
+.cm-code-copy { position: absolute; top: 4px; right: 6px; z-index: 2; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; color: var(--ink-sub); cursor: pointer; padding: 0; opacity: 0; pointer-events: none; transition: color .15s, transform .15s, opacity .15s; }
 .cm-code-copy:active { transform: scale(.9); }
 .cm-code-copy.done { color: var(--accent); }
 .cm-code-copy .ic-done { display: none; }
 .cm-code-copy.done .ic-copy { display: none; }
 .cm-code-copy.done .ic-done { display: inline; }
+/* コピーボタンの表示条件(依頼①、判断の経緯はeditor.js側のcodeCopyHoverHandlers定義部の
+   コメント参照): 既定は非表示(opacity:0)にし、
+     - カーソルがこのコードブロックの中にある(cm-cb-live、editor.js側でblockLive判定から付与)
+     - マウスが乗っている(cm-cb-hot、editor.js側のmouseover/mouseleaveハンドラが付け外し)
+     - コピー直後のフィードバック中(.done、マウスが離れた後も結果が見えるように常に表示)
+     - キーボードでボタン自体にフォーカスが当たっている(:focus-visible)
+   のいずれかの間だけ不透明にする。pointer-eventsも連動させ、非表示中は真下にあるコード本文
+   へのクリック・カーソル配置を妨げないようにする(透明でも要素自体はDOM上に存在するため)。 */
+.cm-cb-first.cm-cb-live .cm-code-copy,
+.cm-cb-first.cm-cb-hot .cm-code-copy,
+.cm-code-copy.done,
+.cm-code-copy:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
 /* コードブロックの行番号(仕様 codeBlockLineNumbers)。ウィジェットとして行頭に差し込む
    (CodeLineNumberWidget)ため、行側は番号ぶんの左余白だけ確保する。 */
 .cm-line.cm-cb-numbered { padding-left: 12px !important; }

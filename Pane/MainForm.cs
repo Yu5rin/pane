@@ -2573,6 +2573,7 @@ internal sealed class MainForm : Form
             codeFoldingEnabled = settings.CodeFoldingEnabled,
             codeIndentGuides = settings.CodeIndentGuides,
             codeAutoWrap = settings.CodeAutoWrap,
+            codeActiveLineHighlight = settings.CodeActiveLineHighlight,
             shiftTabAutoIndent = settings.ShiftTabAutoIndent,
             autoPairing = settings.AutoPairing,
             autoPairMarkdown = settings.AutoPairMarkdown,

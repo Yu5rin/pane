@@ -63,6 +63,7 @@ internal static class SettingsBridge
             codeFoldingEnabled = settings.CodeFoldingEnabled,
             codeIndentGuides = settings.CodeIndentGuides,
             codeAutoWrap = settings.CodeAutoWrap,
+            codeActiveLineHighlight = settings.CodeActiveLineHighlight,
             shiftTabAutoIndent = settings.ShiftTabAutoIndent,
             autoPairing = settings.AutoPairing,
             autoPairMarkdown = settings.AutoPairMarkdown,
@@ -304,6 +305,7 @@ internal static class SettingsBridge
             if (TryGetBool(s, "codeFoldingEnabled", out bool codeFoldingEnabled)) settings.CodeFoldingEnabled = codeFoldingEnabled;
             if (TryGetString(s, "codeIndentGuides", out string codeIndentGuides)) settings.CodeIndentGuides = codeIndentGuides;
             if (TryGetBool(s, "codeAutoWrap", out bool codeAutoWrap)) settings.CodeAutoWrap = codeAutoWrap;
+            if (TryGetBool(s, "codeActiveLineHighlight", out bool codeActiveLineHighlight)) settings.CodeActiveLineHighlight = codeActiveLineHighlight;
             if (TryGetBool(s, "shiftTabAutoIndent", out bool shiftTabAutoIndent)) settings.ShiftTabAutoIndent = shiftTabAutoIndent;
             if (TryGetBool(s, "autoPairing", out bool autoPairing)) settings.AutoPairing = autoPairing;
             if (TryGetBool(s, "autoPairMarkdown", out bool autoPairMarkdown)) settings.AutoPairMarkdown = autoPairMarkdown;

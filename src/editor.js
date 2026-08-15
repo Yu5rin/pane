@@ -1,8 +1,8 @@
 // Pane ライブプレビューエディタ (CodeMirror 6)
 // index.html から createEditor() で生成し、返り値のAPIで操作する。
 // 依存はすべてesbuildでビルド成果物(dist/)に同梱する。実行時に外部CDNへは一切到達しない。
-import { EditorView, keymap, Decoration, ViewPlugin, WidgetType, lineNumbers } from "@codemirror/view";
-import { EditorState, Compartment, StateEffect, StateField, Prec, Transaction, countColumn } from "@codemirror/state";
+import { EditorView, keymap, Decoration, ViewPlugin, WidgetType, lineNumbers, GutterMarker, gutterLineClass } from "@codemirror/view";
+import { EditorState, Compartment, StateEffect, StateField, Prec, Transaction, countColumn, RangeSet } from "@codemirror/state";
 import { markdown } from "@codemirror/lang-markdown";
 import { Strikethrough, Table, Superscript, Subscript, Emoji, Autolink } from "@lezer/markdown";
 import { defaultKeymap, history, historyKeymap, indentWithTab, insertNewline, undo, redo, moveLineUp, moveLineDown, copyLineDown, deleteLine, indentLess, indentSelection, selectAll } from "@codemirror/commands";
@@ -24,6 +24,10 @@ import {
 // 場合にユーザーへ知らせるための、このアプリ既存の警告ダイアログ(confirmOpenExternal等と
 // 同じ仕組み。詳細はdialog.js冒頭のコメント参照)。
 import { paneAlert } from "./dialog.js";
+// コードコピーボタン(依頼①)のtitle属性を、既存の4段階ツールチップの仕組みに乗せるために使う。
+// このモジュールが持つ「今の段階」はmain.js側のsetTooltipLevelがsetCurrentLevel()経由で
+// 更新しているため、ここではgetCurrentLevel()を読むだけでよい(main.jsへの依存を持たない)。
+import { applyTooltip, getCurrentLevel } from "./tooltips.js";
 // formatColorLiteral・openColorPickerPanel(カラーピッカーパネル本体)は、本文の色プレビュー
 // 表示(常時の装飾)には要らず、「色を変更…」で実際にパネルを開いたときにしか使わない。
 // 初期ロードJS削減(仕様書 第8.4節)のため、openColorPicker()の中で動的importする
@@ -409,15 +413,31 @@ class CodeCopyWidget extends WidgetType {
     const btn = document.createElement("button");
     btn.className = "cm-code-copy";
     btn.type = "button";
-    btn.setAttribute("aria-label", "コードをコピー");
+    const idleLabel = "コードをコピー";
+    btn.setAttribute("aria-label", idleLabel);
+    // title(ツールチップ)は既存の4段階の仕組み(tooltips.js)に乗せる。TOOLTIPSの
+    // "cm-code-copy"エントリを引くためdata-tipを付ける(id属性は持たせない。1文書内に
+    // 同じコードブロックが複数あってもidが重複しないようにするため)。
+    btn.dataset.tip = "cm-code-copy";
+    applyTooltip(btn, getCurrentLevel());
     btn.innerHTML = '<svg class="ic-copy" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="12" height="12" rx="2.5"/><path d="M9 20h8.5a2.5 2.5 0 0 0 2.5-2.5V9"/></svg><svg class="ic-done" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
     btn.addEventListener("mousedown", (e) => e.preventDefault());
     btn.addEventListener("click", async (e) => {
       e.preventDefault(); e.stopPropagation();
       try { await navigator.clipboard.writeText(this.code); }
       catch { try { const t = document.createElement("textarea"); t.value = this.code; document.body.appendChild(t); t.select(); document.execCommand("copy"); t.remove(); } catch { /* コピーはベストエフォート、表示は常に行う */ } }
+      // コピー後の短いフィードバック(依頼①): アイコンをチェックマークに切り替える(CSS の
+      // .done)のに加え、aria-label/titleも一時的に「コピーしました」へ変える。ボタンは
+      // ホバー/カーソルが無ければ既定で不透明度0(表示条件は下記CSS参照)だが、.doneの間だけは
+      // 常に不透明にする(CSS側)ため、マウスが離れても結果が見える。
       btn.classList.add("done");
-      setTimeout(() => btn.classList.remove("done"), 1200);
+      btn.setAttribute("aria-label", "コピーしました");
+      btn.title = "コピーしました";
+      setTimeout(() => {
+        btn.classList.remove("done");
+        btn.setAttribute("aria-label", idleLabel);
+        applyTooltip(btn, getCurrentLevel()); // titleを現在の詳しさ段階の文言へ戻す
+      }, 1200);
     });
     return btn;
   }
@@ -779,8 +799,16 @@ const livePreview = ViewPlugin.fromClass(class {
             const cls = "cm-codeblock-line" + (ln === open.number ? " cm-cb-first" : "") + (ln === close.number ? " cm-cb-last" : "")
               + (!blockLive && (ln === open.number || ln === close.number) ? " cm-cb-fence-hidden" : "") // 記号を隠している時だけフェンス行を圧縮
               + (toggles.codeAutoWrap === false ? " cm-cb-nowrap" : "") // 仕様書 codeAutoWrap: falseなら長い行を折り返さない
-              + (showLineNumbers && isContentLine ? " cm-cb-numbered" : ""); // 行番号ぶんの左余白を確保
-            marks.push({ from: l.from, to: l.from, deco: Decoration.line({ class: cls }), line: true });
+              + (showLineNumbers && isContentLine ? " cm-cb-numbered" : "") // 行番号ぶんの左余白を確保
+              // コピーボタンの表示条件(依頼①、cursorInside判定の使い回し): カーソルがこの
+              // ブロックの中にあれば、ボタンがある開始行(cm-cb-first)にだけ「表示する」印の
+              // クラスを付ける(スタイルはstyle.css .cm-cb-first.cm-cb-live参照)。
+              + (ln === open.number && blockLive ? " cm-cb-live" : "");
+            // data-cb: このブロックの一意な鍵(開始フェンス行の位置)。マウスホバーで
+            // ボタンを表示する処理(livePreviewExt内のdomEventHandlers)が、ホバーされた
+            // 行から「自分はどのブロックに属するか」を辿るために使う(FoldOpenMarkerWidgetの
+            // data-fold-fromと同じ考え方)。
+            marks.push({ from: l.from, to: l.from, deco: Decoration.line({ class: cls, attributes: { "data-cb": String(open.from) } }), line: true });
             if (showLineNumbers && isContentLine) {
               codeLineNo++;
               marks.push({ from: l.from, to: l.from, deco: Decoration.widget({ widget: new CodeLineNumberWidget(codeLineNo), side: -1 }) });
@@ -2499,6 +2527,68 @@ const defaultCodeLangInputHandler = EditorView.inputHandler.of((view, from, to, 
 });
 
 const markdownLanguageExt = () => markdown({ extensions: [Strikethrough, Table, Superscript, Subscript, Emoji, Autolink], codeLanguages });
+
+// コードコピーボタンの表示条件(依頼①): 常時表示だと本文が煩雑になるため、「マウスがそのコード
+// ブロックの上にある」または「カーソルがそのコードブロックの中にある(cm-cb-live、FencedCode
+// 処理側でblockLiveと同じ判定を使って付けている)」ときだけボタンを不透明にする(CSS側は
+// .cm-cb-first.cm-cb-hot / .cm-cb-first.cm-cb-live 参照)。判断の経緯: コピーボタンは本文の
+// 装飾としては主張が強く(枠付きの四角いボタン)、常時出しっぱなしだと特にコードブロックが
+// 連続する文書で本文が煩雑に見えるため、GitHub/VS Code等の「使いたい時にだけ現れる」慣習に
+// 揃えた。カーソルが中にあるときも表示するのは、マウスを使わずキーボードだけで編集中の
+// ユーザーが「今カーソルがあるブロックはコピーできる」と気づけるようにするため。
+//
+// マウス側の判定は、FoldOpenMarkerWidget(依頼⑤)のホバー強調と同じ「decoration setは
+// 再構築せず、DOM要素へのクラスの付け外しだけで完結させる」方式を踏襲する。各行に埋め込んだ
+// data-cb属性(フェンス開始位置=ブロックの一意な鍵、FencedCode処理側で付与)を頼りに、
+// ホバー中の行が属するブロックの開始行(ボタンがある.cm-cb-first)だけをview.contentDOM配下
+// (=表示中の少数要素、文書全体の行数に関わらず一定コスト)から探して cm-cb-hot を付け外しする。
+//
+// 実装方式の注意(ハマったポイント): 当初は標準の EditorView.domEventHandlers() で
+// 実装したが、実機相当の検証(Playwrightで実際にマウスを動かす)で「行番号(依頼M-XX
+// codeBlockLineNumbers)の数字の上を通ると効かない」不具合が判明した。原因は
+// CodeLineNumberWidget.ignoreEvent()がtrueを返すこと。CodeMirrorは
+// eventBelongsToEditor()内で「イベントのtargetから contentDOM まで祖先をたどり、
+// 途中に ignoreEvent()=true のwidgetがあれば、そのイベントは
+// domEventHandlers/domEventObservers 全体(clickやmousedownだけでなく、hoverの
+// 検出に使うmouseoverも含む)に一切渡さない」という判定をする。行番号ウィジェットは
+// 「クリックしても何もしない」ためにignoreEvent()=trueにしている(表示専用の意図は
+// 正しい)が、これがmouseoverの検出まで巻き込んで止めてしまう。行番号は各コード行の
+// 先頭(=ちょうどこのブロックの左端)に常駐するため、ユーザーがボタンへ向けて
+// マウスを動かす経路上でほぼ確実に一度は通過する場所であり、看過できない不具合だった。
+// 対策として、CodeMirrorの配線(domEventHandlers)を経由せず、view.contentDOMへ
+// 直接addEventListenerする(ViewPlugin.destroy()で確実に後始末する)。これなら
+// ignoreEvent()の判定を経由しないため、行番号やその他将来追加されうる
+// ignoreEvent()=trueな要素の上を通っても確実に拾える。
+const codeCopyHoverPlugin = ViewPlugin.fromClass(class {
+  constructor(view) {
+    this.view = view;
+    this.onOver = (event) => {
+      const line = event.target.closest?.(".cm-codeblock-line");
+      const group = line?.getAttribute("data-cb") ?? null;
+      for (const hot of view.contentDOM.querySelectorAll(".cm-cb-hot")) {
+        if (hot.getAttribute("data-cb") !== group) hot.classList.remove("cm-cb-hot");
+      }
+      if (group) {
+        const first = view.contentDOM.querySelector(`.cm-cb-first[data-cb="${CSS.escape(group)}"]`);
+        if (first) first.classList.add("cm-cb-hot");
+      }
+    };
+    // 本文エリア(contentDOM)自体からポインタが完全に出た時(ガター・スクロールバー・画面外への
+    // 移動を含む)にホバー状態を確実に解除する。mouseoverは子要素間の移動でも発火するため、
+    // これだけでは「エリア外に出た」ことを判定できない(mouseleaveはバブリングしないため
+    // contentDOMへ直接張ることで確実に拾える)。
+    this.onLeave = () => {
+      for (const hot of view.contentDOM.querySelectorAll(".cm-cb-hot")) hot.classList.remove("cm-cb-hot");
+    };
+    view.contentDOM.addEventListener("mouseover", this.onOver);
+    view.contentDOM.addEventListener("mouseleave", this.onLeave);
+  }
+  destroy() {
+    this.view.contentDOM.removeEventListener("mouseover", this.onOver);
+    this.view.contentDOM.removeEventListener("mouseleave", this.onLeave);
+  }
+});
+
 // 不具合5の修正: focusField/focusNotifier/emojiCompletionはここには含めない(常設拡張として
 // buildExtensions()側に移した。理由はfocusField定義部・emojiCompletionSource定義部の
 // コメント参照)。
@@ -2513,6 +2603,7 @@ const livePreviewExt = () => [
   smartTypingInputHandler, // 仕様書 smartQuotes="input"・smartDashes
   mdAutoPairInputHandler, // 仕様書 autoPairMarkdown("="は含まない。理由はMD_PAIR_CHARS定義部参照)
   defaultCodeLangInputHandler, // 仕様書 defaultCodeLanguage・defaultCodeLanguageApplyWhen="markdown"
+  codeCopyHoverPlugin, // 依頼①: コードコピーボタンのホバー表示
 ];
 
 // コード折りたたみ(依頼: 「Graftのようにコードをたたむ」)のキー割り当て。
@@ -3461,6 +3552,48 @@ const allIndentGuidePlugin = ViewPlugin.fromClass(class {
   }
 }, { decorations: (v) => v.decorations });
 
+// 現在行の強調表示(依頼②、コードモード限定・設定 codeActiveLineHighlight・既定true)。
+// @codemirror/viewの標準 highlightActiveLine()/highlightActiveLineGutter() を検討したが、
+// どちらも「選択範囲があってもその主選択のhead(カーソル位置)の行を塗る」実装になっており
+// (r.emptyを見ていない)、選択中も現在行の帯が出てしまう。VS Codeは選択があるときは現在行の
+// 帯を出さない(選択のハイライトと帯が重なって見分けにくくなるのを避けるため)。この違いだけを
+// 直した自前実装にする(それ以外の考え方—selection.rangesを順に見て、同じ行を二重に塗らない
+// よう直前の行startと比較する—は標準実装をそのまま踏襲した)。
+// 本文側はDecoration.line(通常のViewPlugin)、ガター側はgutterLineClass(標準のgutter拡張が
+// 内部で使っているのと同じ仕組み)で行う。どちらも対象は「空の選択(=単なるカーソル)を持つ行」
+// だけに絞り、複数カーソルがあれば全カーソル分を塗る(標準実装と同じ)。
+const activeLineDeco = Decoration.line({ class: "cm-active-line" });
+const activeLineHighlightPlugin = ViewPlugin.fromClass(class {
+  constructor(view) { this.decorations = this.build(view); }
+  update(u) { if (u.docChanged || u.selectionSet) this.decorations = this.build(u.view); }
+  build(view) {
+    let lastLineStart = -1;
+    const marks = [];
+    for (const r of view.state.selection.ranges) {
+      if (!r.empty) continue; // 選択があるカーソルは対象外(VS Codeと同じ挙動に揃える)
+      const line = view.lineBlockAt(r.head);
+      if (line.from > lastLineStart) { marks.push(activeLineDeco.range(line.from)); lastLineStart = line.from; }
+    }
+    return Decoration.set(marks);
+  }
+}, { decorations: (v) => v.decorations });
+const activeLineGutterMarker = new class extends GutterMarker {
+  constructor() { super(); this.elementClass = "cm-active-line-gutter"; }
+}();
+// gutterLineClass.compute(["selection"], ...)は、依存に指定した["selection"]が変わった
+// 時だけ再計算する(標準のhighlightActiveLineGutter()と同じ仕組み)。lineNumbers()が
+// 登録するガター(行番号ガター)にそのままelementClassが乗る。
+const activeLineGutterHighlighter = gutterLineClass.compute(["selection"], (state) => {
+  const marks = [];
+  let lastLineStart = -1;
+  for (const r of state.selection.ranges) {
+    if (!r.empty) continue;
+    const linePos = state.doc.lineAt(r.head).from;
+    if (linePos > lastLineStart) { marks.push(activeLineGutterMarker.range(linePos)); lastLineStart = linePos; }
+  }
+  return RangeSet.of(marks);
+});
+
 // コードモード限定の拡張を作る本体。codeFoldingOn/codeIndentGuidesOn/codeIndentSizeValueは
 // createEditor()内のインスタンス状態(タブ/ウィンドウごとに独立)のため、この関数自体は
 // createEditor()の中(該当state変数の宣言以降)で定義する。ここでは仕様のメモだけ残す。
@@ -3565,6 +3698,10 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
   // 「インデントごとに罫線する必要はないと考えているが設定で切り替えたほうがいいか」との
   // 意見を受け、設定項目として追加した(docs/設定項目一覧.md codeIndentGuides参照)。
   let codeIndentGuidesMode = "fold";
+  // 現在行の強調表示(依頼②、設定 codeActiveLineHighlight)。既定ON。コードモード限定
+  // (Markdownのライブプレビューには適用しない。理由はsetCodeActiveLineHighlight定義部の
+  // コメント参照)。
+  let codeActiveLineHighlightOn = true;
   // コードモード限定の拡張(仕様書 決定済み事項: 行番号・括弧の対応表示・インデントガイド・
   // 折りたたみまで。矩形選択・コード補完・LSP連携・エラー診断は搭載しない)。
   // 折りたたみマーカーは今回(依頼: マーカーと縦線をコードのすぐ左へ)、行番号ガターではなく
@@ -3594,6 +3731,9 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
     // L字判定・ホバー強調も含めて問題なく動く)。
     ...(codeIndentGuidesMode === "all" ? [allIndentGuidePlugin, guideLineTheme] : []),
     ...(codeIndentGuidesMode === "fold" && codeFoldingOn ? [foldGuideLinePlugin, guideLineTheme] : []),
+    // 依頼②: 現在行の強調表示(本文・行番号ガター両方)。コードモード限定なのでここ
+    // (codeModeExtras)に置く。setCodeActiveLineHighlight定義部のコメント参照。
+    ...(codeActiveLineHighlightOn ? [activeLineHighlightPlugin, activeLineGutterHighlighter] : []),
   ];
   // ソースコードモード(仕様書 V-05): 記法マーカーを隠さない生表示。docModeComp(構文ハイライト)は
   // 外さず、livePreviewComp(装飾・マーカー非表示)だけを空にすることで実現する。markdownモード
@@ -4211,6 +4351,16 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
       if (currentMode === "code") view.dispatch({ effects: codeModeExtrasComp.reconfigure(codeModeExtras()) });
     },
     getCodeIndentGuides: () => codeIndentGuidesMode,
+    // 依頼②: 現在行の強調表示(設定 codeActiveLineHighlight、既定true)。コードモード限定
+    // (Markdownのライブプレビューでは付けない。理由: Typoraにも無い機能であり、見出し・表等の
+    // ライブプレビュー装飾で行の背景が既に賑やかな中に行全体の帯まで重なると、かえって読みにくく
+    // なると判断したため。setCodeFolding等と同じ流儀で、コードモード中の変更はその場で
+    // codeModeExtrasComp.reconfigureして再起動なしに反映する)。
+    setCodeActiveLineHighlight: (on) => {
+      codeActiveLineHighlightOn = !!on;
+      if (currentMode === "code") view.dispatch({ effects: codeModeExtrasComp.reconfigure(codeModeExtras()) });
+    },
+    isCodeActiveLineHighlight: () => codeActiveLineHighlightOn,
     // スペルチェック(仕様書 spellCheckEnabled)。.cm-contentのspellcheck属性を切り替える。
     // spellCheckAutoCorrect(自動修正)はWebView2側の機能でJSからは制御できないため未実装。
     setSpellCheck: (on) => {

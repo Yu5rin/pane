@@ -2335,6 +2335,9 @@ async function handleHostMessage(msg) {
       // 旧バージョンのC#(未対応)からはmsg.codeIndentGuidesがundefinedで届くため、その場合は
       // 既定の"fold"を保つ(setCodeIndentGuides側で不正値を"fold"へ倒す)。
       editor.setCodeIndentGuides(msg.codeIndentGuides);
+      // 現在行の強調表示(仕様書 codeActiveLineHighlight、既定true。コードモード限定)。
+      // C#側が未対応の版ではundefinedで届くため、その場合は既定のONを保つ(他の項目と同じ流儀)。
+      editor.setCodeActiveLineHighlight(msg.codeActiveLineHighlight !== false);
       // 自動ペアリング(仕様書 第2.10節 C-05、括弧・引用符)。setAutoPairing自体は既に実装済みだが
       // ここからの配線が抜けていたため、他の設定と同じ流儀で追加する。
       editor.setAutoPairing(msg.autoPairing !== false);

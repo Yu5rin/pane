@@ -280,6 +280,11 @@ internal sealed class AppSettings
     /// <summary>コードブロック内の長い行を折り返すか。既定true。JS `editor.js`。</summary>
     public bool CodeAutoWrap { get; set; } = true;
 
+    /// <summary>コードモードで、カーソルのある行を背景色で強調表示するか(本文・行番号ガター両方)。既定true。
+    /// JS `editor.js`。Markdownのライブプレビューには適用しない(見出し・表等の装飾と行全体の帯が
+    /// 重なると読みにくくなるため、コードモード限定にした)。</summary>
+    public bool CodeActiveLineHighlight { get; set; } = true;
+
     /// <summary>Shift+Tabで行頭のインデントを自動的に減らすか。既定false。JS `editor.js`。</summary>
     public bool ShiftTabAutoIndent { get; set; }
 
