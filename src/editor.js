@@ -2614,26 +2614,49 @@ class FoldOpenMarkerWidget extends WidgetType {
   // lineHeightPx: view.defaultLineHeight。既存のIndentGuideBlankWidgetと同じ、実測px値を
   //   焼き込む方式(height:100%は祖先の高さ不定で解決できないため)。
   // charWidthPx: view.defaultCharacterWidth。上記の不具合修正で追加した、1文字ぶんの実測px幅。
-  constructor(opens, lineHeightPx, charWidthPx) {
+  // contentPaddingLeftPx: 実機不具合の修正(はみ出し対策の保険)。.cm-content の実際の
+  //   padding-left(px)。マーカーはleftCh=0(インデント無し行)のとき最大
+  //   FOLD_MARKER_SIZE(15px)左へはみ出す構造のため、CSS側の余白(コードモード20px/
+  //   Markdownモードは--editor-padding-left、既定32px・設定で変更可能)を広げるだけでなく、
+  //   実際に効いている値がマーカー幅未満でも(設定で極端に狭くされても)本文エリアの外へは
+  //   絶対に出ないよう、下のtoDOM()でこの値を使ってクランプする。
+  constructor(opens, lineHeightPx, charWidthPx, contentPaddingLeftPx) {
     super();
     this.opens = opens;
     this.lineHeightPx = lineHeightPx;
     this.charWidthPx = charWidthPx;
-    this.key = opens.map((o) => `${o.leftCh}:${o.stackIndex}:${o.range.from}-${o.range.to}-${o.folded}`).join("|") + `@${lineHeightPx}:${charWidthPx}`;
+    this.contentPaddingLeftPx = contentPaddingLeftPx;
+    this.key = opens.map((o) => `${o.leftCh}:${o.stackIndex}:${o.range.from}-${o.range.to}-${o.folded}`).join("|") + `@${lineHeightPx}:${charWidthPx}:${contentPaddingLeftPx}`;
   }
   eq(other) { return this.key === other.key; }
   toDOM(view) {
     const anchor = document.createElement("span");
     anchor.className = "cm-fold-open-anchor";
     anchor.style.height = `${this.lineHeightPx}px`;
-    for (const o of this.opens) {
+    // 右端がちょうど行頭空白の終端(=コードの開始位置)に揃うよう、その列(leftCh文字ぶん、
+    // charWidthPxで実測px化)からマーカー幅ぶん左へ引く。複数個並ぶ場合はさらに左へずらす
+    // (stackIndexが大きいほど外側)。
+    const rawLefts = this.opens.map((o) =>
+      o.leftCh * this.charWidthPx - (FOLD_MARKER_SIZE + o.stackIndex * (FOLD_MARKER_SIZE + FOLD_MARKER_GAP)));
+    // このwidget(アンカー)はline.from、すなわち行頭空白より前(=.cm-contentのpadding-left
+    // の内側の起点)に置かれているため、アンカー基準のleft座標は「-contentPaddingLeftPx」で
+    // ちょうど.cm-content左端(paddingの外側)に一致する。これより左には出さないことで、
+    // CSS側の余白設定に関わらずマーカーが本文エリアの外へはみ出さないことを保証する
+    // (実機バグ修正の保険。CSS側の余白拡張が主対策、これは二重の安全策)。
+    //
+    // 不具合修正(このクランプの実装中に発覚): 1行に複数マーカーが並ぶ稀なケース(例:
+    // "} else {"のようなコンボ行)で、外側のマーカーほどrawLeftがより大きく負になる。
+    // 各マーカーを個別にMath.maxでクランプすると、はみ出し量が異なる複数のマーカーが
+    // 揃って同じクランプ後の位置へ押し付けられ、マーカー同士が重なってしまう。そのため
+    // 個別クランプではなく、最も外側(=最もはみ出す)のマーカーを基準に必要なシフト量を
+    // 1つだけ求め、そのwidget内の全マーカーへ同じ量だけ加える(相対位置関係=互いの
+    // 間隔をそのまま保ったまま、まとめて右へずらす)。
+    const minRawLeft = Math.min(...rawLefts);
+    const shiftPx = minRawLeft < -this.contentPaddingLeftPx ? (-this.contentPaddingLeftPx - minRawLeft) : 0;
+    this.opens.forEach((o, i) => {
       const el = document.createElement("span");
       el.className = "cm-fold-marker2";
-      // 右端がちょうど行頭空白の終端(=コードの開始位置)に揃うよう、その列(leftCh文字ぶん、
-      // charWidthPxで実測px化)からマーカー幅ぶん左へ引く。複数個並ぶ場合はさらに左へずらす
-      // (stackIndexが大きいほど外側)。
-      const offsetPx = FOLD_MARKER_SIZE + o.stackIndex * (FOLD_MARKER_SIZE + FOLD_MARKER_GAP);
-      el.style.left = `${o.leftCh * this.charWidthPx - offsetPx}px`;
+      el.style.left = `${rawLefts[i] + shiftPx}px`;
       // 畳まれている(folded=true)→"+"、展開中(folded=false)→"−"。U+2212(MINUS SIGN)は
       // ハイフンマイナス(-)より線が太く、"+"と字面の太さが揃って見やすいためこちらを使う
       // (旧実装から引き継ぎ)。
@@ -2650,7 +2673,7 @@ class FoldOpenMarkerWidget extends WidgetType {
         toggleFoldRange(view, o.range);
       });
       anchor.appendChild(el);
-    }
+    });
     return anchor;
   }
   ignoreEvent() { return true; } // CodeMirror本体の既定処理(カーソル移動等)には委ねない
@@ -2810,6 +2833,12 @@ function buildFoldOpenMarkers(view) {
   const lineHeightPx = view.defaultLineHeight;
   const charWidthPx = view.defaultCharacterWidth; // 不具合修正(上記FoldOpenMarkerWidgetの
   // コメント参照): CSSの`ch`単位は使わず、実測した1文字ぶんのpx幅を直接使う。
+  // 実機不具合の修正(はみ出し対策の保険): .cm-contentの実際のpadding-leftをgetComputedStyleで
+  // 実測する。コードモードの固定値(20px)・Markdownモードの--editor-padding-left変数
+  // (既定32px、設定で変更可能)のどちらであっても、実際に効いている値をそのまま拾えるため、
+  // 「CSS側で余白を広げる」対策とは独立に、どんな余白設定でもマーカーが本文エリアの外へ
+  // 出ないことをここで保証できる(FoldOpenMarkerWidget.toDOM()のクランプ参照)。
+  const contentPaddingLeftPx = parseFloat(getComputedStyle(view.contentDOM).paddingLeft) || 0;
   // 改善③: 言語(構文木)が設定されているかどうかをループの外で一度だけ判定する
   // (state.facet(language)は現在アクティブなLanguageオブジェクト、無ければnull。
   // @codemirror/languageの公開APIで、docModeComp.reconfigure()に言語のsupportが
@@ -2841,7 +2870,7 @@ function buildFoldOpenMarkers(view) {
     const m = /^[ \t]+/.exec(docLine.text);
     const leadingLen = m ? m[0].length : 0; // 行頭の空白の文字数(=コードが始まる列)
     const specs = opens.map((o, i) => ({ range: o.range, folded: o.folded, leftCh: leadingLen, stackIndex: opens.length - 1 - i }));
-    marks.push(Decoration.widget({ widget: new FoldOpenMarkerWidget(specs, lineHeightPx, charWidthPx), side: -1 }).range(line.from));
+    marks.push(Decoration.widget({ widget: new FoldOpenMarkerWidget(specs, lineHeightPx, charWidthPx, contentPaddingLeftPx), side: -1 }).range(line.from));
   }
   return Decoration.set(marks, true);
 }

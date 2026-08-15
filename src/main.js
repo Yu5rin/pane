@@ -13,7 +13,7 @@ import { htmlToMarkdown } from "./html-to-markdown.js";
 import { parseFrontMatterOverrides } from "./md-to-html.js";
 import { resolveFileMode, codeLanguages } from "./languages.js";
 import { FILE_TYPES } from "./file-types.js";
-import { detectContentMode } from "./detect-mode.js";
+import { detectContentMode, detectCodeLanguage } from "./detect-mode.js";
 import { setReadingSpeedWpm } from "./text-stats.js";
 import { setOutlineMaxLevel } from "./markdown-extras.js";
 import { paneConfirm, paneAlert, paneInput } from "./dialog.js";
@@ -863,6 +863,41 @@ function scheduleAutoDetectIdle() {
   idleDetectTimer = setTimeout(() => { idleDetectTimer = null; runAutoDetect(); }, AUTO_DETECT_IDLE_MS);
 }
 
+// ---- コードモードで言語未設定のときの自動言語判定(実機報告の改善②) ----
+// 「表示メニュー→コードモード」で手動切替すると、setMode()がautoDetectState.lockedを立てて
+// 以後の内容からの自動判定(モードそのものの切り替え、上のrunAutoDetect)を止める。しかし
+// これは「Markdown/コード/プレーンというモード自体はもう変えない」という意味であり、
+// 「コードモードの中でどの言語として色付けするか」という、この関数が扱う話とは別物のため、
+// ここではautoDetectState.locked/autoDetectMode設定のどちらも見ずに独立して動く
+// (依頼: 手動切替でロックが立った直後でも、言語未設定ならその場で判定して設定する)。
+//
+// 「言語が決まったら、あるいはユーザーが言語ピッカーで明示的に選んだら、以後は再判定しない」
+// は、editor.getCodeLanguage()が非nullになった時点でこの関数自体の入り口(下のguard節)が
+// 素通りしなくなることで自然に実現される(専用のフラグを別途持つ必要が無い)。
+async function maybeAutoDetectCodeLanguage() {
+  if (editor.getMode() !== "code" || editor.getCodeLanguage()) return false; // コードモードかつ言語未設定の時だけ
+  const result = detectCodeLanguage(editor.getValue());
+  // 確信が持てない内容では言語を設定しない(誤判定による変な色付けを避ける。既存の
+  // AUTO_DETECT_CONFIDENCE_MIN=0.55をそのまま流用し、判定機構全体で確度の基準を揃える)。
+  if (!result.language || result.confidence < AUTO_DETECT_CONFIDENCE_MIN) return false;
+  await editor.setCodeLanguage(result.language);
+  return true;
+}
+// 言語未設定のコードモードで入力が続いている間、内容が変わるたびに再判定を続けるための
+// デバウンス。新規文書のように最初は判定できなくても、書き進めるうちに判定できるように
+// なるケースに対応する(依頼の確認項目)。runAutoDetectのidleDetectTimerとは別の独立した
+// タイマーにする(1.5秒間隔・呼び出しタイミングの考え方はAUTO_DETECT_IDLE_MSを共有しつつ、
+// on/offの条件・対象が完全に別物のため混ぜない)。
+let codeLanguageIdleTimer = null;
+function scheduleCodeLanguageIdle() {
+  if (editor.getMode() !== "code" || editor.getCodeLanguage()) return; // 対象外ならタイマーも張らない
+  if (codeLanguageIdleTimer) clearTimeout(codeLanguageIdleTimer);
+  codeLanguageIdleTimer = setTimeout(() => {
+    codeLanguageIdleTimer = null;
+    maybeAutoDetectCodeLanguage().then((changed) => { if (changed) updateStatusMode(); });
+  }, AUTO_DETECT_IDLE_MS);
+}
+
 // ---- 言語ピッカー(仕様書 第1章の拡張): #status-mode クリックでコードモードの言語を
 // 選び直す。既存のコマンドパレット/クイックオープンと同じ.palette-overlayの仕組みを流用する。
 let langPickerOverlay = null;
@@ -1019,6 +1054,9 @@ const editor = createEditor(host, {
     lastPasteLength = 0;
     if (pastedChars >= AUTO_DETECT_PASTE_MIN_CHARS) runAutoDetect();
     else scheduleAutoDetectIdle();
+    // 改善②: 言語未設定のコードモードである間、内容が変わるたびに言語の再判定を続ける
+    // (scheduleCodeLanguageIdle自身が対象外なら何もしないので、ここでは無条件に呼んでよい)。
+    scheduleCodeLanguageIdle();
   },
   // 文字数・行列表示(仕様書 N-03、W-01)。doc変化・カーソル移動のどちらでも軽い集計だけ
   // 行う(重い単語数・段落数集計はW-02のポップアップを開いた時にだけ行う。性能要件)。
@@ -1245,6 +1283,14 @@ const ctx = {
     },
     async setMode(mode) {
       await editor.setFileMode(currentPath ?? currentName, mode);
+      // 改善②(実機報告): 「表示メニュー→コードモード」でコードモードへ切り替えた直後、
+      // 言語がまだ未設定ならその時点の内容から言語を判定して設定する。setFileMode(mode)
+      // 自体は拡張子ベースの判定のみで言語までは決めないため、ここで改めて内容ベースの
+      // 判定を試す(直後にautoDetectState.lockedを立てるが、その対象はモード自体の自動判定
+      // であり、この言語判定とは別物なのでロックの影響を受けない。詳細は
+      // maybeAutoDetectCodeLanguageのコメント参照)。updateStatusMode()より前に済ませ、
+      // ステータスバーに反映した言語を1回で正しく出す。
+      if (mode === "code") await maybeAutoDetectCodeLanguage();
       updateStatusMode();
       // 手動でモードを選んだ文書には、以後内容からの自動判定(仕様書 第1章の拡張)を行わない。
       autoDetectState.locked = true;
