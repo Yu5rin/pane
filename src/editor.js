@@ -2581,7 +2581,6 @@ const foldKeymapSafe = [
 const FOLD_MARKER_SIZE = 15; // マーカー本体の一辺(px)。旧実装から変更なし。
 const FOLD_MARKER_GAP_LEFT = 5; // 本文エリアの左端→マーカー左端の隙間(px、依頼どおり)。
 const FOLD_MARKER_GAP_RIGHT = 5; // マーカー右端→コード開始位置の隙間(px、依頼どおり左右対称)。
-const FOLD_ELBOW_WIDTH = 7.5; // 依頼③: 折りたたみ範囲の最終行で引く、L字の横棒の長さ(px)。
 
 // 1行につき1つ(稀に複数)の折りたたみマーカーを、本文側(.cm-content)にwidget decorationで
 // 描画する。マーカーは行の先頭(line.from、行頭の空白より前)に挿入した幅0のアンカー要素の
@@ -3122,13 +3121,26 @@ const foldOpenMarkerTheme = EditorView.theme({
 //   (実測px)のみを使い、`ch`単位は一切使わない。これにより「同じ深さなら同じx座標」が
 //   構造的に保証される(計算式が1つしか存在しないため)。
 //
-// 【依頼③: 終点をL字にする】 折りたたみ範囲の最終行では、縦線を行の縦中央(文字の高さの
-// 中心)で止め、そこから右へFOLD_ELBOW_WIDTH(7.5px)の横棒を出す。"fold"モードは元々
-// 折りたたみ範囲だけを描くためすべての線がL字で終わる。"all"モードは折りたたみ範囲と
-// 無関係な深さの線(構文木上forwardableでない、単なるインデントの視覚化)も含むため、
-// そのうち実際に折りたたみ範囲の最終行に当たる箇所だけをL字にし、それ以外はまっすぐ
-// 終わらせる(collectActiveGuideSegments由来のセグメント情報と付き合わせて判定する。
-// buildAllIndentGuides参照)。
+// 【依頼(Windows実機フィードバック): 縦線を引く行の範囲をVS Codeと揃える。L字は廃止】
+// 旧実装は折りたたみ範囲の開始行(マーカーのある行)から終了行まで、全行に線を引いていた。
+// VS Codeは開始行には(その範囲自身の)線を引かず、線は開始行の次の行から始まる。
+// 終了行についても、閉じ括弧・閉じタグだけの行(例: "}"や"</div>")には引かない。
+// 見た目としては「その行自身のインデントがこの範囲の階層より深い行にだけ線を引く」
+// (=開始行・閉じ括弧行はどちらもこの範囲の階層と同じかそれより浅いインデントのため
+// 除外される)というルールと同値になる。
+//
+// 実装上の注意(実測して分かったこと): 「終了行(toLine)を機械的に-1する」だけでは
+// 正しくならない。foldNodePropが返すtoの位置は言語によって意味が違い、JS/HTML/CSS/JSON
+// のような括弧・タグ言語では閉じ括弧/閉じタグの行(開始行と同じ浅さ)を指すが、
+// Pythonのようなインデントベースの折りたたみではtoはブロック内の最後の実行行
+// (開始行より深いインデント)を指す。機械的に-1すると後者では本来引くべき最終行の線が
+// 消えてしまう。そのためtoLine側は行番号ではなく実インデント列で判定する
+// (isLineDeeperThanLevel、collectActiveGuideSegments参照)。開始行側は常にその範囲自身の
+// 線を引かない(行番号の一致だけで判定でき、言語による違いは無い)。
+//
+// L字(旧FOLD_ELBOW_WIDTH/.cm-guide-elbow/GuideLineWidgetのelbow引数)はユーザーの
+// 希望で廃止した。線を引く最後の行(toLineDeepがtrueの終了行、それ以外は1つ前の行まで)は
+// 普通にまっすぐ終わる。
 //
 // 【依頼⑤: マーカーホバーで対応する縦線を強調する】 GuideLineWidgetは、自分がどの
 // 折りたたみ範囲に属するか(属さない場合はnull)をdata-fold-from属性としてDOM要素に
@@ -3185,23 +3197,20 @@ function indentFoldAncestorsAt(state, lineNumber) {
 // だけ(マーカーの中心から下)を、false(それ以降の行・最終行)のときは行の全高を塗る
 // (依頼「マーカーの中心から下へ」を、開始行では文字どおり中心を起点にすることで表現する)。
 // 折りたたみ範囲・インデントレベルを表す縦線1本ぶんのwidget("all"/"fold"共通、依頼②)。
-// elbow=true(その区間の最終行)のときは、行の縦中央(=文字の高さの中心)で線を止め、
-// そこから右へFOLD_ELBOW_WIDTH pxの横棒を出して「L」の形にする(依頼③)。false(それ以外の
-// 行)のときは行の全高をまっすぐ塗る。
+// 行の全高をまっすぐ塗るだけ(旧elbow引数は廃止。L字はユーザーの希望で取りやめになった)。
 // rangeFrom: この線が属する折りたたみ範囲の一意な鍵(範囲のfrom位置。isRangeFolded/
 //   toggleFoldRangeと同じ「範囲の一意な鍵」)。"all"モードで、どの折りたたみ範囲にも
 //   対応しない汎用のインデント目盛り線はnull(依頼⑤のホバー強調の対象外になる)。
 class GuideLineWidget extends WidgetType {
-  constructor(leftPx, lineHeightPx, elbow, rangeFrom) {
+  constructor(leftPx, lineHeightPx, rangeFrom) {
     super();
     this.leftPx = leftPx;
     this.lineHeightPx = lineHeightPx;
-    this.elbow = elbow;
     this.rangeFrom = rangeFrom;
   }
   eq(o) {
     return o.leftPx === this.leftPx && o.lineHeightPx === this.lineHeightPx &&
-      o.elbow === this.elbow && o.rangeFrom === this.rangeFrom;
+      o.rangeFrom === this.rangeFrom;
   }
   toDOM() {
     // FoldOpenMarkerWidgetのアンカーと同じ理由: .cm-lineは既定でposition:staticのため、
@@ -3212,25 +3221,12 @@ class GuideLineWidget extends WidgetType {
     const line = document.createElement("span");
     line.className = "cm-guide-line";
     line.style.left = `${this.leftPx}px`;
+    line.style.top = "0";
+    line.style.height = `${this.lineHeightPx}px`;
     // 依頼⑤: マーカーホバー時の強調対象を特定するための鍵。値がある場合だけ属性を持たせる
     // (querySelectorAll('[data-fold-from="X"]')で拾う側はFoldOpenMarkerWidget参照)。
     if (this.rangeFrom != null) line.dataset.foldFrom = String(this.rangeFrom);
-    if (this.elbow) {
-      line.style.top = "0";
-      line.style.height = `${this.lineHeightPx / 2}px`;
-      const elbowEl = document.createElement("span");
-      elbowEl.className = "cm-guide-elbow";
-      elbowEl.style.left = `${this.leftPx}px`;
-      elbowEl.style.top = `${this.lineHeightPx / 2}px`;
-      elbowEl.style.width = `${FOLD_ELBOW_WIDTH}px`;
-      if (this.rangeFrom != null) elbowEl.dataset.foldFrom = String(this.rangeFrom);
-      anchor.appendChild(line);
-      anchor.appendChild(elbowEl);
-    } else {
-      line.style.top = "0";
-      line.style.height = `${this.lineHeightPx}px`;
-      anchor.appendChild(line);
-    }
+    anchor.appendChild(line);
     return anchor;
   }
   ignoreEvent() { return true; }
@@ -3244,26 +3240,29 @@ const guideLineTheme = EditorView.theme({
     pointerEvents: "none",
     zIndex: "1", // 本文より背面、マーカー(z-index:2)より背面(マーカーが線の手前に乗って見える)
   },
-  ".cm-guide-elbow": {
-    position: "absolute",
-    height: "1px",
-    backgroundColor: "var(--rule)",
-    pointerEvents: "none",
-    zIndex: "1",
-  },
-  // 依頼⑤: マーカーホバー中、対応する範囲の縦線・L字だけを強調する。新設した
-  // --fold-guide-hover(既定var(--accent)、src/style.css参照)を使う。マーカー自体の
+  // 依頼⑤: マーカーホバー中、対応する範囲の縦線だけを強調する。新設した
+  // --fold-guide-hover(9テーマごとに個別実測、src/themes.css参照)を使う。マーカー自体の
   // 既存のhover配色(var(--ink-sub)→var(--accent))と揃えることで、「マーカーと同じ色に
   // 変わった線がその範囲」と直感的に対応づけられるようにした。
-  ".cm-guide-line.cm-guide-hot, .cm-guide-elbow.cm-guide-hot": {
+  ".cm-guide-line.cm-guide-hot": {
     backgroundColor: "var(--fold-guide-hover)",
   },
 });
 
+// lineNumber行の実インデント列(lineIndentColumnと同じ測り方)が、leftCol(その折りたたみ
+// 範囲自身の階層の列)より深いかどうかを返す。終了行(toLine)に、その範囲自身の縦線を
+// 引くべきかどうかの判定に使う(collectActiveGuideSegments参照。詳しい経緯は
+// buildFoldGuideLines手前の大きなコメント「縦線を引く行の範囲をVS Codeと揃える」参照)。
+function isLineDeeperThanLevel(state, doc, lineNumber, leftCol) {
+  const text = doc.line(lineNumber).text;
+  return lineIndentColumn(state, text) > leftCol;
+}
+
 // 表示範囲に懸かる、実際に折りたたみ可能な範囲(構文木 or インデントベース)の一覧を、
-// 縦線の描画に必要な位置情報付きで集める。"fold"モードの縦線・"all"モードのL字判定・
-// マーカーホバー強調(依頼⑤)のいずれもこの一覧を基準にする(依頼②: 二つの仕組みの一本化)。
-// 戻り値: [{ fromLine, toLine, leftCol(実測列数), rangeFrom(範囲の一意な鍵) }]
+// 縦線の描画に必要な位置情報付きで集める。"fold"モードの縦線・マーカーホバー強調(依頼⑤)の
+// いずれもこの一覧を基準にする(依頼②: 二つの仕組みの一本化)。
+// 戻り値: [{ fromLine, toLine, leftCol(実測列数), rangeFrom(範囲の一意な鍵),
+//   toLineDeep(終了行に自分の範囲の線を引いてよいか。isLineDeeperThanLevel参照) }]
 // (foldedな範囲・重複は除外済み)
 function collectActiveGuideSegments(view) {
   const { state } = view;
@@ -3277,11 +3276,14 @@ function collectActiveGuideSegments(view) {
   function pushRangesOfLine(docLine) {
     const specs = lineFoldOpenSpecs(state, docLine, hasLanguage);
     for (const o of specs) {
-      if (o.folded) continue; // 畳まれている範囲には線を引かない(依頼③「畳んだ状態では線とL字が消える」)
+      if (o.folded) continue; // 畳まれている範囲には線を引かない(畳んだ状態では線が消える)
       if (seenFrom.has(o.range.from)) continue;
       seenFrom.add(o.range.from);
       const toLineNo = doc.lineAt(o.range.to).number;
-      active.push({ fromLine: docLine.number, toLine: toLineNo, leftCol: o.leftCol, rangeFrom: o.range.from });
+      active.push({
+        fromLine: docLine.number, toLine: toLineNo, leftCol: o.leftCol, rangeFrom: o.range.from,
+        toLineDeep: isLineDeeperThanLevel(state, doc, toLineNo, o.leftCol),
+      });
     }
   }
   // (1) 表示範囲内で新たに開く範囲(=マーカーが実際に見えている行)
@@ -3300,7 +3302,10 @@ function collectActiveGuideSegments(view) {
     const specs = lineFoldOpenSpecs(state, originLine, hasLanguage);
     const idx = specs.findIndex((o) => o.range.from === anc.from);
     if (idx < 0) continue;
-    active.push({ fromLine: anc.fromLine, toLine: anc.toLine, leftCol: specs[idx].leftCol, rangeFrom: anc.from });
+    active.push({
+      fromLine: anc.fromLine, toLine: anc.toLine, leftCol: specs[idx].leftCol, rangeFrom: anc.from,
+      toLineDeep: isLineDeeperThanLevel(state, doc, anc.toLine, specs[idx].leftCol),
+    });
   }
   return active;
 }
@@ -3318,9 +3323,13 @@ function buildFoldGuideLines(view) {
     const docLine = doc.lineAt(block.from);
     const n = docLine.number;
     for (const seg of segments) {
-      if (n < seg.fromLine || n > seg.toLine) continue;
+      // 開始行(seg.fromLine)には自分の範囲の線を引かない(VS Codeと同じ、依頼の訂正版)。
+      if (n <= seg.fromLine || n > seg.toLine) continue;
+      // 終了行(seg.toLine)は、実インデントがこの範囲の階層より深い場合(=閉じ括弧/閉じタグ
+      // ではなく実内容行そのもの。Pythonのインデント折りたたみ等)だけ引く。
+      if (n === seg.toLine && !seg.toLineDeep) continue;
       marks.push(Decoration.widget({
-        widget: new GuideLineWidget(seg.leftCol * charWidthPx, lineHeightPx, n === seg.toLine, seg.rangeFrom),
+        widget: new GuideLineWidget(seg.leftCol * charWidthPx, lineHeightPx, seg.rangeFrom),
         side: -1,
       }).range(block.from));
     }
@@ -3350,21 +3359,11 @@ const foldGuideLinePlugin = ViewPlugin.fromClass(class {
 //
 // 【設計(重要): 構造的な範囲は"fold"モードと全く同じ規則で先に描き切ってから、残りを
 // 汎用の行インデント幅で埋める】
-// 実装中に発覚した不具合: 当初は「行ごとに自分自身のインデント幅からlevelCount本を描き、
-// その中に折りたたみ範囲の終端があればL字にする」という single-pass の実装にしていたが、
-// 閉じ括弧の行(例:"    }")は自分自身のインデント幅が開始行と同じ(=浅い)のが普通の書式
-// のため、L字を出すべき列(その範囲の開始行の実インデント=1段深い位置)そのものが
-// 「自分自身のインデント幅」の範囲外になり、levelCountに含まれず描画されない
-// (=L字が消える)という不具合があった。"fold"モードはこの問題が起きない
-// (buildFoldGuideLinesは行自身のインデント幅を一切見ず、範囲が及ぶ行かどうかだけで
-// 判定するため)。
-// 対策: "all"モードでも、折りたたみ範囲(collectActiveGuideSegments)ぶんは"fold"モードと
-// 全く同じロジック(範囲が及ぶ全行に、範囲の実インデント位置で描く。終端はL字)で先に描く。
-// その後、まだどの範囲にも属さない列だけを、行自身のインデント幅から汎用に埋める
+// "all"モードでも、折りたたみ範囲(collectActiveGuideSegments)ぶんは"fold"モードと全く
+// 同じロジック(開始行には自分の範囲の線を引かず、終了行はisLineDeeperThanLevelで判定)で
+// 先に描く。その後、まだどの範囲にも属さない列だけを、行自身のインデント幅から汎用に埋める
 // (=allモードの「折りたたみ構造に関係なく全深さを見せる」という役割はここで果たす)。
-// これにより、"all"モードの構造的な部分は"fold"モードの出力を完全に包含する形になり、
-// 依頼③「'all'モードでも、折りたたみ範囲に対応する階層の線はL字で終わる」が
-// 構造的に保証される。
+// これにより、"all"モードの構造的な部分は"fold"モードの出力を完全に包含する形になる。
 function buildAllIndentGuides(view) {
   const { state } = view;
   const doc = state.doc;
@@ -3382,11 +3381,14 @@ function buildAllIndentGuides(view) {
     const docLine = doc.lineAt(block.from);
     const n = docLine.number;
     for (const seg of segments) {
-      if (n < seg.fromLine || n > seg.toLine) continue;
+      // 開始行には自分の範囲の線を引かない(buildFoldGuideLinesと同じ判定、VS Codeと同じ)。
+      if (n <= seg.fromLine || n > seg.toLine) continue;
+      // 終了行は、実インデントがこの範囲の階層より深い場合だけ引く(isLineDeeperThanLevel参照)。
+      if (n === seg.toLine && !seg.toLineDeep) continue;
       if (!coveredByLine.has(n)) coveredByLine.set(n, new Set());
       coveredByLine.get(n).add(seg.leftCol);
       marks.push(Decoration.widget({
-        widget: new GuideLineWidget(seg.leftCol * charWidthPx, lineHeightPx, n === seg.toLine, seg.rangeFrom),
+        widget: new GuideLineWidget(seg.leftCol * charWidthPx, lineHeightPx, seg.rangeFrom),
         side: -1,
       }).range(block.from));
     }
@@ -3434,10 +3436,9 @@ function buildAllIndentGuides(view) {
       for (let j = 0; j < levelCount; j++) {
         const levelCol = j * indentSize;
         if (covered && covered.has(levelCol)) continue; // (a)で既に描画済み(構造的な範囲)
-        // 汎用の目盛り線: 折りたたみ範囲に対応しないため、まっすぐ終わってよい(依頼③の
-        // 指定どおり)。elbow=false・rangeFrom=null(依頼⑤のホバー強調の対象外)。
+        // 汎用の目盛り線: 折りたたみ範囲に対応しないため rangeFrom=null(依頼⑤のホバー強調の対象外)。
         marks.push(Decoration.widget({
-          widget: new GuideLineWidget(levelCol * charWidthPx, lineHeightPx, false, null),
+          widget: new GuideLineWidget(levelCol * charWidthPx, lineHeightPx, null),
           side: -1,
         }).range(line.from));
       }
