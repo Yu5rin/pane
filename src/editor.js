@@ -6,7 +6,7 @@ import { EditorState, Compartment, StateEffect, StateField, Prec, Transaction, c
 import { markdown } from "@codemirror/lang-markdown";
 import { Strikethrough, Table, Superscript, Subscript, Emoji, Autolink } from "@lezer/markdown";
 import { defaultKeymap, history, historyKeymap, indentWithTab, insertNewline, undo, redo, moveLineUp, moveLineDown, copyLineDown, deleteLine, indentLess, indentSelection, selectAll } from "@codemirror/commands";
-import { syntaxTree, syntaxHighlighting, HighlightStyle, LanguageDescription, bracketMatching, indentUnit, foldCode, unfoldCode, foldAll, unfoldAll, codeFolding, foldNodeProp, foldedRanges, foldEffect, unfoldEffect, language, foldService } from "@codemirror/language";
+import { syntaxTree, syntaxHighlighting, HighlightStyle, LanguageDescription, bracketMatching, indentUnit, foldCode, unfoldCode, foldAll, unfoldAll, foldable, codeFolding, foldNodeProp, foldedRanges, foldEffect, unfoldEffect, language, foldService } from "@codemirror/language";
 import { autocompletion, closeBrackets, closeBracketsKeymap, startCompletion } from "@codemirror/autocomplete";
 import { search, setSearchQuery, getSearchQuery, SearchQuery, findNext, findPrevious, replaceNext, replaceAll } from "@codemirror/search";
 import { tags as t } from "@lezer/highlight";
@@ -2532,63 +2532,56 @@ const foldKeymapSafe = [
   { key: "Ctrl-Alt-]", run: unfoldAll },
 ];
 
-// 折りたたみマーカー・縦線(依頼: 「マーカーと縦線をコードのすぐ左(インデント位置)へ」)。
+// 折りたたみマーカー・縦線(依頼: 「マーカーの位置を本文エリアの左端に固定する」)。
 //
-// 【経緯】 当初はGraftを模して、行番号ガターの右に専用の折りたたみガター(.cm-foldGutter)を
-// 設け、@codemirror/viewの低レベルAPI(gutter()・GutterMarker)で階層ごとに固定幅
-// (7px)でマーカー・縦線・角(└)を積み上げて描画していた。しかしユーザーへ図を見せたところ
-// (承認済みの図は.tmp配下のproposal.png/proposal.html参照)、次の2点が問題と判明した。
-//   - マーカーが行番号の右の狭い領域に、階層ごとに7pxずつという実際のコードのインデント幅
-//     とは無関係な間隔で並んでいた(コードの見た目上のインデントと、マーカーの横位置が
-//     揃わない)。
-//   - 同じ階層に対して、ガター内の太い縦線(旧cm-fold-vline)と、本文側の細いインデント
-//     ガイド(下記indentGuideMarks/indentGuideTheme)の、位置がズレた2本の線が同時に
-//     出ていた。
-// → 承認された修正案のとおり、マーカー・縦線を「本文(.cm-content)側、その行の実際の
-//   インデント位置(=行頭の空白の終端、コードが始まる直前)」へ作り直した。
+// 【経緯、3世代目】
+//   1世代目: 行番号ガターの右に専用の折りたたみガター(gutter()/GutterMarker)で階層ごとに
+//     固定幅(7px)で積み上げる方式。コードの実際のインデント幅と無関係な間隔になり、
+//     ガター内の縦線と本文側インデントガイドの二重線も発生し不採用。
+//   2世代目(直前の実装): マーカーを本文(.cm-content)側のwidget decorationに移し、
+//     「その行の行頭空白の列数(countColumnで実測)」ぶん右へ寄せて配置していた
+//     (=コードのインデントに追従してマーカーの横位置が動く)。これにより、
+//     タブ幅変更時の追従漏れ・インデント幅ごとの端数ズレ・インデントガイドとの
+//     位置計算の食い違いなど、この数日で4件の不具合を生んだ(横位置が可変であること
+//     自体が原因)。
+//   → ユーザーと相談のうえ、VS Codeと同じく「マーカーの位置を固定する」方針に転換した
+//     (本コメント以降が3世代目、今回の実装)。マーカーは常に「本文エリアの左端から
+//     FOLD_MARKER_GAP_LEFT px」の固定位置に置く。インデントの深さが変わっても、
+//     タブ/スペースの混在があっても、コード側のインデント幅設定(2/4/8)を変えても、
+//     マーカーのx座標は一切動かない。これにより「横位置の計算がズレる」という不具合の
+//     クラス自体が構造的に起こらなくなる。
 //
-// 【マーカーを本文側へ(依頼1)】
-// CodeMirrorのガター機構(gutter()/GutterMarker)は行の左端の専用トラックにしか描けない
-// ため、「コードの直前」という本文内の任意の列に置くにはガターでは実現できない。
-// widget decoration(Decoration.widget、FoldOpenMarkerWidget)として本文側に実装し直した。
-// 位置は「その行を含む、複数行にまたがる折りたたみ可能範囲(foldNodeProp)の、祖先方向への
-// 入れ子段数」ではなく、その行自身の行頭空白の文字数(=実際にコードが始まる列)を直接使う。
-// 整形されたコードでは「祖先の入れ子段数」と「行頭の空白幅」は一致するはずだが、後者を
-// 直接使うほうが「コードのすぐ左」という依頼の要求(あくまで見た目上の位置)によりまっすぐ
-// 対応し、タブ/スペース混在などで両者がズレた場合でも見た目のインデントに追従する。
+// 【間隔(依頼どおり左右対称に)】
+// 実測した現状の値をもとに、本文エリア左端→マーカー左端の隙間(5px)と同じ幅を、
+// マーカー右端→コード開始位置の隙間にも与える(以前は0pxで近すぎるとの指摘)。
+//   FOLD_MARKER_GAP_LEFT(5px) + FOLD_MARKER_SIZE(15px) + FOLD_MARKER_GAP_RIGHT(5px)
+//     = 25px … これがコードモードの本文(.cm-content)のpadding-left(src/style.css)。
+// マーカー自身は本文エリアの左端から常にFOLD_MARKER_GAP_LEFT px固定のため、
+// 「マーカーの右端からコード開始位置までの隙間」は自動的に
+// padding-left - FOLD_MARKER_GAP_LEFT - FOLD_MARKER_SIZE = FOLD_MARKER_GAP_RIGHT に
+// 一致する(CSS側のpadding値と、この定数群を常に連動させて変更すること)。
 //
-// 【折りたたみ範囲の縦線を1本にする(依頼2)】
-// 縦線は新設せず、既存のインデントガイド(indentGuideMarks/indentGuideTheme、後述)を
-// そのまま流用する。インデントガイドは「行頭の空白の文字数ぶん、codeIndentSizeごとに
-// 縦線を引く」実装のため、整形されたコードであれば構文木上のfold祖先の深さと常に同じ列に
-// 一致する。「同じ位置に別の線を重ねる」のではなく、そもそも折りたたみ専用の線を
-// 描かないことで、太い線・二重線の問題を根本から無くした(=線は最初から1本しか存在
-// しない)。終端の「└」も専用の角要素は作らず、閉じ行(`}`など)自身のインデントが浅く
-// なることでその列の縦線が自然に途切れる、という既存のインデントガイドの挙動がそのまま
-// 角の役割を兼ねる。
+// 【1行1マーカー(依頼、VS Codeと同じ)】
+// マーカーの横位置がインデントに追従しなくなったため、以前のように「同じ行に複数開く
+// 範囲をstackIndexで横に並べる」という設計は成立しない(全部同じ場所に重なってしまう)。
+// VS Codeと同様、その行で新たに開く折りたたみ範囲が複数あっても(例: 1行に複数の
+// ブロックが同時に開く稀なケース)、マーカーは最も外側の範囲について1つだけ出す
+// (lineFoldMarkerSpec参照。クリックでその最も外側の範囲を開閉する)。
 //
-// 【濃淡による強調(判断ポイント)】
-// 依頼にあった「折りたたみ範囲にあたる部分だけ線をわずかに濃くする」対策案は、実際に
-// 試作・スクリーンショットで見比べたうえで不採用にした。理由:
-//   - 承認済みの図(修正案側、proposal.html/.v2/.png)自体が、インデントガイドをどの深さ・
-//     どの範囲でも同一色(#b6bcc2)で描いており、範囲ごとに濃淡を変える表現は含まれて
-//     いない。
-//   - 整形されたコードでは、ある列の縦線が実際に伸びている区間は、ほぼそのままその列を
-//     開いた折りたたみ範囲の区間と一致する(同じ深さの兄弟ブロックが列を共有したまま
-//     連続することは稀)。マーカーの位置(範囲の開始点)と線が続く長さだけで「どこから
-//     どこまでがその範囲か」は十分読み取れる。これはVSCode・Graftを含む一般的な
-//     インデントガイドの読み方でもあり、範囲ごとに色を変える実装はむしろ珍しい。
-//   - 実装するには、indentGuideMarksが使っている単一の反復グラデーション(全深さ共通の
-//     背景画像)を行ごとの多色グラデーションへ分解する必要があり、行境界14箇所以上で
-//     色距離0.00(完全連続)を実測済みの現状の実装に手を入れる分だけ、継続性を壊す
-//     リスクが増える。得られる視認性向上は上記の理由でごく小さいと判断し、リスクに
-//     見合わないと結論づけた。
+// 【折りたたみ範囲の縦線(依頼②、インデントガイドと統合)】
+// 縦線はマーカーとは完全に切り離した別の仕組み(GuideLineWidget、後述)で描く。
+// マーカーが固定位置になったことで、旧実装(2世代目)にあった「マーカーの中心を通る
+// ように縦線を引く」という前提が崩れたため、縦線は実際のコードの列位置(leftCol、
+// countColumnで実測)を直接使って引き直す。マーカー側はcountColumnによる列計算が
+// 不要になったため削除したが、縦線側は列計算が今も必要(後述のlineFoldOpenSpecs参照)。
+//
 // マーカー自体の見た目(塗り+枠+記号)は前回(依頼3)の実測済みの配色をそのまま引き継ぐ
 // (var(--ink-sub)の地にvar(--paper)の記号。9テーマでコントラスト比3.0以上を確認済み。
 // 検証は.verify-codefold.mjs (T)節参照)。
-const FOLD_MARKER_SIZE = 15; // マーカー本体の一辺(px)。旧実装(ガター)と同じ大きさを維持。
-const FOLD_MARKER_GAP = 2; // 1行に複数のマーカーが並ぶ稀なケース(例: 1行に複数ブロックが
-                            // 同時に開くワンライナー)での、マーカー同士の隙間(px)。
+const FOLD_MARKER_SIZE = 15; // マーカー本体の一辺(px)。旧実装から変更なし。
+const FOLD_MARKER_GAP_LEFT = 5; // 本文エリアの左端→マーカー左端の隙間(px、依頼どおり)。
+const FOLD_MARKER_GAP_RIGHT = 5; // マーカー右端→コード開始位置の隙間(px、依頼どおり左右対称)。
+const FOLD_ELBOW_WIDTH = 7.5; // 依頼③: 折りたたみ範囲の最終行で引く、L字の横棒の長さ(px)。
 
 // 1行につき1つ(稀に複数)の折りたたみマーカーを、本文側(.cm-content)にwidget decorationで
 // 描画する。マーカーは行の先頭(line.from、行頭の空白より前)に挿入した幅0のアンカー要素の
@@ -2597,111 +2590,75 @@ const FOLD_MARKER_GAP = 2; // 1行に複数のマーカーが並ぶ稀なケー�
 // 重ならないこと」への対応。行頭の空白の上に重ねる形)。
 //
 // 不具合修正(実装中に発覚): 当初は横位置をCSSの`ch`単位(calc(leftCh ch - ...px))で
-// 計算していたが、実測したところ深いネストほどマーカーの右端とコード開始位置の間に隙間が
-// 広がってしまっていた(depth1で3.6px、depth3で10.8px)。原因はCSSの`ch`単位が「フォントの
-// '0'グリフの幅」で定義されており、このコード用フォントでは半角スペース文字自身の実際の
-// 表示幅と完全には一致しない(スペース1文字あたり約1.8pxのズレ)ため。文字数が増えるほど
-// 誤差が積み重なっていた。対策として、CodeMirror自身が内部で使っている実測値
-// view.defaultCharacterWidth(px。indentGuideMarksのview.defaultLineHeightと同じ「JSで
-// 実測したpx値をインラインstyleに焼き込む」作法)に置き換え、`ch`単位を一切使わないように
-// した。これによりどの深さでもマーカー右端とコード開始位置の隙間が実測0px近辺になる
-// (.verify-codefold.mjs (Q)節参照)。
-//
-// マーカーの最終的な左端px(はみ出しクランプ込み)を計算する共通関数。FoldOpenMarkerWidget.
-// toDOM()と、依頼③「fold」モードの折りたたみ縦線(foldGuideLinePlugin)の両方から呼ぶ。
-// 縦線はマーカーの中心(=この関数が返す左端 + FOLD_MARKER_SIZE/2)を通るように引く(依頼②)ため、
-// マーカーと縦線が同じ関数から位置を得ることで、実装を分けたことによる再度のズレ(依頼②の
-// 指摘「別々の計算だとまたズレる」)を構造的に防ぐ。
-// opens: [{ leftCol, stackIndex, ... }]。charWidthPx: view.defaultCharacterWidth。
-// contentPaddingLeftPx: .cm-contentの実際のpadding-left(px、はみ出しクランプの下限)。
-function computeMarkerLeftsPx(opens, charWidthPx, contentPaddingLeftPx) {
-  // 右端がちょうど行頭空白の終端(=コードの開始位置)に揃うよう、その列(leftCol列ぶん、
-  // charWidthPxで実測px化)からマーカー幅ぶん左へ引く。複数個並ぶ場合はさらに左へずらす
-  // (stackIndexが大きいほど外側)。
-  const rawLefts = opens.map((o) =>
-    o.leftCol * charWidthPx - (FOLD_MARKER_SIZE + o.stackIndex * (FOLD_MARKER_SIZE + FOLD_MARKER_GAP)));
-  // このwidget(アンカー)はline.from、すなわち行頭空白より前(=.cm-contentのpadding-left
-  // の内側の起点)に置かれているため、アンカー基準のleft座標は「-contentPaddingLeftPx」で
-  // ちょうど.cm-content左端(paddingの外側)に一致する。これより左には出さないことで、
-  // CSS側の余白設定に関わらずマーカーが本文エリアの外へはみ出さないことを保証する
-  // (実機バグ修正の保険。CSS側の余白拡張が主対策、これは二重の安全策)。
-  //
-  // 不具合修正(このクランプの実装中に発覚): 1行に複数マーカーが並ぶ稀なケース(例:
-  // "} else {"のようなコンボ行)で、外側のマーカーほどrawLeftがより大きく負になる。
-  // 各マーカーを個別にMath.maxでクランプすると、はみ出し量が異なる複数のマーカーが
-  // 揃って同じクランプ後の位置へ押し付けられ、マーカー同士が重なってしまう。そのため
-  // 個別クランプではなく、最も外側(=最もはみ出す)のマーカーを基準に必要なシフト量を
-  // 1つだけ求め、そのwidget内の全マーカーへ同じ量だけ加える(相対位置関係=互いの
-  // 間隔をそのまま保ったまま、まとめて右へずらす)。
-  const minRawLeft = Math.min(...rawLefts);
-  const shiftPx = minRawLeft < -contentPaddingLeftPx ? (-contentPaddingLeftPx - minRawLeft) : 0;
-  return rawLefts.map((l) => l + shiftPx);
+// マーカーの左端px(view単位で常に同じ1値)を求める。マーカーはwidgetのアンカーとして
+// line.from(=行頭空白より前、.cm-contentのpadding-left内側の起点)に挿入されるため、
+// アンカー基準のleft座標「-contentPaddingLeftPx」がちょうど.cm-content左端(paddingの
+// 外側=本文エリアの左端)に一致する。そこからさらに右へFOLD_MARKER_GAP_LEFT pxずらせば
+// 依頼どおりの位置になる。インデント列(leftCol)を一切使わないため、この値はview内の
+// 全マーカーで共通の1つだけで足りる(旧実装のようにマーカーごとに計算し直す必要が無い)。
+// contentPaddingLeftPx: .cm-contentの実際のpadding-left(px、getComputedStyleで実測)。
+function computeFixedMarkerLeftPx(contentPaddingLeftPx) {
+  return -contentPaddingLeftPx + FOLD_MARKER_GAP_LEFT;
 }
-//
-// 不具合修正2回目(実機バグ①、Windows実機での報告「Tabでインデントするとマーカーが
-// コードからどんどん離れていく」): 上のleftCol(旧名leftCh)は「行頭空白の文字数」を
-// そのまま列数として使っていた。半角スペースは1文字=1列で一致するため上の修正だけで
-// 揃っていたが、タブ文字は1文字なのに表示上はタブ幅(既定4、codeIndentSize)ぶん進むため、
-// タブでインデントした行では「文字数」が実際の表示列数より小さくなり、マーカーが
-// 実際のコード開始位置よりどんどん左(タブが増えるほど大きく)にずれていた。
-// 対策: 行頭空白の「文字数」ではなく「表示上の列数」を使う。@codemirror/stateの
-// countColumn(text, tabSize, to)は、タブを次のタブ停止位置まで切り上げて数える公開APIで、
-// CodeMirror自身が内部のインデント計算に使っているのと同じロジック。tabSizeは
-// state.tabSize(EditorState.tabSizeファセット。setCodeIndentSizeが設定するのと全く同じ値)
-// を使うため、インデント幅の設定と常に一致する(buildFoldOpenMarkers参照)。
 class FoldOpenMarkerWidget extends WidgetType {
-  // opens: [{ range, folded, leftCol, stackIndex }]
-  //   leftCol: 行頭空白の表示上の列数(タブはタブ幅ぶんとして数える。マーカーの右端を
-  //     揃える基準列。countColumnで算出、上の不具合修正2回目のコメント参照)。
-  //   stackIndex: 同じ行に複数開く稀なケースでの重なり回避用のずらし段(0が一番右
-  //     =leftColに一番近い。深いネストほど右に来るのが自然なため0=最内側)。
-  // lineHeightPx: view.defaultLineHeight。既存のIndentGuideBlankWidgetと同じ、実測px値を
-  //   焼き込む方式(height:100%は祖先の高さ不定で解決できないため)。
-  // charWidthPx: view.defaultCharacterWidth。上記の不具合修正で追加した、1文字(1列)ぶんの実測px幅。
-  // contentPaddingLeftPx: 実機不具合の修正(はみ出し対策の保険)。.cm-content の実際の
-  //   padding-left(px)。マーカーはleftCol=0(インデント無し行)のとき最大
-  //   FOLD_MARKER_SIZE(15px)左へはみ出す構造のため、CSS側の余白(コードモード20px/
-  //   Markdownモードは--editor-padding-left、既定32px・設定で変更可能)を広げるだけでなく、
-  //   実際に効いている値がマーカー幅未満でも(設定で極端に狭くされても)本文エリアの外へは
-  //   絶対に出ないよう、下のtoDOM()でこの値を使ってクランプする。
-  constructor(opens, lineHeightPx, charWidthPx, contentPaddingLeftPx) {
+  // range: 開閉対象の折りたたみ範囲。folded: 現在畳まれているか。
+  // leftPx: computeFixedMarkerLeftPxで求めた固定の左端px(依頼①、インデントに依存しない)。
+  // lineHeightPx: view.defaultLineHeight(実測px値。height:100%は祖先の高さ不定で
+  //   解決できないため、JSで実測した値をそのままインラインstyleに焼き込む)。
+  constructor(range, folded, leftPx, lineHeightPx) {
     super();
-    this.opens = opens;
+    this.range = range;
+    this.folded = folded;
+    this.leftPx = leftPx;
     this.lineHeightPx = lineHeightPx;
-    this.charWidthPx = charWidthPx;
-    this.contentPaddingLeftPx = contentPaddingLeftPx;
-    this.key = opens.map((o) => `${o.leftCol}:${o.stackIndex}:${o.range.from}-${o.range.to}-${o.folded}`).join("|") + `@${lineHeightPx}:${charWidthPx}:${contentPaddingLeftPx}`;
+    this.key = `${range.from}-${range.to}-${folded}@${leftPx}:${lineHeightPx}`;
   }
   eq(other) { return this.key === other.key; }
   toDOM(view) {
     const anchor = document.createElement("span");
     anchor.className = "cm-fold-open-anchor";
     anchor.style.height = `${this.lineHeightPx}px`;
-    // マーカーの最終的な左端px(はみ出しクランプ込み)は、インデントガイド(「fold」モード)の
-    // 縦線の中心位置と完全に同じ計算(computeMarkerLeftsPx)から求める。別々の計算式だと
-    // 端数処理の違いなどでまたズレる、という実機不具合②の教訓を踏まえた設計。
-    const lefts = computeMarkerLeftsPx(this.opens, this.charWidthPx, this.contentPaddingLeftPx);
-    this.opens.forEach((o, i) => {
-      const el = document.createElement("span");
-      el.className = "cm-fold-marker2";
-      el.style.left = `${lefts[i]}px`;
-      // 畳まれている(folded=true)→"+"、展開中(folded=false)→"−"。U+2212(MINUS SIGN)は
-      // ハイフンマイナス(-)より線が太く、"+"と字面の太さが揃って見やすいためこちらを使う
-      // (旧実装から引き継ぎ)。
-      el.textContent = o.folded ? "+" : "−";
-      el.title = view.state.phrase(o.folded ? "Unfold line" : "Fold line");
-      // CodeMirror本体がこのクリックをカーソル移動として解釈しないよう、mousedown/click
-      // 双方でpreventDefault+stopPropagationする(widget自体もignoreEvent()でtrueを返し
-      // CodeMirrorの既定処理からは除外しているが、DOM上の親==.cm-line経由で他のリスナーへ
-      // 伝播しないための保険を重ねる)。
-      el.addEventListener("mousedown", (event) => { event.preventDefault(); event.stopPropagation(); });
-      el.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        toggleFoldRange(view, o.range);
-      });
-      anchor.appendChild(el);
+    const el = document.createElement("span");
+    el.className = "cm-fold-marker2";
+    el.style.left = `${this.leftPx}px`;
+    // 畳まれている(folded=true)→"+"、展開中(folded=false)→"−"。U+2212(MINUS SIGN)は
+    // ハイフンマイナス(-)より線が太く、"+"と字面の太さが揃って見やすいためこちらを使う
+    // (旧実装から引き継ぎ)。
+    el.textContent = this.folded ? "+" : "−";
+    el.title = view.state.phrase(this.folded ? "Unfold line" : "Fold line");
+    // CodeMirror本体がこのクリックをカーソル移動として解釈しないよう、mousedown/click
+    // 双方でpreventDefault+stopPropagationする(widget自体もignoreEvent()でtrueを返し
+    // CodeMirrorの既定処理からは除外しているが、DOM上の親==.cm-line経由で他のリスナーへ
+    // 伝播しないための保険を重ねる)。
+    el.addEventListener("mousedown", (event) => { event.preventDefault(); event.stopPropagation(); });
+    el.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleFoldRange(view, this.range);
     });
+    // 依頼⑤: マーカーにマウスを乗せたら、その範囲に対応する縦線(GuideLineWidget)だけを
+    // 強調する。マーカーが本文エリアの左端に固定されたことで、コード側のどこが折りたためる
+    // 範囲なのか目で追いにくくなったため、その埋め合わせとして始点〜終点(L字含む)を
+    // ひと目で示す。
+    //
+    // 実装方式(判断ポイント): decoration set全体を再構築せず、DOM要素へのクラスの
+    // 付け外しだけで完結させる(依頼「ホバーのたびに全体を再構築しないこと」)。
+    // GuideLineWidget側が、自分がどの範囲に属するかを data-fold-from 属性(範囲の
+    // from位置。isRangeFolded/toggleFoldRangeと同じ「範囲の一意な鍵」)としてDOM要素に
+    // 直接書き込んでおり(後述)、ここではその属性値が一致する要素をview.contentDOM配下
+    // (=現在描画されているviewport内、CodeMirrorは仮想化しているため文書全体の行数に
+    // 関わらず常に少数)から探すだけでよい。1万行の文書でも、実際にDOMへ存在するのは
+    // 表示中の数十〜百数十行ぶんだけのため、この検索は文書サイズに関わらず一定の
+    // コストで済む(.perf-typing.mjs的な意味でのO(表示行数)。性能確認は今回の対応報告
+    // 参照)。
+    const hotSelector = `[data-fold-from="${this.range.from}"]`;
+    el.addEventListener("mouseenter", () => {
+      view.contentDOM.querySelectorAll(hotSelector).forEach((n) => n.classList.add("cm-guide-hot"));
+    });
+    el.addEventListener("mouseleave", () => {
+      view.contentDOM.querySelectorAll(hotSelector).forEach((n) => n.classList.remove("cm-guide-hot"));
+    });
+    anchor.appendChild(el);
     return anchor;
   }
   ignoreEvent() { return true; } // CodeMirror本体の既定処理(カーソル移動等)には委ねない
@@ -2776,6 +2733,145 @@ function toggleFoldRange(view, range) {
   foldedRanges(view.state).between(range.from, range.from, (a, b) => { if (a === range.from) existing = { from: a, to: b }; });
   if (existing) view.dispatch({ effects: unfoldEffect.of(existing) });
   else view.dispatch({ effects: foldEffect.of(range) });
+}
+
+// ---- 依頼④: VS Codeのような折りたたみコマンド(レベル指定・コメントブロック・再帰) ----
+// @codemirror/languageにはfoldCode/unfoldCode/foldAll/unfoldAllしか無く、レベル指定・
+// コメントブロック一括・再帰的な開閉は自前実装が必要(依頼のとおり)。既存の
+// foldNodeProp/foldEffect/unfoldEffect/foldedRanges()と同じ土台の上に実装し、マーカー
+// クリックやAlt-[等のキーボード操作と結果が食い違わないようにする。
+
+// 構文木全体(またはfrom〜toで指定した部分木)を走査し、複数行にまたがる折りたたみ範囲を
+// すべて集める。depthは1始まり(最も外側が1)。nodeNameは元になった構文ノードの名前
+// (依頼④「すべてのコメントブロックを折りたたむ」の判定に使う。ノード名にCommentが
+// 含まれるかどうかで判定するのが、言語ごとにノード名が違う中で最も現実的、という依頼の
+// 指摘どおりの方式)。
+// 【性能】 レベル指定の折りたたみ(doFoldToLevel)はドキュメント全体を対象にする性質上、
+// 呼び出しのたびに構文木全体を舐める(O(ドキュメントのノード数))。ただしユーザーが
+// メニュー操作した瞬間に1回だけ呼ばれるコマンドであり、画面描画のたびに走る
+// buildFoldOpenMarkers/buildFoldGuideLines等の高頻度パスとは性質が異なるため、
+// 1万行程度のファイルでも体感できる遅延にはならない(通常の構文木の全走査コストの範囲内)。
+// 再帰的な折りたたみ(doFoldRecursivelyAtCursor)は対象範囲の部分木だけに絞って渡す
+// (from/to引数)ため、文書全体は舐めない。
+function collectAllFoldRanges(state, from = 0, to = state.doc.length) {
+  const tree = syntaxTree(state);
+  const doc = state.doc;
+  const ranges = [];
+  let depth = 0;
+  function qualifies(nodeRef) {
+    const prop = nodeRef.type.prop(foldNodeProp);
+    if (!prop) return null;
+    const value = prop(nodeRef.node, state);
+    if (!value) return null;
+    if (doc.lineAt(value.from).number >= doc.lineAt(value.to).number) return null; // 単一行は対象外
+    return value;
+  }
+  tree.iterate({
+    from, to,
+    enter: (nodeRef) => {
+      const value = qualifies(nodeRef);
+      if (!value) return;
+      depth++;
+      ranges.push({ from: value.from, to: value.to, depth, nodeName: nodeRef.name });
+    },
+    // enter/leaveは同一ノードに対して対称に呼ばれる(qualifies()はノードだけで決まる
+    // 純粋な判定なので、enterで積んだのと同じ条件でleaveで必ず降ろせる。スタックを
+    // 別途持つ必要が無い)。
+    leave: (nodeRef) => {
+      if (qualifies(nodeRef)) depth--;
+    },
+  });
+  return ranges;
+}
+
+// findFold()は@codemirror/language内部の非公開関数のため、同じ考え方(from〜toに重なる
+// 折りたたみ範囲のうち、最も開始位置が早いものを返す)を公開APIのfoldedRanges()で
+// 自前実装する(unfoldCode相当の探索と揃える)。
+function findFoldAt(state, from, to) {
+  let found = null;
+  foldedRanges(state).between(from, to, (a, b) => { if (!found || found.from > a) found = { from: a, to: b }; });
+  return found;
+}
+
+// 複数のfoldEffectを1回のdispatchでまとめて送るための整形ヘルパー。
+// 不具合(実装中に発覚): foldState.update()内部はfoldEffect群を「from位置の昇順」で
+// RangeSetBuilderへ追加する実装になっており、順序が守られていないと
+// 「Ranges must be added sorted by `from` position and `startSide`」という例外で
+// dispatch全体が失敗する。doFoldRecursivelyAtCursor(祖先の範囲を配列の末尾に追加していた
+// ため、from位置が小さい祖先が最後に来て昇順が崩れていた)で実際に踏んだ。fromの昇順で
+// 並べ直し、同一range(target自身がcollectAllFoldRangesにも重複して含まれるケースがある)は
+// 重複除去してから渡す。
+function sortedFoldEffects(ranges) {
+  const sorted = [...ranges].sort((a, b) => a.from - b.from || a.to - b.to);
+  const effects = [];
+  let prevKey = null;
+  for (const r of sorted) {
+    const key = `${r.from}-${r.to}`;
+    if (key === prevKey) continue; // 直前と全く同じ範囲は重複除去
+    prevKey = key;
+    effects.push(foldEffect.of({ from: r.from, to: r.to }));
+  }
+  return effects;
+}
+
+// レベルN(1〜5)で折りたたむ(VS Code Fold Level 1..5相当)。VS Codeと同じく、まず全展開
+// してから指定した深さの範囲だけを畳み直す(=「深さNまでのアウトラインだけを見せる」という
+// この機能本来の用途に沿った動作。判断ポイント: 既存の折りたたみ状態を保ったまま指定levelの
+// 範囲だけ追加で畳む案も検討したが、それだと「今どのレベルを表示中か」が操作のたびに
+// 積み上がって分かりにくくなるため、VS Codeの実際の挙動に合わせてリセットする方式にした)。
+function doFoldToLevel(view, level) {
+  const { state } = view;
+  const targets = collectAllFoldRanges(state).filter((r) => r.depth === level);
+  const effects = [];
+  // unfoldEffectはfoldedRanges().between()由来(RangeSetの反復は常に位置の昇順)のため、
+  // ここは元々sortedFoldEffectsを通す必要が無い(foldState.update側もunfold側は
+  // filter()で処理しており、add-sortedの制約はfoldEffect側のみ)。
+  foldedRanges(state).between(0, state.doc.length, (from, to) => effects.push(unfoldEffect.of({ from, to })));
+  effects.push(...sortedFoldEffects(targets));
+  if (effects.length === 0) return false;
+  view.dispatch({ effects });
+  return true;
+}
+
+// すべてのコメントブロックを折りたたむ(VS Code Fold All Block Comments相当、ユーザーが
+// 例に挙げた項目)。ノード名に"Comment"を含む、複数行にまたがる範囲だけを対象にする
+// (依頼「複数行にまたがるコメントだけを対象にすること」)。1行コメント(// ...等)は
+// collectAllFoldRangesの時点で単一行として除外済み。
+function doFoldAllBlockComments(view) {
+  const ranges = collectAllFoldRanges(view.state).filter((r) => /comment/i.test(r.nodeName));
+  if (ranges.length === 0) return false;
+  view.dispatch({ effects: sortedFoldEffects(ranges) });
+  return true;
+}
+
+// カーソル位置を再帰的に折りたたむ(VS Code Fold Recursively相当)。foldCode(Alt-[)は
+// カーソル位置の範囲を1つだけ畳むのに対し、こちらはその範囲配下に入れ子になっている
+// 折りたたみ可能な範囲もまとめて畳む。後で外側だけ展開しても、内側は畳まれたままになる
+// (「再帰的」の意味そのもの)。
+function doFoldRecursivelyAtCursor(view) {
+  const { state } = view;
+  const line = state.doc.lineAt(state.selection.main.head);
+  const target = foldable(state, line.from, line.to); // foldCodeと同じ探索(標準API)
+  if (!target) return false;
+  const descendants = collectAllFoldRanges(state, target.from, target.to)
+    .filter((r) => r.from >= target.from && r.to <= target.to);
+  const effects = sortedFoldEffects([...descendants, target]); // target自身も含める(重複はsortedFoldEffectsが除去)
+  view.dispatch({ effects });
+  return true;
+}
+// カーソル位置を再帰的に展開する(VS Code Unfold Recursively相当)。unfoldCode(Alt-])は
+// カーソル位置の折りたたみを1つだけ展開するのに対し、こちらはその内側に隠れている
+// (=現在畳まれている)折りたたみ範囲もまとめて展開する。
+function doUnfoldRecursivelyAtCursor(view) {
+  const { state } = view;
+  const line = state.doc.lineAt(state.selection.main.head);
+  const target = findFoldAt(state, line.from, line.to);
+  if (!target) return false;
+  const effects = [];
+  foldedRanges(state).between(target.from, target.to, (from, to) => effects.push(unfoldEffect.of({ from, to })));
+  if (effects.length === 0) return false;
+  view.dispatch({ effects });
+  return true;
 }
 
 // ---- 言語未設定のコードモードでのインデントベース折りたたみ(改善③) ----
@@ -2853,19 +2949,19 @@ function indentFoldRangeForLine(state, docLine) {
 // 標準コマンドから呼ばれる(上記コメント参照)。
 const indentFoldService = foldService.of((state, lineStart) => indentFoldRangeForLine(state, state.doc.lineAt(lineStart)));
 
-// ある1つのdocLineが新たに開く折りたたみ範囲の一覧を、マーカー描画に必要な位置情報
-// (leftCol・stackIndex)付きで返す。buildFoldOpenMarkers(マーカー本体)と
-// buildFoldGuideLines(依頼③「fold」モードの縦線)の両方から呼ぶ共通処理として切り出した
-// (単一の場所に集約することで、マーカーと縦線が常に同じ列計算・同じ折りたたみ範囲判定を
+// ある1つのdocLineが新たに開く折りたたみ範囲の一覧を、インデントガイド(縦線)の描画に
+// 必要な位置情報付きで返す。buildAllIndentGuides/collectActiveGuideSegments(依頼②で
+// 一本化した縦線描画)から呼ぶ共通処理として切り出した(単一の場所に集約することで、
+// マーカー・全モードのガイド・foldモードの縦線が常に同じ列計算・同じ折りたたみ範囲判定を
 // 使うことを保証する)。
-// 戻り値: [{ range, folded, leftCol, stackIndex }]
-//   leftCol: 行頭空白の表示上の列数(タブはタブ幅ぶんとして数える。countColumn使用。
-//     実機不具合①「Tabでインデントするとマーカーがどんどん離れていく」の修正本体。
-//     以前は行頭空白の「文字数」をそのまま列数として使っており、タブ文字1個を1列としか
-//     数えていなかった。タブは表示上タブ幅(既定4、codeIndentSize設定と同じ
-//     state.tabSize)ぶん進むため、タブでインデントした行ほどマーカーが実際のコード
-//     開始位置より大きく左にずれていた)。
-//   stackIndex: 同じ行に複数開く稀なケースでの重なり回避用のずらし段(FoldOpenMarkerWidget参照)。
+// 戻り値: [{ range, folded, leftCol }]。leftColは依頼①でマーカー自体の位置計算には
+// 使わなくなったが(マーカーは固定位置、computeFixedMarkerLeftPx参照)、依頼②のインデント
+// ガイド(縦線)の列位置計算には引き続き必要なため残す。
+// 稀に1行で複数の範囲が同時に開く場合(例: "} else {"のような合成行)は、外側→内側の順
+// (collectLineFoldOpensの並び順どおり)に1レベルずつ深いものとみなし、その分だけ列を
+// ずらす(state.tabSize=codeIndentSizeぶんずつ)。この状況自体が稀なうえ、ガイド線が
+// 同じ列に重ならないようにするための便宜的な規約であり、実コードのインデント幅と
+// 厳密に一致しなくても実用上問題にならない。
 function lineFoldOpenSpecs(state, docLine, hasLanguage) {
   let opens;
   if (hasLanguage) {
@@ -2878,29 +2974,47 @@ function lineFoldOpenSpecs(state, docLine, hasLanguage) {
     opens = range ? [{ range, folded: isRangeFolded(state, range) }] : [];
   }
   if (opens.length === 0) return [];
-  const m = /^[ \t]+/.exec(docLine.text);
-  // 実機不具合①の修正: 文字数(m[0].length)ではなく、countColumnで求めた表示上の列数を使う。
-  // tabSizeはstate.tabSize(EditorState.tabSizeファセット)から取得し、setCodeIndentSizeが
-  // 設定する値と常に一致させる(indentGuideTheme(size)に渡す値とも同じ経路で揃っており、
-  // マーカーとインデントガイドが別々のタブ幅を参照してまたズレる、という事故を防ぐ)。
-  const leftCol = m ? countColumn(docLine.text, state.tabSize, m[0].length) : 0;
-  return opens.map((o, i) => ({ range: o.range, folded: o.folded, leftCol, stackIndex: opens.length - 1 - i }));
+  const baseLeftCol = lineIndentColumn(state, docLine.text);
+  return opens.map((o, i) => ({ range: o.range, folded: o.folded, leftCol: baseLeftCol + i * state.tabSize }));
+}
+// 行頭空白の表示上の列数(タブはタブ幅ぶんとして数える。countColumn使用)。マーカーの位置
+// 計算では使わなくなったが(依頼①)、インデントガイドの列位置計算では引き続き必要
+// (lineFoldOpenSpecs・buildAllIndentGuidesの両方から呼ぶ)。tabSizeはstate.tabSize
+// (EditorState.tabSizeファセット)から取得し、setCodeIndentSizeが設定する値と常に一致
+// させる(マーカー・ガイドが別々のタブ幅を参照してズレる、という以前の事故を防ぐ)。
+function lineIndentColumn(state, text) {
+  const m = /^[ \t]+/.exec(text);
+  return m ? countColumn(text, state.tabSize, m[0].length) : 0;
+}
+
+// 1行につき1つだけ、マーカーが必要ならその仕様を返す(依頼①「1行に出すマーカーは1つ
+// だけ」、VS Codeと同じ)。複数の範囲が同じ行で新たに開く稀なケースでは、最も外側の範囲を
+// 採用する(collectLineFoldOpensが外側→内側の順で返す配列の先頭=opens[0])。クリックすると
+// その最も外側の範囲を開閉する。
+function lineFoldMarkerSpec(state, docLine, hasLanguage) {
+  if (hasLanguage) {
+    const opens = collectLineFoldOpens(state, docLine.from, docLine.to, docLine.number);
+    return opens.length ? { range: opens[0].range, folded: opens[0].folded } : null;
+  }
+  const range = indentFoldRangeForLine(state, docLine);
+  return range ? { range, folded: isRangeFolded(state, range) } : null;
 }
 
 // 表示範囲(view.viewportLineBlocksのみ。文書全体は舐めない)から、マーカーが必要な行だけの
-// widget decorationを組み立てる。indentGuideMarksと同じ「viewportだけを見る」作法。
+// widget decorationを組み立てる。
 function buildFoldOpenMarkers(view) {
   const marks = [];
   const { state } = view;
   const lineHeightPx = view.defaultLineHeight;
-  const charWidthPx = view.defaultCharacterWidth; // 不具合修正(上記FoldOpenMarkerWidgetの
-  // コメント参照): CSSの`ch`単位は使わず、実測した1文字ぶんのpx幅を直接使う。
-  // 実機不具合の修正(はみ出し対策の保険): .cm-contentの実際のpadding-leftをgetComputedStyleで
-  // 実測する。コードモードの固定値(20px)・Markdownモードの--editor-padding-left変数
-  // (既定32px、設定で変更可能)のどちらであっても、実際に効いている値をそのまま拾えるため、
-  // 「CSS側で余白を広げる」対策とは独立に、どんな余白設定でもマーカーが本文エリアの外へ
-  // 出ないことをここで保証できる(FoldOpenMarkerWidget.toDOM()のクランプ参照)。
+  // 実機不具合の修正(はみ出し対策の保険、依頼①以前から継続): .cm-contentの実際の
+  // padding-leftをgetComputedStyleで実測する。コードモードの固定値(25px)・Markdownモードの
+  // --editor-padding-left変数(既定32px、設定で変更可能)のどちらであっても、実際に効いている
+  // 値をそのまま拾えるため、「CSS側で余白を広げる」対策とは独立に、どんな余白設定でも
+  // マーカーが本文エリアの外へ出ないことをここで保証できる。
   const contentPaddingLeftPx = parseFloat(getComputedStyle(view.contentDOM).paddingLeft) || 0;
+  // 依頼①: マーカーは本文エリアの左端から常に固定の位置。インデント列に依存しないため、
+  // view全体でこの1値を使い回せる(旧実装のようにマーカーごとに計算し直す必要が無い)。
+  const markerLeftPx = computeFixedMarkerLeftPx(contentPaddingLeftPx);
   // 改善③: 言語(構文木)が設定されているかどうかをループの外で一度だけ判定する
   // (state.facet(language)は現在アクティブなLanguageオブジェクト、無ければnull。
   // @codemirror/languageの公開APIで、docModeComp.reconfigure()に言語のsupportが
@@ -2918,17 +3032,15 @@ function buildFoldOpenMarkers(view) {
     // これにより「折りたたんだ状態({…}表示)でもマーカーが正しい位置に出る」ことが
     // 保証される(依頼の確認項目)。
     const docLine = state.doc.lineAt(line.from);
-    const specs = lineFoldOpenSpecs(state, docLine, hasLanguage);
-    if (specs.length === 0) continue;
-    marks.push(Decoration.widget({ widget: new FoldOpenMarkerWidget(specs, lineHeightPx, charWidthPx, contentPaddingLeftPx), side: -1 }).range(line.from));
+    const open = lineFoldMarkerSpec(state, docLine, hasLanguage);
+    if (!open) continue;
+    marks.push(Decoration.widget({ widget: new FoldOpenMarkerWidget(open.range, open.folded, markerLeftPx, lineHeightPx), side: -1 }).range(line.from));
   }
   return Decoration.set(marks, true);
 }
-// docChanged/viewportChanged/foldState変化/言語変化/構文木変化/geometryChanged(行の高さや
-// 文字幅が変わる設定変更)のいずれかで再構築する。geometryChangedはlineHeightPx・
-// charWidthPxをwidgetのkeyに含めているため見落とすとマーカーの位置が古い値のままずれる
-// (indentGuideMarksと同じ
-// 理由)。foldState変化はマーカークリックによる開閉そのものを検知するために必須。
+// docChanged/viewportChanged/foldState変化/言語変化/構文木変化/geometryChanged(行の高さが
+// 変わる設定変更)のいずれかで再構築する。foldState変化はマーカークリックによる開閉そのものを
+// 検知するために必須。
 //
 // 不具合修正(実機バグ①のテスト実装中に発覚): setCodeIndentSize()はcodeIndentComp
 // (tabSize)とcodeModeExtrasComp(このプラグイン自体を含む配列)を「2回に分けて」
@@ -2953,7 +3065,7 @@ const foldOpenMarkerPlugin = ViewPlugin.fromClass(class {
 }, { decorations: (v) => v.decorations });
 
 // マーカーの見た目。色はテーマのCSS変数だけを参照するため、getComputedStyleでの再構築
-// なしに9テーマすべてへ自動追従する(indentGuideThemeと同じ作法)。src/style.css・
+// なしに9テーマすべてへ自動追従する(guideLineThemeと同じ作法)。src/style.css・
 // src/themes.cssは他エージェントが編集中のため触れず、ここ(EditorView.theme())だけで
 // 完結させる。配色は前回(依頼3)実測済みの組み合わせをそのまま引き継ぐ: 地=
 // var(--ink-sub)、記号=var(--paper)、枠=地と同じvar(--ink-sub)(塗りと一体の「塗りつぶ
@@ -2992,207 +3104,50 @@ const foldOpenMarkerTheme = EditorView.theme({
   },
 });
 
-// インデントガイド(縦線)。ユーザー報告「コードモードのインデントが小さすぎる」への対応の一部。
-// 実測の結果、Tabキーで新たに挿入されるインデント幅(indentUnit)と、既に書かれているスペース
-// インデントの見た目の幅は別物で、後者はCSS側では変えようがない(スペースは文字なのでフォントの
-// 文字幅ぶんの幅を持つ)。そこで、既存のインデントの深さそのものを列単位で視覚化することで
-// 「小さすぎて分かりにくい」という体感を補う。行頭の空白(スペース/タブいずれも)をmark
-// decorationで囲み、CSSの `1ch`(等幅フォントの1文字ぶん)を単位にした反復グラデーションで
-// codeIndentSize(=タブ幅)ごとに縦線を引く。tab-sizeもchも同じ「文字幅」を基準にしているため、
-// タブ・スペースどちらのインデントでもJSで実際のpx幅を測らずに列がそろう。
-// 色は新規CSSを追加せず、罫線に使っている既存の変数--rule(全テーマ定義済み・控えめな色)を
-// そのまま使う。src/style.css・src/themes.cssは他エージェントが配色を作り直し中のため触れず、
-// EditorView.themeで完結させる。
-// なお、この行(旧: 「インデントガイドは視認性を損なうため搭載しない」)は決定済み事項として
-// 一度は見送られていたが、docs/仕様書.md 11章「決定済み」では逆に
-// 「コードモードの範囲：…インデントガイド・折り返し切替まで」と明記されており、実装が
-// 仕様書と食い違っていた。今回のユーザー報告を機に、仕様書どおりインデントガイドを実装する
-// (詳細な経緯は今回の対応報告を参照)。
+// ---- 依頼②: インデントガイド(縦線)を"all"/"fold"共通の1つの仕組みに統合する ----
+// 【経緯、2世代目】 直前の実装は縦線を2つの別々の仕組みで描いていた。
+//   "all"  … 行頭の空白をmark decorationで囲み、CSSの反復グラデーション(backgroundImage +
+//            backgroundSize: `${size} * 1ch`)で全深さに一律の縦線を出す(旧
+//            indentGuideMarks/indentGuideTheme/IndentGuideBlankWidget)。列の単位はCSSの
+//            `1ch`(フォントの'0'グリフ幅)。
+//   "fold" … 折りたたみ範囲(foldNodeProp)の祖先チェーンを辿り、実DOM要素
+//            (widget decoration)で1本ずつ引く(旧FoldGuideLineWidget)。列の単位は
+//            view.defaultCharacterWidthで実測したpx。
+// この2つは「列の単位」も「線の実体」も別物のため、両方を同時に有効にできる構成では
+// ないにせよ、同じ深さのはずの列がユーザーの実機ではズレて見える、との指摘を受けた
+// (`1ch`とJS実測pxは、依頼①のマーカー位置計算で既に一度「深いネストほど誤差が
+// 積み重なる」ことが判明していた組み合わせと同じ原因)。
+// → 縦線はCSSの反復グラデーション方式を廃止し、"all"・"fold"のどちらも実DOM要素
+//   (GuideLineWidget)の1つの仕組みに一本化する。列のpx化は常にview.defaultCharacterWidth
+//   (実測px)のみを使い、`ch`単位は一切使わない。これにより「同じ深さなら同じx座標」が
+//   構造的に保証される(計算式が1つしか存在しないため)。
 //
-// 不具合修正1回目(前任、ユーザー報告「インデントガイドが｜をつなげただけでチープです。
-// Graftと同じくきちんと繋がった線にしてください」): 空行の区間だけガイドが完全に消える
-// (mark decorationは実在する文字にしか付けられず、文字数0の空行には装飾しようがない)
-// ことを主因と見て、空行だけ別経路(widget decoration)で埋める対策を入れていた。前任は
-// 「拡大スクリーンショットで空行をまたいで連続していることを確認した」と報告していたが、
-// ユーザーの実機では依然として途切れて見える、との再指摘を受けた。
+// 【依頼③: 終点をL字にする】 折りたたみ範囲の最終行では、縦線を行の縦中央(文字の高さの
+// 中心)で止め、そこから右へFOLD_ELBOW_WIDTH(7.5px)の横棒を出す。"fold"モードは元々
+// 折りたたみ範囲だけを描くためすべての線がL字で終わる。"all"モードは折りたたみ範囲と
+// 無関係な深さの線(構文木上forwardableでない、単なるインデントの視覚化)も含むため、
+// そのうち実際に折りたたみ範囲の最終行に当たる箇所だけをL字にし、それ以外はまっすぐ
+// 終わらせる(collectActiveGuideSegments由来のセグメント情報と付き合わせて判定する。
+// buildAllIndentGuides参照)。
 //
-// 不具合修正2回目(今回、根本から実測し直した): 前任の見立て(=空行だけが特殊)は
-// 誤りで、実際には非空白行同士の間にも隙間があった。Playwrightで.cm-lineと.cm-indent-guide
-// のgetBoundingClientRect()を比較したところ、次の2つの不具合が独立して存在していた。
-//   (a) 非空白行のガイドは通常のmark decoration(displayが既定のinline)のため、背景の
-//       描画範囲がCSSのline-height(#cm-host .cm-scroller { line-height: var(--editor-
-//       line-height, 1.95) } = 実測29.25px)ではなく、フォント自体の行送り(実測18px、
-//       font-size 15pxの約1.2倍=ブラウザ既定のnormal)に閉じ込められていた。inline要素の
-//       背景はline-heightではなくフォントの行送りぶんしか塗られない、というCSSの仕様上の
-//       性質が原因(前任はここを見落としていた=空行以外は「隙間なく繋がっている」という
-//       前任の前提自体が誤りだった)。そのため、空行を挟まない普通の行同士の境目でも
-//       上下それぞれ(29.25-18)/2≈5.6pxずつ、計11px前後の隙間が毎行できていた。
-//   (b) 空行を埋めるIndentGuideBlankWidgetは`height: 100%`を指定していたが、
-//       inline-blockのheight:100%は「明示的な高さを持つ祖先」が無いと解決できず(通常の
-//       フロー内では祖先の.cm-lineはheight:autoのため基準が無い)、実測すると高さ0pxで
-//       全く塗られていなかった。つまり空行をまたぐ箇所は前任の対策後もなお完全に途切れた
-//       ままだった(「空行をまたいで連続していることを確認した」という前任の報告は、実際には
-//       確認できていなかったことになる)。
-// 対策: (a)は`.cm-indent-guide`をinline-block化しvertical-align:topにする。実測した
-// ところinline-blockは中身のテキスト(行頭の空白文字)による1行ぶんのline box(=line-height
-// どおりの高さ)を自動的に確保するため、height指定なしで29.25px(=行の高さそのもの)に
-// ぴったり一致することを確認済み(下記(a)の実測値: guideTop/guideBottomが.cm-lineの
-// lineTop/lineBottomと完全一致)。(b)は%指定をやめ、CodeMirrorが実際に測った行の高さ
-// `view.defaultLineHeight`(px)をJS側で直接読み取ってインラインstyleに焼き込む
-// (パーセント解決に依存しないため、editorLineHeight設定やフォントサイズ変更後も常に
-// 実際の行の高さと一致する)。
-class IndentGuideBlankWidget extends WidgetType {
-  // chars: ガイドの列数(幅=chars*1ch)。lineHeightPx: 実際に測った行の高さ(px、
-  // view.defaultLineHeightから)。両方をwidgetの同一性判定(eq)にも含める。
-  constructor(chars, lineHeightPx) { super(); this.chars = chars; this.lineHeightPx = lineHeightPx; }
-  eq(o) { return o.chars === this.chars && o.lineHeightPx === this.lineHeightPx; }
-  toDOM() {
-    const span = document.createElement("span");
-    span.className = "cm-indent-guide cm-indent-guide-blank";
-    span.style.width = `${this.chars}ch`;
-    // height:100%(パーセント指定)は祖先に明示的な高さが無いため解決できず0pxになっていた
-    // (不具合の実測結果、上記コメント参照)。実測したpx値を直接指定することで確実に行の
-    // 高さぶん塗る。
-    span.style.height = `${this.lineHeightPx}px`;
-    return span;
-  }
-  ignoreEvent() { return true; }
-}
-const indentGuideMarks = ViewPlugin.fromClass(class {
-  constructor(view) { this.decorations = this.build(view); }
-  update(u) {
-    // docChanged/viewportChangedに加え、geometryChanged(フォントサイズ・行の高さ設定の
-    // 変更などでレイアウト寸法が変わった場合)でも再構築する。空行埋め用widgetの高さは
-    // view.defaultLineHeightを焼き込んだ値のため、行の高さが変わったのに再構築しないと
-    // 古い高さのまま隙間が復活してしまう。
-    if (u.docChanged || u.viewportChanged || u.geometryChanged) this.decorations = this.build(u.view);
-  }
-  build(view) {
-    // 空行埋め用widgetに焼き込む実際の行の高さ(px)。CodeMirrorが実測したデフォルト行高で、
-    // #cm-host .cm-scroller のline-height(既定1.95倍)を反映した値になる。
-    const lineHeightPx = view.defaultLineHeight;
-    const marks = [];
-    const { state } = view;
-    const doc = state.doc;
-    // 空行の前後にある直近の非空白行の行頭空白幅を求めるための小さなキャッシュ・探索。
-    // 空行が連続する箇所(例: 大きなコメントアウト跡)で毎回ゼロから数え直さないよう、
-    // 一度求めた行の幅は使い回す。探索は上限を設け(病的に長い空行の連続への対策)、
-    // 見つからなければガイド無し(0)扱いにする。
-    const widthCache = new Map();
-    const SCAN_CAP = 200;
-    function leadingWidth(lineNo) {
-      let w = widthCache.get(lineNo);
-      if (w !== undefined) return w;
-      const text = doc.line(lineNo).text;
-      const m = /^[ \t]+/.exec(text);
-      w = m ? m[0].length : (text.length === 0 ? null : 0); // null = この行自身も空行(さらに外へ探索)
-      widthCache.set(lineNo, w);
-      return w;
-    }
-    function prevNonBlankWidth(lineNo) {
-      for (let n = lineNo - 1, i = 0; n >= 1 && i < SCAN_CAP; n--, i++) {
-        const w = leadingWidth(n);
-        if (w !== null) return w;
-      }
-      return 0;
-    }
-    function nextNonBlankWidth(lineNo) {
-      for (let n = lineNo + 1, i = 0; n <= doc.lines && i < SCAN_CAP; n++, i++) {
-        const w = leadingWidth(n);
-        if (w !== null) return w;
-      }
-      return 0;
-    }
-    for (const { from, to } of view.visibleRanges) {
-      let pos = from;
-      while (pos <= to) {
-        const line = state.doc.lineAt(pos);
-        if (line.length === 0) {
-          // 空行: 前後の非空白行のインデント幅のうち小さいほうをガイド幅として埋める
-          const w = Math.min(prevNonBlankWidth(line.number), nextNonBlankWidth(line.number));
-          if (w > 0) marks.push(Decoration.widget({ widget: new IndentGuideBlankWidget(w, lineHeightPx), side: -1 }).range(line.from));
-        } else {
-          const m = /^[ \t]+/.exec(line.text);
-          if (m && m[0].length > 0) marks.push(Decoration.mark({ class: "cm-indent-guide" }).range(line.from, line.from + m[0].length));
-        }
-        if (line.to + 1 > to) break;
-        pos = line.to + 1;
-      }
-    }
-    return Decoration.set(marks, true);
-  }
-}, { decorations: (v) => v.decorations });
-// sizeはcodeIndentSize(=タブ幅)。呼び出しのたびに現在値を焼き込んだテーマ拡張を作る
-// (codeModeExtras()がsetCodeIndentSize時にも呼び直されるため、都度最新値で再生成される)。
-function indentGuideTheme(size) {
-  return EditorView.theme({
-    // display:inline-block + vertical-align:topが今回の根本修正の核心。既定のdisplay:inline
-    // のままだと、背景の描画範囲がline-height(#cm-host .cm-scroller側で設定、既定1.95倍)
-    // ではなくフォント自体の行送り(既定normalで約1.2倍)に閉じ込められ、上下に隙間ができる
-    // (実測: line-height由来の行の高さ29.25pxに対し、inline時の背景は18pxしか塗られず、
-    // 毎行11px前後の隙間ができていた)。inline-blockにすると、中身の空白文字が作る1行ぶんの
-    // line box(=line-heightどおりの高さ)がそのまま要素自身の高さになるため、height指定
-    // 無しで行の高さにぴったり一致する(実測値は今回の対応報告・.verify-codefold.mjs参照)。
-    // vertical-align:topは、inline-block化で発生するbaseline基準の縦位置ずれ(既定だと
-    // ベースライン合わせで上下にずれ、行の上端から始まらなくなる)を防ぎ、行の最上端から
-    // 塗り始めるようにする。
-    ".cm-indent-guide": {
-      display: "inline-block",
-      verticalAlign: "top",
-      backgroundImage: "linear-gradient(to right, var(--rule) 0, var(--rule) 1px, transparent 1px, transparent 100%)",
-      backgroundRepeat: "repeat-x",
-      backgroundSize: `calc(${size} * 1ch) 100%`,
-      // 実機不具合②の修正(ユーザー要望「折りたたみマーカーの中央からガイドを出したい。
-      // 現在はマーカーの右から出ている」): このmark要素の右端は常に行頭空白の終端(=コード
-      // 開始位置)にちょうど一致する(実文字をmark decorationで囲んでいるだけの実測値のため、
-      // 近似無しに厳密に一致する)。それがそのままマーカーの右端の位置でもある
-      // (FoldOpenMarkerWidget参照)ため、反復グラデーションの縦線もそこ(ボックスの右端、
-      // ちょうどbackgroundSizeの整数倍の境界)に来ていた=マーカーの右肩から線が生えて
-      // 見えていた。マーカーの「中心」から出したいので、線の側をマーカー幅の半分
-      // (FOLD_MARKER_SIZE/2px)だけ左へずらす。
-      // 実現方法の検討: 依頼どおりbackground-positionで実現できるか検討した。
-      // background-position: -Xpx 0 は「背景画像の原点をボックスの左端からX px左へ置く」
-      // 指定で、repeat-xと組み合わせると画像全体(=反復する縦線群)がボックス内でX pxぶん
-      // 左へシフトして見える(CSSの背景位置の定義どおり)。この要素は行ごとに幅が異なる
-      // (深さによって行頭空白の長さが違う)が、どの行のボックスも「行の先頭(列0)」を
-      // 左端として測っているため原点が全行で共通しており、固定pxオフセットのbackground-
-      // positionを掛けても行をまたいでズレない(=採用可能と判断)。
-      // 別の描き方(SVG化・複数のグラデーションレイヤーに分ける等)を検討する必要は無かった。
-      backgroundPosition: `${-(FOLD_MARKER_SIZE / 2)}px 0`,
-    },
-    // 空行を埋めるダミーspan(IndentGuideBlankWidget)は.cm-indent-guideのクラスも併せ持つため
-    // display:inline-block・vertical-align:topは上の指定がそのまま効く。高さは以前ここで
-    // `height: 100%`を指定していたが、祖先(.cm-line)に明示的な高さが無いためパーセントが
-    // 解決できず実測0pxになっていた(不具合の実測結果、IndentGuideBlankWidget側のコメント
-    // 参照)。今はwidget生成時にJS側でview.defaultLineHeightのpx値を直接インラインstyleへ
-    // 書き込むため、.cm-indent-guide-blank専用のCSSルールはもう不要になった。
-  });
-}
-
-// ---- 依頼③: インデントガイドの「fold」モード(折りたたみできる範囲のみ縦線を引く) ----
-// 上のindentGuideMarks/indentGuideThemeは「行頭の空白」をmark decorationで囲み、CSSの反復
-// グラデーションで全ての深さに一律に縦線を引く作りのため、「特定の深さ(=折りたたみ範囲が
-// ある階層)だけ」を描き分けることができない。「fold」モードではそもそも別の描き方をする:
-// 折りたたみマーカーが存在する行(=何かの範囲を新たに開く行)から、その範囲の最終行まで、
-// マーカーの中心を通る縦線を1本引く(折りたたみ範囲に関係ない深さには何も引かない)。
+// 【依頼⑤: マーカーホバーで対応する縦線を強調する】 GuideLineWidgetは、自分がどの
+// 折りたたみ範囲に属するか(属さない場合はnull)をdata-fold-from属性としてDOM要素に
+// 直接持たせる。マーカー側(FoldOpenMarkerWidget)はmouseenter/mouseleaveで、同じ値を
+// 持つ要素にCSSクラス(cm-guide-hot)を付け外しするだけで強調を切り替える(decoration set
+// の再構築はしない。性能への配慮は今回の対応報告参照)。"none"モード(縦線を出さない設定)
+// では強調すべき線が存在しないため何も起きない。マーカー自体は既存の:hover(var(--accent)
+// への切り替え)がそのまま効くため、"none"モードでもマーカーへのフィードバック自体は
+// 変わらず得られる。
 //
 // 二重線を絶対に出さないための設計(ユーザー指摘「インデントガイドが2本ある」の再発防止):
-// codeModeExtras()側でindentGuideMarks/indentGuideTheme(allモード用)とfoldGuideLinePlugin/
-// foldGuideLineTheme(foldモード用)は排他的にしか追加しない(コード内の分岐参照)。同じ行の
-// 同じ列に2つの独立した仕組みが線を描く余地が構造的に無い。
+// codeModeExtras()側でallIndentGuidePlugin("all"用)とfoldGuideLinePlugin("fold"用)は
+// 排他的にしか追加しない(コード内の分岐参照)。同じ行の同じ列に2つの独立した仕組みが
+// 線を描く余地が構造的に無い。
 //
-// マーカーとの位置合わせ: 縦線のx座標はcomputeMarkerLeftsPx(マーカー本体と全く同じ関数)
-// で求めた左端にFOLD_MARKER_SIZE/2を足した「マーカーの中心」を使う。マーカー・全モードの
-// ガイド・foldモードの縦線が、常に同じ列計算(lineFoldOpenSpecsのcountColumn)・同じ
-// クランプ計算(computeMarkerLeftsPx)から導かれるため、実装を分けたことによる再度のズレが
-// 構造的に起きない。
-//
-// 性能への配慮: buildFoldOpenMarkersと同様、view.viewportLineBlocks(表示範囲のみ)しか
-// 見ない。ただし「表示範囲の先頭より上で開始し、まだ表示範囲まで続いている範囲」
-// (=マーカー自体は画面外だが、その内側にスクロールしている状態)も連続して線を引く必要が
-// あるため、表示範囲の先頭1点についてだけ祖先チェーンを辿る(collectFoldChainAt/
-// indentFoldAncestorsAt。いずれも文書全体は舐めず、構文木の深さ・後方走査の上限だけに
-// 比例するコストで済む)。1万行での実測は今回の対応報告(.perf-typing.mjs)を参照。
+// 性能への配慮: buildFoldOpenMarkersと同様、view.viewportLineBlocks/view.visibleRanges
+// (表示範囲のみ)しか見ない。文書全体を舐める操作は無い(1万行での実測は今回の対応報告・
+// .perf-typing.mjs参照)。
+
 
 // 言語未設定時(インデントベース折りたたみ)における、lineNumber行を包んでいる(=まだ
 // 閉じずに伸びている)祖先範囲のチェーンを、外側→内側の順で返す。collectFoldChainAt
@@ -3229,78 +3184,108 @@ function indentFoldAncestorsAt(state, lineNumber) {
 // マーカーの中心を通る縦線1本ぶんのwidget。half=true(その範囲の開始行)のときは行の下半分
 // だけ(マーカーの中心から下)を、false(それ以降の行・最終行)のときは行の全高を塗る
 // (依頼「マーカーの中心から下へ」を、開始行では文字どおり中心を起点にすることで表現する)。
-class FoldGuideLineWidget extends WidgetType {
-  constructor(leftPx, lineHeightPx, half) {
+// 折りたたみ範囲・インデントレベルを表す縦線1本ぶんのwidget("all"/"fold"共通、依頼②)。
+// elbow=true(その区間の最終行)のときは、行の縦中央(=文字の高さの中心)で線を止め、
+// そこから右へFOLD_ELBOW_WIDTH pxの横棒を出して「L」の形にする(依頼③)。false(それ以外の
+// 行)のときは行の全高をまっすぐ塗る。
+// rangeFrom: この線が属する折りたたみ範囲の一意な鍵(範囲のfrom位置。isRangeFolded/
+//   toggleFoldRangeと同じ「範囲の一意な鍵」)。"all"モードで、どの折りたたみ範囲にも
+//   対応しない汎用のインデント目盛り線はnull(依頼⑤のホバー強調の対象外になる)。
+class GuideLineWidget extends WidgetType {
+  constructor(leftPx, lineHeightPx, elbow, rangeFrom) {
     super();
     this.leftPx = leftPx;
     this.lineHeightPx = lineHeightPx;
-    this.half = half;
+    this.elbow = elbow;
+    this.rangeFrom = rangeFrom;
   }
-  eq(o) { return o.leftPx === this.leftPx && o.lineHeightPx === this.lineHeightPx && o.half === this.half; }
+  eq(o) {
+    return o.leftPx === this.leftPx && o.lineHeightPx === this.lineHeightPx &&
+      o.elbow === this.elbow && o.rangeFrom === this.rangeFrom;
+  }
   toDOM() {
     // FoldOpenMarkerWidgetのアンカーと同じ理由: .cm-lineは既定でposition:staticのため、
     // absolute配置の子を置くには幅0のinline-blockでposition:relativeの基準を別途作る必要がある。
     const anchor = document.createElement("span");
-    anchor.className = "cm-fold-guide-anchor";
+    anchor.className = "cm-guide-anchor";
     anchor.style.height = `${this.lineHeightPx}px`;
     const line = document.createElement("span");
-    line.className = "cm-fold-guide-line";
+    line.className = "cm-guide-line";
     line.style.left = `${this.leftPx}px`;
-    if (this.half) {
-      line.style.top = "50%";
+    // 依頼⑤: マーカーホバー時の強調対象を特定するための鍵。値がある場合だけ属性を持たせる
+    // (querySelectorAll('[data-fold-from="X"]')で拾う側はFoldOpenMarkerWidget参照)。
+    if (this.rangeFrom != null) line.dataset.foldFrom = String(this.rangeFrom);
+    if (this.elbow) {
+      line.style.top = "0";
       line.style.height = `${this.lineHeightPx / 2}px`;
+      const elbowEl = document.createElement("span");
+      elbowEl.className = "cm-guide-elbow";
+      elbowEl.style.left = `${this.leftPx}px`;
+      elbowEl.style.top = `${this.lineHeightPx / 2}px`;
+      elbowEl.style.width = `${FOLD_ELBOW_WIDTH}px`;
+      if (this.rangeFrom != null) elbowEl.dataset.foldFrom = String(this.rangeFrom);
+      anchor.appendChild(line);
+      anchor.appendChild(elbowEl);
     } else {
       line.style.top = "0";
       line.style.height = `${this.lineHeightPx}px`;
+      anchor.appendChild(line);
     }
-    anchor.appendChild(line);
     return anchor;
   }
   ignoreEvent() { return true; }
 }
-const foldGuideLineTheme = EditorView.theme({
-  ".cm-fold-guide-anchor": { position: "relative", display: "inline-block", width: "0", verticalAlign: "top" },
-  ".cm-fold-guide-line": {
+const guideLineTheme = EditorView.theme({
+  ".cm-guide-anchor": { position: "relative", display: "inline-block", width: "0", verticalAlign: "top" },
+  ".cm-guide-line": {
     position: "absolute",
     width: "1px",
-    backgroundColor: "var(--rule)", // allモードの縦線(indentGuideTheme)と同じ色を使う(見た目を揃える)
+    backgroundColor: "var(--rule)",
     pointerEvents: "none",
     zIndex: "1", // 本文より背面、マーカー(z-index:2)より背面(マーカーが線の手前に乗って見える)
   },
+  ".cm-guide-elbow": {
+    position: "absolute",
+    height: "1px",
+    backgroundColor: "var(--rule)",
+    pointerEvents: "none",
+    zIndex: "1",
+  },
+  // 依頼⑤: マーカーホバー中、対応する範囲の縦線・L字だけを強調する。新設した
+  // --fold-guide-hover(既定var(--accent)、src/style.css参照)を使う。マーカー自体の
+  // 既存のhover配色(var(--ink-sub)→var(--accent))と揃えることで、「マーカーと同じ色に
+  // 変わった線がその範囲」と直感的に対応づけられるようにした。
+  ".cm-guide-line.cm-guide-hot, .cm-guide-elbow.cm-guide-hot": {
+    backgroundColor: "var(--fold-guide-hover)",
+  },
 });
 
-// 表示範囲から、foldモードで引くべき縦線のwidget decorationを組み立てる。
-function buildFoldGuideLines(view) {
+// 表示範囲に懸かる、実際に折りたたみ可能な範囲(構文木 or インデントベース)の一覧を、
+// 縦線の描画に必要な位置情報付きで集める。"fold"モードの縦線・"all"モードのL字判定・
+// マーカーホバー強調(依頼⑤)のいずれもこの一覧を基準にする(依頼②: 二つの仕組みの一本化)。
+// 戻り値: [{ fromLine, toLine, leftCol(実測列数), rangeFrom(範囲の一意な鍵) }]
+// (foldedな範囲・重複は除外済み)
+function collectActiveGuideSegments(view) {
   const { state } = view;
   const doc = state.doc;
   const blocks = view.viewportLineBlocks;
-  if (blocks.length === 0) return Decoration.none;
-  const lineHeightPx = view.defaultLineHeight;
-  const charWidthPx = view.defaultCharacterWidth;
-  const contentPaddingLeftPx = parseFloat(getComputedStyle(view.contentDOM).paddingLeft) || 0;
+  if (blocks.length === 0) return [];
   const hasLanguage = !!state.facet(language);
   const firstLineNo = doc.lineAt(blocks[0].from).number;
-
-  // active: 表示範囲に関係する(まだ畳まれていない)折りたたみ範囲の一覧。
-  //   { fromLine, toLine, leftPx(px。マーカーの中心。computeMarkerLeftsPx由来) }
   const active = [];
   const seenFrom = new Set(); // range.fromで重複排除(祖先チェーンと行走査の両方で拾いうるため)
   function pushRangesOfLine(docLine) {
     const specs = lineFoldOpenSpecs(state, docLine, hasLanguage);
-    if (specs.length === 0) return;
-    const lefts = computeMarkerLeftsPx(specs, charWidthPx, contentPaddingLeftPx);
-    specs.forEach((o, i) => {
-      if (o.folded) return; // 畳まれている範囲には線を引かない(依頼の仕様どおり)
-      if (seenFrom.has(o.range.from)) return;
+    for (const o of specs) {
+      if (o.folded) continue; // 畳まれている範囲には線を引かない(依頼③「畳んだ状態では線とL字が消える」)
+      if (seenFrom.has(o.range.from)) continue;
       seenFrom.add(o.range.from);
       const toLineNo = doc.lineAt(o.range.to).number;
-      active.push({ fromLine: docLine.number, toLine: toLineNo, leftPx: lefts[i] + FOLD_MARKER_SIZE / 2 });
-    });
+      active.push({ fromLine: docLine.number, toLine: toLineNo, leftCol: o.leftCol, rangeFrom: o.range.from });
+    }
   }
-
   // (1) 表示範囲内で新たに開く範囲(=マーカーが実際に見えている行)
   for (const block of blocks) pushRangesOfLine(doc.lineAt(block.from));
-
   // (2) 表示範囲の先頭より上で開始し、まだ表示範囲まで伸びている範囲(祖先チェーン)。
   //     マーカー自体は画面外でも、線は表示範囲の途中から連続して見える必要があるため。
   const ancestors = hasLanguage
@@ -3315,20 +3300,27 @@ function buildFoldGuideLines(view) {
     const specs = lineFoldOpenSpecs(state, originLine, hasLanguage);
     const idx = specs.findIndex((o) => o.range.from === anc.from);
     if (idx < 0) continue;
-    const lefts = computeMarkerLeftsPx(specs, charWidthPx, contentPaddingLeftPx);
-    active.push({ fromLine: anc.fromLine, toLine: anc.toLine, leftPx: lefts[idx] + FOLD_MARKER_SIZE / 2 });
+    active.push({ fromLine: anc.fromLine, toLine: anc.toLine, leftCol: specs[idx].leftCol, rangeFrom: anc.from });
   }
-  if (active.length === 0) return Decoration.none;
+  return active;
+}
 
-  // (3) 表示範囲の各行について、その行を含むactiveレンジそれぞれに1本ずつwidgetを置く。
+// "fold"モード(既定): 折りたたみできる範囲に対応する階層だけに縦線を引く。
+function buildFoldGuideLines(view) {
+  const segments = collectActiveGuideSegments(view);
+  if (segments.length === 0) return Decoration.none;
+  const { state } = view;
+  const doc = state.doc;
+  const lineHeightPx = view.defaultLineHeight;
+  const charWidthPx = view.defaultCharacterWidth;
   const marks = [];
-  for (const block of blocks) {
+  for (const block of view.viewportLineBlocks) {
     const docLine = doc.lineAt(block.from);
     const n = docLine.number;
-    for (const a of active) {
-      if (n < a.fromLine || n > a.toLine) continue;
+    for (const seg of segments) {
+      if (n < seg.fromLine || n > seg.toLine) continue;
       marks.push(Decoration.widget({
-        widget: new FoldGuideLineWidget(a.leftPx, lineHeightPx, n === a.fromLine),
+        widget: new GuideLineWidget(seg.leftCol * charWidthPx, lineHeightPx, n === seg.toLine, seg.rangeFrom),
         side: -1,
       }).range(block.from));
     }
@@ -3346,6 +3338,124 @@ const foldGuideLinePlugin = ViewPlugin.fromClass(class {
         foldedRanges(update.startState) !== foldedRanges(update.state) ||
         syntaxTree(update.startState) !== syntaxTree(update.state)) {
       this.decorations = buildFoldGuideLines(update.view);
+    }
+  }
+}, { decorations: (v) => v.decorations });
+
+// "all"モード: すべてのインデント階層に縦線を引く。折りたたみ範囲(foldNodeProp等)の
+// 有無に関係なく、行頭空白のcodeIndentSizeごとの列に機械的に引く(旧indentGuideMarksと
+// 同じ考え方)。ただし列のpx化は"fold"モードと全く同じ経路(view.defaultCharacterWidthの
+// 実測px)を通すため、依頼②「'all'と'fold'で同じ階層の線は必ず同じx座標」が構造的に
+// 成立する(CSSの`ch`単位は一切使わない)。
+//
+// 【設計(重要): 構造的な範囲は"fold"モードと全く同じ規則で先に描き切ってから、残りを
+// 汎用の行インデント幅で埋める】
+// 実装中に発覚した不具合: 当初は「行ごとに自分自身のインデント幅からlevelCount本を描き、
+// その中に折りたたみ範囲の終端があればL字にする」という single-pass の実装にしていたが、
+// 閉じ括弧の行(例:"    }")は自分自身のインデント幅が開始行と同じ(=浅い)のが普通の書式
+// のため、L字を出すべき列(その範囲の開始行の実インデント=1段深い位置)そのものが
+// 「自分自身のインデント幅」の範囲外になり、levelCountに含まれず描画されない
+// (=L字が消える)という不具合があった。"fold"モードはこの問題が起きない
+// (buildFoldGuideLinesは行自身のインデント幅を一切見ず、範囲が及ぶ行かどうかだけで
+// 判定するため)。
+// 対策: "all"モードでも、折りたたみ範囲(collectActiveGuideSegments)ぶんは"fold"モードと
+// 全く同じロジック(範囲が及ぶ全行に、範囲の実インデント位置で描く。終端はL字)で先に描く。
+// その後、まだどの範囲にも属さない列だけを、行自身のインデント幅から汎用に埋める
+// (=allモードの「折りたたみ構造に関係なく全深さを見せる」という役割はここで果たす)。
+// これにより、"all"モードの構造的な部分は"fold"モードの出力を完全に包含する形になり、
+// 依頼③「'all'モードでも、折りたたみ範囲に対応する階層の線はL字で終わる」が
+// 構造的に保証される。
+function buildAllIndentGuides(view) {
+  const { state } = view;
+  const doc = state.doc;
+  const lineHeightPx = view.defaultLineHeight;
+  const charWidthPx = view.defaultCharacterWidth;
+  const indentSize = state.tabSize; // setCodeIndentSizeが設定する値と同じ(codeIndentSize)
+  const segments = collectActiveGuideSegments(view);
+  const marks = [];
+
+  // (a) 構造的な折りたたみ範囲ぶん。buildFoldGuideLinesと全く同じループ・同じ判定式
+  // (行自身のインデント幅は見ない)。この行・列に構造的な線を引いたことをcoveredByLineへ
+  // 記録し、(b)で二重に描かないようにする。
+  const coveredByLine = new Map(); // lineNumber -> Set(leftCol)
+  for (const block of view.viewportLineBlocks) {
+    const docLine = doc.lineAt(block.from);
+    const n = docLine.number;
+    for (const seg of segments) {
+      if (n < seg.fromLine || n > seg.toLine) continue;
+      if (!coveredByLine.has(n)) coveredByLine.set(n, new Set());
+      coveredByLine.get(n).add(seg.leftCol);
+      marks.push(Decoration.widget({
+        widget: new GuideLineWidget(seg.leftCol * charWidthPx, lineHeightPx, n === seg.toLine, seg.rangeFrom),
+        side: -1,
+      }).range(block.from));
+    }
+  }
+
+  // (b) 構造的な範囲でカバーされていない列を、行自身の実際のインデント幅から機械的に
+  // 埋める(旧indentGuideMarksと同じ考え方)。空行の前後にある直近の非空白行の行頭空白の
+  // 列数を求めるための小さなキャッシュ・探索。空行が連続する箇所で毎回ゼロから数え直さない
+  // よう、一度求めた列数は使い回す。探索は上限を設け(病的に長い空行の連続への対策)、
+  // 見つからなければガイド無し(0)扱いにする。
+  const widthCache = new Map();
+  const SCAN_CAP = 200;
+  function leadingCol(lineNo) {
+    let w = widthCache.get(lineNo);
+    if (w !== undefined) return w;
+    const text = doc.line(lineNo).text;
+    w = text.length === 0 ? null : lineIndentColumn(state, text); // null = この行自身も空行(さらに外へ探索)
+    widthCache.set(lineNo, w);
+    return w;
+  }
+  function prevNonBlankCol(lineNo) {
+    for (let n = lineNo - 1, i = 0; n >= 1 && i < SCAN_CAP; n--, i++) {
+      const w = leadingCol(n);
+      if (w !== null) return w;
+    }
+    return 0;
+  }
+  function nextNonBlankCol(lineNo) {
+    for (let n = lineNo + 1, i = 0; n <= doc.lines && i < SCAN_CAP; n++, i++) {
+      const w = leadingCol(n);
+      if (w !== null) return w;
+    }
+    return 0;
+  }
+
+  for (const { from, to } of view.visibleRanges) {
+    let pos = from;
+    while (pos <= to) {
+      const line = doc.lineAt(pos);
+      const col = line.length === 0
+        ? Math.min(prevNonBlankCol(line.number), nextNonBlankCol(line.number)) // 空行: 前後の小さいほうに合わせる
+        : lineIndentColumn(state, line.text);
+      const levelCount = Math.floor(col / indentSize);
+      const covered = coveredByLine.get(line.number);
+      for (let j = 0; j < levelCount; j++) {
+        const levelCol = j * indentSize;
+        if (covered && covered.has(levelCol)) continue; // (a)で既に描画済み(構造的な範囲)
+        // 汎用の目盛り線: 折りたたみ範囲に対応しないため、まっすぐ終わってよい(依頼③の
+        // 指定どおり)。elbow=false・rangeFrom=null(依頼⑤のホバー強調の対象外)。
+        marks.push(Decoration.widget({
+          widget: new GuideLineWidget(levelCol * charWidthPx, lineHeightPx, false, null),
+          side: -1,
+        }).range(line.from));
+      }
+      if (line.to + 1 > to) break;
+      pos = line.to + 1;
+    }
+  }
+  return Decoration.set(marks, true);
+}
+// foldGuideLinePluginと全く同じ理由でtabSize変化も明示的に検知する。
+const allIndentGuidePlugin = ViewPlugin.fromClass(class {
+  constructor(view) { this.decorations = buildAllIndentGuides(view); }
+  update(update) {
+    if (update.docChanged || update.viewportChanged || update.geometryChanged ||
+        update.startState.tabSize !== update.state.tabSize ||
+        foldedRanges(update.startState) !== foldedRanges(update.state) ||
+        syntaxTree(update.startState) !== syntaxTree(update.state)) {
+      this.decorations = buildAllIndentGuides(update.view);
     }
   }
 }, { decorations: (v) => v.decorations });
@@ -3446,10 +3556,10 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
   let codeIndentSizeValue = 4;
   // コードモードの折りたたみ(依頼: 「Graftのようにコードをたたむ」)。既定ON。
   let codeFoldingOn = true;
-  // コードモードのインデントガイド(縦線)。依頼③: 3択の設定にした(既定は"fold")。
+  // コードモードのインデントガイド(縦線)。3択の設定(既定は"fold")。
   //   "none" … 表示しない
-  //   "fold" … 折りたたみできる範囲のみ(マーカーの中心から最終行まで。既定)
-  //   "all"  … すべてのインデント(旧来の挙動。indentGuideMarks/indentGuideThemeを使う)
+  //   "fold" … 折りたたみできる範囲に対応する階層だけ(開始行から最終行のL字まで。既定)
+  //   "all"  … すべてのインデント階層
   // 旧実装は真偽値(codeIndentGuidesOn)で常時ON/OFFしか無かったが、ユーザーから
   // 「インデントごとに罫線する必要はないと考えているが設定で切り替えたほうがいいか」との
   // 意見を受け、設定項目として追加した(docs/設定項目一覧.md codeIndentGuides参照)。
@@ -3475,12 +3585,14 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
       ...(currentCodeLanguage === null ? [indentFoldService] : []),
     ] : []),
     bracketMatching(),
-    // 依頼③: allとfoldは排他(=二重線が出ないよう、どちらか一方だけを追加する)。
+    // allとfoldは排他(=二重線が出ないよう、どちらか一方だけを追加する。依頼②)。
     // foldモードはcodeFoldingOnも条件に含める: 折りたたみ機能自体がOFFのときに
     // 「マーカーの無い縦線」だけが残るのは見た目上不自然なため(マーカーが1つも出ないのに
-    // 縦線だけ生える状態を避ける)。
-    ...(codeIndentGuidesMode === "all" ? [indentGuideMarks, indentGuideTheme(codeIndentSizeValue)] : []),
-    ...(codeIndentGuidesMode === "fold" && codeFoldingOn ? [foldGuideLinePlugin, foldGuideLineTheme] : []),
+    // 縦線だけ生える状態を避ける)。allモードはcodeFoldingOnに関わらず表示する(旧実装から
+    // 変更なし。isRangeFolded/foldedRangesはcodeFolding()拡張が無くても安全に呼べるため、
+    // L字判定・ホバー強調も含めて問題なく動く)。
+    ...(codeIndentGuidesMode === "all" ? [allIndentGuidePlugin, guideLineTheme] : []),
+    ...(codeIndentGuidesMode === "fold" && codeFoldingOn ? [foldGuideLinePlugin, guideLineTheme] : []),
   ];
   // ソースコードモード(仕様書 V-05): 記法マーカーを隠さない生表示。docModeComp(構文ハイライト)は
   // 外さず、livePreviewComp(装飾・マーカー非表示)だけを空にすることで実現する。markdownモード
@@ -4074,6 +4186,22 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
       if (currentMode === "code") view.dispatch({ effects: codeModeExtrasComp.reconfigure(codeModeExtras()) });
     },
     isCodeFolding: () => codeFoldingOn,
+    // 依頼④: VS Codeのような折りたたみコマンド一式(表示メニュー・コマンドパレットから
+    // 呼べるようにする)。カーソル位置の折りたたみ/展開・すべて折りたたむ/展開は
+    // @codemirror/languageの標準コマンド(foldCode/unfoldCode/foldAll/unfoldAll、既存の
+    // Alt-[/Alt-]/Ctrl-Alt-[/Ctrl-Alt-]と全く同じ実体)をそのまま呼ぶ。これによりメニューと
+    // キーボードで結果が完全に一致することが保証される(実装を2つ持たない)。
+    foldAtCursor: () => foldCode(view),
+    unfoldAtCursor: () => unfoldCode(view),
+    foldAllRanges: () => foldAll(view),
+    unfoldAllRanges: () => unfoldAll(view),
+    // レベル1〜5で折りたたむ(VS Code Fold Level 1..5相当)。実装はdoFoldToLevel参照。
+    foldToLevel: (level) => doFoldToLevel(view, level),
+    // すべてのコメントブロックを折りたたむ(VS Code Fold All Block Comments相当)。
+    foldAllBlockComments: () => doFoldAllBlockComments(view),
+    // カーソル位置を再帰的に折りたたむ/展開する(VS Code Fold/Unfold Recursively相当)。
+    foldRecursivelyAtCursor: () => doFoldRecursivelyAtCursor(view),
+    unfoldRecursivelyAtCursor: () => doUnfoldRecursivelyAtCursor(view),
     // 依頼③: インデントガイドの表示モード("none"|"fold"|"all"、既定"fold")。
     // 不正な値は"fold"へ倒す(設定ファイルが手で壊されていても変な状態にならないよう、
     // AppSettings.cs側のValidateEnumと同じ方針)。
