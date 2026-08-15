@@ -84,7 +84,7 @@ const NAV_ITEMS = [
 const SEARCH_INDEX = {
   general: ["起動時の動作", "前回開いていたファイルを復元", "何も開かない", "指定したフォルダを開く", "起動フォルダ", "最後のウィンドウを閉じたら終了", "常駐", "起動を速く", "ステータスバー", "アウトライン", "折りたたみ", "最近使ったファイル", "ホイールで拡大縮小", "ツールチップ", "説明の詳しさ", "マウスカーソル", "ヘルプ"],
   file: ["自動保存", "保存の間隔", "未保存の下書き", "復元", "ファイル切替", "文字コード", "エンコード", "改行コード", "既定の拡張子"],
-  edit: ["インデント幅", "コードブロック", "折り返し", "Shift", "Tab", "自動ペアリング", "括弧", "引用符", "絵文字", "自動補完", "生表示", "コピー形式", "行コピー", "タイプライター", "スペルチェック", "自動修正", "読了時間", "読了速度", "自動判定", "拡張子ごとの編集モード", "カラープレビュー", "色のプレビュー", "色", "スウォッチ", "カラーピッカー"],
+  edit: ["インデント幅", "コードブロック", "折り返し", "Shift", "Tab", "自動ペアリング", "括弧", "引用符", "絵文字", "自動補完", "生表示", "コピー形式", "行コピー", "タイプライター", "スペルチェック", "自動修正", "読了時間", "読了速度", "自動判定", "拡張子ごとの編集モード", "カラープレビュー", "色のプレビュー", "色", "スウォッチ", "カラーピッカー", "現在の行", "現在行", "アクティブ行", "強調表示", "行番号ガター"],
   markdown: ["インライン数式", "数式", "上付き", "下付き", "ハイライト", "作図", "ダイアグラム", "自動リンク", "Callouts", "厳格モード", "見出しの記法", "箇条書き", "リスト記号", "番号付きリスト", "行番号", "自動採番", "アウトラインの階層", "コード言語", "空白", "改行", "スマート引用符", "スマートダッシュ", "句読点"],
   image: ["画像の挿入", "画像フォルダ", "ローカル画像", "オンライン画像", "相対パス", "URLエスケープ"],
   export: ["用紙サイズ", "余白", "マージン", "ヘッダー", "フッター", "ページ区切り", "アウトライン", "書き出し先フォルダ", "書き出し後", "保存ダイアログ", "数式の書き出し", "YAML", "フロントマター", "印刷"],
@@ -140,6 +140,7 @@ const FIELD_DEFS = {
   codeFoldingEnabled: { kind: "bool", def: true },
   codeIndentGuides: { kind: "enum", values: ["none", "fold", "all"], def: "fold" },
   codeAutoWrap: { kind: "bool", def: true },
+  codeActiveLineHighlight: { kind: "bool", def: true },
   colorPreviewInCode: { kind: "bool", def: true },
   shiftTabAutoIndent: { kind: "bool", def: false },
   autoPairing: { kind: "bool", def: true },
@@ -1214,6 +1215,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
         ${fieldCheckbox("codeFoldingEnabled", "コードモードの折りたたみ", "関数・オブジェクト・配列などの行番号の左に折りたたみマーカーを表示します")}
         ${fieldSelect("codeIndentGuides", "インデントガイド(縦線)", [["none", "表示しない"], ["fold", "折りたたみできる範囲のみ"], ["all", "すべてのインデント"]], "コードモードで、インデントの深さを示す縦線をどこまで表示するかです")}
         ${fieldCheckbox("codeAutoWrap", "コードブロックの長い行を折り返し")}
+        ${fieldCheckbox("codeActiveLineHighlight", "現在の行を強調表示", "カーソルのある行を本文・行番号ガターの両方で背景色を淡く変えて示します。選択範囲があるときは表示しません")}
         ${fieldCheckbox("colorPreviewInCode", "コード中の色をプレビュー表示", "16進・rgb・hsl等の色指定にスウォッチと文字色を付けます")}
         ${fieldCheckbox("shiftTabAutoIndent", "Shift+Tabでインデントを解除")}
         <label class="settings-checkbox-row" data-tip="strictMode"><input type="checkbox" data-field="strictMode"><span class="settings-checkbox-title">厳格モード<span class="settings-field-desc">見出しやリスト記号の記法を厳密に解釈します</span></span></label>

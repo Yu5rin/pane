@@ -530,9 +530,17 @@ internal static class ThemeFolderService
         */
         /* ガター全体の背景・右の区切り線と、行番号自体の文字色が変わります。 */
 
-        /* ---- 現在行のハイライトについて ----
-           Paneには、カーソルのある行を背景色で強調する機能が今のところありません
-           (該当するクラス・実装が存在しません)。ここに書ける実例はありません。 */
+        /* ---- 現在行のハイライト(カーソルのある行を背景色で強調する機能) ---- */
+        /*
+        #cm-host.mode-code .cm-line.cm-active-line { background-color: var(--accent-soft); }
+        #cm-host.mode-code .cm-gutterElement.cm-active-line-gutter { background-color: var(--accent-soft); }
+        */
+        /* カーソルのある行の本文・行番号ガター両方の背景が変わります(既定は
+           --active-line-bgという専用の変数を使っており、上の変数一覧には出てきませんが、
+           #cm-hostを頭に付けたこの2行のセレクタで直接上書きできます)。設定「現在の行を
+           強調表示」がOFFのときはこれらのクラス自体が付かないため、ここを書き換えても
+           見た目は変わりません。選択範囲があるカーソルの行にも付きません(VS Codeと同じ、
+           選択のハイライトと現在行の帯が重ならないようにするため)。 */
 
         /* ---- インデントガイド(ネストの深さを示す縦線) ----
            注意: この線はCodeMirrorのEditorView.theme()という仕組みでJS側から動的に
