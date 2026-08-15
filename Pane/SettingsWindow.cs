@@ -68,6 +68,20 @@ internal sealed class SettingsWindow : Form
     /// Closeを呼ぶ。</summary>
     private bool _realCloseAllowed;
 
+    /// <summary>不具合修正(事前生成が全く効いていなかった件): WebView2環境の取得〜Navigate呼び出し
+    /// までを行う<see cref="InitializeWebViewCoreAsync"/>のTask。<see cref="Prewarm"/>(事前生成)と
+    /// <see cref="OnLoadAsync"/>(Loadイベント。事前生成が間に合わなかった場合のフォールバック)、
+    /// さらに保険として<see cref="Reveal"/>からも呼ばれうるため、最初の呼び出しでこのフィールドに
+    /// Taskを確定させ(<see cref="EnsureWebViewInitializedAsync"/>)、以後の呼び出しは同じTaskを
+    /// 返すだけにして二重実行(WebMessageReceivedの二重購読・Navigateの二重呼び出し)を防ぐ。
+    /// 「Prewarmの直後にユーザーが設定を開いてShow()→Loadが発火する」という競合が実機で
+    /// 起こりうることへの対策。</summary>
+    private Task? _initializeWebViewTask;
+    /// <summary>WebView2の初期化(Navigate呼び出しまで)が完了したかどうか。<see cref="Reveal"/>が
+    /// 「事前生成の初期化がその時点で終わっていたか」をログに残すために参照する
+    /// (<see cref="IsRevealed"/>は「画面に実際に表示した」後の値のため別物)。</summary>
+    private bool _webViewInitialized;
+
     /// <summary>初期描画(initial-render-ready受信 or フォールバック)が完了済みかどうか。
     /// <see cref="PaneApplicationContext.OpenSettingsWindow"/>が、事前生成が間に合っていたかを
     /// ログに残すために参照する。</summary>
@@ -149,15 +163,41 @@ internal sealed class SettingsWindow : Form
         Close();
     }
 
-    /// <summary>事前生成(裏読み込み)用。Show()を呼ばずにネイティブハンドルを生成し、
-    /// Loadイベント(→OnLoadAsync、WebView2初期化・Navigateまで)を開始させる。
-    /// Formは通常Show()で初めてハンドルが作られてLoadが発火するが、CreateControl()を
-    /// 直接呼ぶことでVisible=falseのまま(画面には一切出さずに)同じパイプラインを
-    /// 裏で進められる。実際に見せる時は<see cref="Reveal"/>がShow()を呼ぶだけで済む。</summary>
+    /// <summary>事前生成(裏読み込み)用。Show()を呼ばずにWebView2の初期化(環境取得〜Navigateまで)を
+    /// 直接始める。
+    ///
+    /// 不具合修正(実機ログで発覚): 従来はCreateControl()を呼ぶだけだった。CreateControl()は
+    /// ネイティブハンドルを作るだけで、WinFormsのForm.LoadイベントはShow()(正確にはSetVisibleCore
+    /// 経由の初回表示)でしか発火しないため、OnLoadAsync(実際のWebView2初期化・Navigateの中身)は
+    /// 一切呼ばれておらず、事前生成は名前だけで実質何もしていなかった(実機ログの
+    /// 「WebView2初期化完了(158922ms)」という、インスタンス生成からの異常に大きい経過時間が
+    /// その証拠。ユーザーが実際に設定を開いた瞬間まで初期化そのものが始まっていなかった)。
+    /// 対策として、Loadイベントに頼らずここから直接<see cref="EnsureWebViewInitializedAsync"/>
+    /// (中身はOnLoadAsyncから切り出した<see cref="InitializeWebViewCoreAsync"/>)を呼ぶ。
+    /// CreateControl()自体は、WebView2の初期化にネイティブハンドルが必要なため(このコントロールは
+    /// 親フォームにAddControlsで追加済み)残す。
+    ///
+    /// 非同期だがasync voidにはしない: 呼び出し元の<see cref="PaneApplicationContext.PregenerateSettingsWindow"/>は
+    /// 同期的なtry/catchで失敗時にフォールバックする作りになっており、その前提を崩さないため
+    /// (async voidの例外はtry/catchで捕まえられずアプリを落としかねない)。代わりに戻り値のTaskへ
+    /// ContinueWithで自前のログ出力を付け、例外はそこで握りつぶす(失敗しても次にユーザーが設定を
+    /// 開いた際、Reveal経由の保険が同じEnsureWebViewInitializedAsyncを呼び直すだけで済む)。</summary>
     public void Prewarm()
     {
-        Logger.Write("SettingsWindow: 事前生成(Prewarm)開始 - Show()なしでLoadパイプラインを開始する");
-        CreateControl();
+        Logger.Write("SettingsWindow: 事前生成(Prewarm)開始 - Show()を待たずに初期化を始める");
+        CreateControl(); // WebView2の初期化にはネイティブハンドルが必要なため、Show()を呼ばずに先に作る
+        Logger.Write("SettingsWindow: 事前生成で初期化を開始した");
+        _ = EnsureWebViewInitializedAsync().ContinueWith(t =>
+        {
+            if (t.IsFaulted)
+            {
+                Logger.WriteException("SettingsWindow: 事前生成での初期化に失敗(次にユーザーが設定を開いた際、Reveal経由の保険が再試行する)", t.Exception!);
+            }
+            else
+            {
+                Logger.Write($"SettingsWindow: 事前生成での初期化が完了した({_stopwatch.ElapsedMilliseconds}ms)");
+            }
+        });
     }
 
     /// <summary>ユーザーが実際に設定を開いた時に呼ぶ。事前生成・前回のインスタンスを
@@ -167,7 +207,13 @@ internal sealed class SettingsWindow : Form
     /// (Activateのみ、旧来の「既に開いているため前面へ」と同じ挙動)。実際に非表示状態
     /// から見せ直す場合だけ、呼び出し元(owner。前回生成時とは別のウィンドウの可能性がある)に
     /// 合わせて位置・サイズを計算し直し、隠れている間に他の本体ウィンドウ経由で変わった
-    /// 可能性がある項目(最近使ったファイル等)を最新化する。</summary>
+    /// 可能性がある項目(最近使ったファイル等)を最新化する。
+    ///
+    /// <see cref="PaneApplicationContext.OpenSettingsWindow"/>は、事前生成済みインスタンスの
+    /// 再表示だけでなく、事前生成が間に合わず新規作成した直後の初回表示もここに統一している
+    /// (どちらも「これからユーザーに見せる」という同じ意味のため)。そのため、初期化の保険
+    /// (<see cref="EnsureWebViewInitializedAsync"/>)とフォールバック表示タイマーの開始は
+    /// どちらもここに置く。</summary>
     public void Reveal(Form? owner)
     {
         bool wasHidden = !Visible;
@@ -180,6 +226,24 @@ internal sealed class SettingsWindow : Form
                 SettingsBridge.PostSettingsSnapshot(PostToWeb);
             }
         }
+        // 保険: 通常はPrewarm(事前生成)またはOnLoadAsync(Loadイベント)が既に初期化を始めている
+        // はずだが、両方とも間に合わなかった/取りこぼした場合に備え、ここでも同じ二重実行防止
+        // つきのメソッドを呼んでおく(EnsureWebViewInitializedAsyncは2回目以降は何もしない)。
+        bool wasInitialized = _webViewInitialized;
+        _ = EnsureWebViewInitializedAsync();
+        Logger.Write($"SettingsWindow: Reveal時点で初期化{(wasInitialized ? "済みだった" : "まだだった")}");
+
+        // 起動時の白フラッシュ対策(新方式)のフォールバック表示タイマー。
+        // 不具合修正: 以前はOnLoadAsync(=事前生成の時点で発火していた)でタイマーを開始していた
+        // ため、ユーザーが実際に設定を開く前の裏での事前生成の間に3秒が経過してしまい、
+        // 「initial-render-readyを待たずに強制表示」というフォールバックが事前生成の裏側で
+        // 意味もなく発動していた(事前生成中は誰も見ていないのでフォールバック自体は無害だが、
+        // 本来の目的である「表示が遅れた時の救済」としては実際にユーザーへ見せようとした瞬間から
+        // 数え直す必要がある)。このタイマーは「ユーザーに見せようとしてから」数えるべきものなので
+        // ここ(実際にShow()する直前)で開始する。既に初期描画が完了済み(_webViewRevealed)なら
+        // 二度と回す必要が無い。
+        if (!_webViewRevealed) _webViewRevealFallbackTimer.Start();
+
         if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
         Show();
         Activate();
@@ -262,12 +326,37 @@ internal sealed class SettingsWindow : Form
         WindowChrome.ApplyTheme(Handle, isDarkProp.GetBoolean());
     }
 
-    private async void OnLoadAsync(object? sender, EventArgs e)
+    /// <summary>Loadイベント(初回Show()時に1回だけ発火)の受け口。不具合修正: 以前はWebView2の
+    /// 初期化本体がここに直接書かれており、事前生成(<see cref="Prewarm"/>)からはLoadが発火しない
+    /// ため実質ここが唯一の初期化経路になっていた(=事前生成が効いていなかった原因そのもの)。
+    /// 中身は<see cref="InitializeWebViewCoreAsync"/>へ切り出し、ここは「事前生成が間に合わな
+    /// かった場合のフォールバックとして、まだ初期化していなければ同じ処理を呼ぶ」だけの薄い
+    /// 受け口にする(<see cref="EnsureWebViewInitializedAsync"/>が二重実行を防ぐため、事前生成が
+    /// 先に始まっていた場合はここでは何も新しく走らない)。
+    /// フォールバック表示タイマー(<see cref="_webViewRevealFallbackTimer"/>)の開始はここでは
+    /// 行わない(<see cref="Reveal"/>側のコメント参照。事前生成の時点で回すとユーザーが実際に
+    /// 開く前にタイマーが切れてしまうため)。</summary>
+    private void OnLoadAsync(object? sender, EventArgs e)
     {
-        Logger.Write("SettingsWindow.OnLoadAsync開始");
-        // フォールバックタイマーはここから数える(MainForm.OnLoadAsyncと同じ考え方)。
-        _webViewRevealFallbackTimer.Start();
+        bool alreadyStarted = _initializeWebViewTask is not null;
+        Logger.Write($"SettingsWindow.OnLoadAsync開始 (事前生成{(alreadyStarted ? "が先に初期化を始めていた" : "はまだ始まっていなかった → ここから初期化する")})");
+        _ = EnsureWebViewInitializedAsync().ContinueWith(
+            t => Logger.WriteException("SettingsWindow: OnLoadAsync経由の初期化に失敗", t.Exception!),
+            TaskContinuationOptions.OnlyOnFaulted);
+    }
 
+    /// <summary>二重実行を防ぎつつ<see cref="InitializeWebViewCoreAsync"/>を呼ぶ。
+    /// <see cref="Prewarm"/>・<see cref="OnLoadAsync"/>・<see cref="Reveal"/>の保険、いずれから
+    /// 呼ばれても実際に初期化処理が走るのは最初の1回だけで、2回目以降は同じTaskを返して
+    /// 結果を待ち合わせるだけになる(nullコアレシング代入によるLazy初期化と同じ考え方)。</summary>
+    private Task EnsureWebViewInitializedAsync() => _initializeWebViewTask ??= InitializeWebViewCoreAsync();
+
+    /// <summary>WebView2環境の取得〜Navigate呼び出しまでの本体。旧OnLoadAsyncの中身をそのまま
+    /// 切り出したもの(呼び出しタイミングだけを<see cref="EnsureWebViewInitializedAsync"/>経由に
+    /// 変更した。処理の中身自体は変えていない)。直接は呼ばず、必ず
+    /// <see cref="EnsureWebViewInitializedAsync"/>経由で呼ぶこと。</summary>
+    private async Task InitializeWebViewCoreAsync()
+    {
         // WebView2環境はMainForm側で生成・キャッシュされたものを再利用する(プロセス全体で1つ)。
         // 既に(preload起動・別ウィンドウ経由で)生成済みならここは即座に返る。
         CoreWebView2Environment env = await MainForm.EnsureEnvironmentAsync();
@@ -298,6 +387,8 @@ internal sealed class SettingsWindow : Form
             VirtualHostName, distPath, CoreWebView2HostResourceAccessKind.Allow);
         _webView.CoreWebView2.Navigate($"https://{VirtualHostName}/settings-window.html");
         Logger.Write($"SettingsWindow: Navigate呼び出し ({_stopwatch.ElapsedMilliseconds}ms)");
+
+        _webViewInitialized = true;
     }
 
     private void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)

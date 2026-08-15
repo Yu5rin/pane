@@ -345,20 +345,21 @@ internal sealed class PaneApplicationContext : ApplicationContext
     public void OpenSettingsWindow(Form owner)
     {
         var sw = Stopwatch.StartNew();
-        if (_settingsWindow is { IsDisposed: false } existing)
+        bool isNew = _settingsWindow is not { IsDisposed: false };
+        if (isNew)
         {
-            // 既に開いている(前面に出すだけ)か、事前生成済み/前回閉じた(非表示化されただけ)の
-            // インスタンスが残っているかのどちらか。Revealはどちらのケースも同じ経路で扱える
-            // (既に表示中でもShow()/Activate()は無害)。
-            existing.Reveal(owner);
-            Logger.Write($"OpenSettingsWindow: 既存インスタンスを表示({(existing.IsRevealed ? "事前生成/前回分の読み込み完了済み" : "まだ読み込み中")}, {sw.ElapsedMilliseconds}ms)");
-            return;
+            _settingsWindow = new SettingsWindow(owner, BroadcastSettingsChanged);
+            _settingsWindow.FormClosed += (_, _) => _settingsWindow = null;
         }
-
-        _settingsWindow = new SettingsWindow(owner, BroadcastSettingsChanged);
-        _settingsWindow.FormClosed += (_, _) => _settingsWindow = null;
-        _settingsWindow.Show();
-        Logger.Write($"OpenSettingsWindow: 新規に開いた(事前生成は間に合っていなかった, {sw.ElapsedMilliseconds}ms)");
+        // 不具合修正(事前生成が効いていなかった件と合わせて整理): 新規作成直後の初回表示も、
+        // 既存インスタンスの再表示も、どちらも「これからユーザーに見せる」という同じ意味のため
+        // Revealへ統一する。以前は新規作成時だけShow()を直接呼んでいたが、フォールバック表示
+        // タイマーの開始をReveal側に一本化した(SettingsWindow.Revealのコメント参照)ため、
+        // ここでもRevealを通さないとそのタイマーが一生始動しない新規作成パスができてしまう。
+        _settingsWindow!.Reveal(owner);
+        Logger.Write(isNew
+            ? $"OpenSettingsWindow: 新規に開いた(事前生成は間に合っていなかった, {sw.ElapsedMilliseconds}ms)"
+            : $"OpenSettingsWindow: 既存インスタンスを表示({(_settingsWindow.IsRevealed ? "事前生成/前回分の読み込み完了済み" : "まだ読み込み中")}, {sw.ElapsedMilliseconds}ms)");
     }
 
     /// <summary>

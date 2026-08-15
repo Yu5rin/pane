@@ -1169,8 +1169,15 @@ html[data-theme="dark"] .cm-search-hit { background: rgba(61,193,181,.25); color
 :root[data-editor-mode="markdown"] #cm-host .cm-content {
   max-width: var(--editor-max-width, none);
 }
-/* コードモードは行番号の余白があるので、本文ほど左を空けない。 */
-#cm-host.mode-code .cm-content { padding-left: 12px !important; padding-right: 12px !important; }
+/* コードモードは行番号の余白があるので、本文ほど左を空けない。
+   不具合修正(実機で発見): 左余白は以前12pxだったが、折りたたみマーカー(editor.js
+   FOLD_MARKER_SIZE=15px)はインデント0の行で最大15px左(マーカーの右端をコード開始位置に
+   揃えるため)へはみ出す構造になっている。12px<15pxのため、インデントの無い行のマーカーが
+   3px(=15-12)だけ本文エリアの左端を越え、行番号ガターとの区切り線に食い込んでいた。
+   マーカー幅15pxに少し余裕(5px)を足した20pxへ広げ、マーカーが常に本文エリア内へ収まる
+   ようにする(右余白は変更しない)。念のための保険(設定で極端に狭い値へ変更された場合の
+   クランプ)はeditor.js側のbuildFoldOpenMarkers/FoldOpenMarkerWidgetに別途入れてある。 */
+#cm-host.mode-code .cm-content { padding-left: 20px !important; padding-right: 12px !important; }
 
 /* ===== コード中のカラープレビュー・カラーピッカー(docs/カラープレビュー仕様.md) =====
    スウォッチ・カラーピッカーパネルとも、色は--paper/--ink/--accent等の既存トークンから
