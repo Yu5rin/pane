@@ -80,6 +80,13 @@ html[data-theme="light"][data-light-theme="sepia"] {
   --code-prop: #7A4A1E;
   --code-op: var(--ink);
   --code-regex: #A33B4E;
+  /* 依頼(ホバー強調色をテーマごとに個別実測): sepiaのvar(--accent)(#A9762C、琥珀色)を
+     そのまま使うと、本文中のリンク色・メニューのアクセントと同じ色になり「強調されて
+     いる線」が地の配色に紛れやすい(実測コントラスト比も3.36と9テーマ中もっとも低い)。
+     このテーマの--code-kw(キーワード色、#8B3A2B、深いテラコッタ)を転用する。
+     紙色(#F4ECD8)に対しコントラスト比6.51、通常線--rule(#E3D5B8、淡い黄褐色)に対して
+     色相・明度ともはっきり異なる(コントラスト比5.29)ため、強調中の線だけが際立って見える。 */
+  --fold-guide-hover: #8B3A2B;
 }
 
 /* github: GitHub風。白背景+青系アクセント。
@@ -132,6 +139,13 @@ html[data-theme="light"][data-light-theme="github"] {
   --code-prop: #005CC5;
   --code-op: var(--ink);
   --code-regex: #B31D28;
+  /* 依頼(ホバー強調色をテーマごとに個別実測): githubのvar(--accent)(#0969DA)は
+     GitHub本体のリンク色そのものであり、本文中にリンクがあると同じ色の線が2種類の
+     意味(リンク/強調中のガイド線)を持つ紛らわしさが生じうる。GitHub Primerの実際の
+     UI色である「マージ済みPR」等に使うdone.emphasis相当の紫(#6639BA)を転用する。
+     白地(#FFFFFF)に対しコントラスト比7.34、通常線--rule(#D0D7DE)に対しても
+     はっきり異なる(コントラスト比5.06)ため、リンクと混同せずに強調線だと分かる。 */
+  --fold-guide-hover: #6639BA;
 }
 
 /* solarized-light: Solarized(Ethan Schoonover配色)のライト側。
@@ -189,6 +203,13 @@ html[data-theme="light"][data-light-theme="solarized-light"] {
   --code-prop: #1D689E;
   --code-op: var(--ink);
   --code-regex: #A52623;
+  /* 依頼(ホバー強調色をテーマごとに個別実測): solarized-lightのvar(--accent)(#268BD2、
+     Solarizedのblue)は実測コントラスト比3.41と9テーマ中もっとも低い部類で、本文の
+     リンク色とも同じ色になり紛らわしい。同じ画面内の--code-regex(赤、#A52623)を
+     転用する(公式vim-colors-solarizedのアクセント8色のうち、blue以外で最も
+     目立つ暖色)。紙色(#FDF6E3)に対しコントラスト比6.71、通常線--rule(#D3CBB7、
+     淡い黄褐色)に対してもはっきり異なる(コントラスト比4.48)。 */
+  --fold-guide-hover: #A52623;
 }
 
 /* ---- ダーク用プリセット ---- */
@@ -242,6 +263,13 @@ html[data-theme="dark"][data-dark-theme="nord"] {
   --code-prop: #D8DEE9;
   --code-op: #81A1C1;
   --code-regex: #CB7D85;
+  /* 依頼(ホバー強調色をテーマごとに個別実測): nordのvar(--accent)(#88C0D0、nord8の
+     frost cyan)は--code-fnと同色で、コード中の関数名と紛れる懸念がある。Nord公式
+     パレット(nordtheme.com)のnord13(aurora yellow、#EBCB8B)を転用する。寒色系で
+     まとめられたnordの中で唯一の暖色差し色となり視認性が高い。本文(#2E3440)に対し
+     コントラスト比8.00、通常線--rule(#434C5E)に対してもはっきり異なる
+     (コントラスト比5.52)。 */
+  --fold-guide-hover: #EBCB8B;
 }
 
 /* dracula: Dracula配色。
@@ -298,6 +326,12 @@ html[data-theme="dark"][data-dark-theme="dracula"] {
   --code-prop: #8BE9FD;
   --code-op: #FF79C6;
   --code-regex: #FF5555;
+  /* 依頼(ホバー強調色をテーマごとに個別実測): draculaのvar(--accent)(#BD93F9、
+     Purple)は--code-num(数値・定数)と同色で紛れる懸念がある。Dracula公式
+     Specification(spec.draculatheme.com)のGreen(#50FA7B)を転用する。Dracula
+     配色の中でもっとも彩度・輝度が高く、9テーマ中最大のコントラスト比が出る
+     (本文#282A36に対し10.38、通常線--rule#44475Aに対しても6.67とはっきり異なる)。 */
+  --fold-guide-hover: #50FA7B;
 }
 
 /* solarized-dark: Solarizedのダーク側。
@@ -356,6 +390,14 @@ html[data-theme="dark"][data-dark-theme="solarized-dark"] {
   --code-prop: #268BD2;
   --code-op: var(--ink);
   --code-regex: #E56563;
+  /* 依頼(ホバー強調色をテーマごとに個別実測): solarized-darkのvar(--accent)
+     (#268BD2、Solarized blue)は本文のリンク色と同じ色になるうえ、実測コントラスト比
+     4.08と9テーマ中で低い部類。公式パレットのmagenta(#D33682)を試したが本文
+     (#002B36)に対し3.30しか出ずAA非text基準の3.0をわずかに超える程度で不十分
+     だったため、色相はそのままに白を寄せて明るくした値(#F092C0、solarized-light側の
+     暗さ補正と対になる「ダーク側は明るさ補正」)を採用する。本文に対しコントラスト比
+     6.85、通常線--rule(#0A3C4A)に対してもはっきり異なる(コントラスト比5.45)。 */
+  --fold-guide-hover: #F092C0;
 }
 
 /* night: Typoraの「Night」テーマ移植(ユーザー要望、id/ラベルは実機フィードバックで
@@ -520,4 +562,11 @@ html[data-theme="dark"][data-dark-theme="night"] {
   --code-prop: #8FA8C4;
   --code-op: var(--ink);
   --code-regex: #DF9090;
+  /* 依頼(ホバー強調色をテーマごとに個別実測): nightのvar(--accent)(#6dc1e7)は
+     --code-kw/--code-kw2(キーワード色)と同色で紛れる懸念がある。このテーマの
+     設計方針「霧がかった寒色グレーの中に暖色を一色差す」(上のコメント参照)に
+     沿って、--code-fn(金、#D7BA7D)をさらに白へ寄せて明るくした値(#E4CC9A)を
+     採用する。本文(#363B40)に対しコントラスト比7.22、通常線--rule(#555555、
+     中間グレー)に対してもはっきり異なる(コントラスト比4.76)。 */
+  --fold-guide-hover: #E4CC9A;
 }
