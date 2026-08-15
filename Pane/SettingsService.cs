@@ -34,16 +34,25 @@ internal static class SettingsService
 
     public static AppSettings Load()
     {
+        AppSettings settings;
         try
         {
             string json = File.ReadAllText(SettingsPath);
-            return JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
+            settings = JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
             // 初回起動(ファイル未作成)や破損時は既定値から始める。
-            return new AppSettings();
+            settings = new AppSettings();
         }
+        // 【実バグ③の修正】Load()はアプリ内の至る所(MainForm/SettingsWindow/SettingsBridge等)
+        // から都度呼ばれ、ここが「設定ファイルをデシリアライズした直後・アプリが使い始める前」の
+        // 唯一の共通の入口になる。旧・EditorPaddingXからの移行はGetEffectiveEditorPaddingLeft/Right側の
+        // 毎回判定ではなく、ここで一度だけ確定させる(AppSettings.MigrateEditorPadding参照。
+        // 「新規AppSettings()」のフォールバック経路でも呼んでおく必要がある。既定値どうしなら
+        // 判定は成立せず単にEditorPaddingX=32を再代入するだけなので無害)。
+        settings.MigrateEditorPadding();
+        return settings;
     }
 
     public static void Save(AppSettings settings)

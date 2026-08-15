@@ -6,7 +6,7 @@ import { EditorState, Compartment, StateEffect, StateField, Prec, Transaction } 
 import { markdown } from "@codemirror/lang-markdown";
 import { Strikethrough, Table, Superscript, Subscript, Emoji, Autolink } from "@lezer/markdown";
 import { defaultKeymap, history, historyKeymap, indentWithTab, insertNewline, undo, redo, moveLineUp, moveLineDown, copyLineDown, deleteLine, indentLess, indentSelection, selectAll } from "@codemirror/commands";
-import { syntaxTree, syntaxHighlighting, HighlightStyle, LanguageDescription, bracketMatching, indentUnit, foldCode, unfoldCode, foldAll, unfoldAll, codeFolding, foldNodeProp, foldedRanges, foldEffect, unfoldEffect } from "@codemirror/language";
+import { syntaxTree, syntaxHighlighting, HighlightStyle, LanguageDescription, bracketMatching, indentUnit, foldCode, unfoldCode, foldAll, unfoldAll, codeFolding, foldNodeProp, foldedRanges, foldEffect, unfoldEffect, language, foldService } from "@codemirror/language";
 import { autocompletion, closeBrackets, closeBracketsKeymap, startCompletion } from "@codemirror/autocomplete";
 import { search, setSearchQuery, getSearchQuery, SearchQuery, findNext, findPrevious, replaceNext, replaceAll } from "@codemirror/search";
 import { tags as t } from "@lezer/highlight";
@@ -1248,6 +1248,17 @@ function insertSoftBreak(view) {
 //     空白ではなく、正しいマーカー文字を見せる必要があるため)。
 //   ・その階層がリストで、かつそれより深い階層がまだ残る(=最深部ではない)場合は、
 //     幅ぶんの空白にする(リストの浅い階層は常に空白でしか表現されないため)。
+// 不具合修正(実機のPlaywrightで再現・特定): CommonMarkの遅延継続(lazy continuation)により、
+// 引用直後の行は">"が無くても引用パラグラフの続きとみなされ、syntaxTree().resolveInner()は
+// Blockquoteを返す。この場合カーソル行には実際にはマーカー文字("> "等)が物理的に存在しない。
+// 旧実装は「各階層の幅の合計」だけを求め、カーソル行の「合計幅より後ろが空白のみ」かどうか
+// しか見ておらず、先頭の幅ぶんの中身そのものを一切検証していなかった。そのため引用から
+// 抜けた直後の行に、ちょうどマーカー幅と同じ文字数(例: "> "と同じ2文字の"ab")を打つと、
+// 「幅の合計(2) == 文字数(2)、その後ろ(空文字列)は空白のみ」を満たしてしまい、本文の
+// "ab"をマーカーだと誤認して(handleEnterExitEmptyMarkup側で)消してしまっていた。
+// 修正: 幅を足し合わせて位置を決めるのではなく、カーソル行の先頭から各階層を実際に
+// 「消費」していく方式にする。消費できなければ(=その階層の実際のマーカーがカーソル行に
+// 存在しなければ)対象外として通常の処理に委ねる。
 function markupContext(state, pos) {
   const nodes = [];
   for (let cur = syntaxTree(state).resolveInner(pos, -1); cur; cur = cur.parent) {
@@ -1257,28 +1268,52 @@ function markupContext(state, pos) {
   if (!nodes.length) return [];
   nodes.reverse(); // 外側→内側の順にする
   const doc = state.doc;
-  const infos = []; // { kind: "quote"|"list", width, marker(そのノード自身の行から実測した文字列) }
+  const line = state.doc.lineAt(pos); // カーソル行。ここから実際に消費していく(幅の合算はしない)
+  let consumedInLine = 0; // カーソル行の先頭から、ここまでに消費した文字数
+  const infos = []; // { kind: "quote"|"list", width(カーソル行から実測), marker }
   for (const node of nodes) {
+    // 種類(引用/リスト)と、そのノードが定義する「幅」・マーカー文字列は、従来どおり
+    // そのノード自身が最初に現れた行(node.from)で実測する(リストの浅い階層は自分の行には
+    // 空白としてしか現れないため、これは変えられない。@codemirror/lang-markdown内部の
+    // getContext()と同じ考え方)。
     const nodeLine = doc.lineAt(node.from);
     const tail = nodeLine.text.slice(node.from - nodeLine.from);
-    let m;
+    let m, kind, width, marker;
     if (node.name === "Blockquote" && (m = /^ {0,3}>( ?)/.exec(tail))) {
-      infos.push({ kind: "quote", width: m[0].length, marker: m[0] });
+      kind = "quote"; width = m[0].length; marker = m[0];
     } else if (node.name === "ListItem" && node.parent?.name === "OrderedList" && (m = /^( *)\d+[.)]( *)/.exec(tail))) {
-      infos.push({ kind: "list", width: m[0].length, marker: m[0] });
+      kind = "list"; width = m[0].length; marker = m[0];
     } else if (node.name === "ListItem" && node.parent?.name === "BulletList" && (m = /^( *)[-+*]( {1,4}\[[ xX]\])?( +)/.exec(tail))) {
-      infos.push({ kind: "list", width: m[0].length, marker: m[0] });
+      kind = "list"; width = m[0].length; marker = m[0];
     } else {
       return []; // 想定外の構造(パーサーの遅延継続等) → 対象外、通常の処理に委ねる
     }
+    // ここがバグ①の本体: カーソル行の残りから、この階層ぶんを実際に消費できるか検証する。
+    const remaining = line.text.slice(consumedInLine);
+    if (kind === "quote") {
+      // 引用は深さに関わらず常に実在する">"文字でなければならない。遅延継続の行にはこれが
+      // 存在しない(単なる本文が続くだけ)ため、マッチしなければここで弾く
+      // (=遅延継続の行はここでreturn []になり、以降は通常のEnter処理に委ねられる)。
+      const qm = /^ {0,3}>( ?)/.exec(remaining);
+      if (!qm) return [];
+      // 1段浅くした後に表示する文字列も、カーソル行から実測した実物を使う(ネストした
+      // 引用で外側と内側の"> "の実際の並びがそのまま欲しいため)。
+      infos.push({ kind, width: qm[0].length, marker: qm[0] });
+      consumedInLine += qm[0].length;
+    } else {
+      // リストは「その幅ぶんが空白のみ」または「そのノードから実測したマーカー文字列そのもの」
+      // のいずれかであることを要求する(リストの浅い階層はマーカー文字を再掲せず空白でしか
+      // 現れないため)。幅ぶんの文字がカーソル行に残っていない場合も対象外。
+      const chunk = remaining.slice(0, width);
+      if (chunk.length < width) return [];
+      if (chunk !== marker && !/^ *$/.test(chunk)) return [];
+      infos.push({ kind, width, marker });
+      consumedInLine += width;
+    }
   }
-  // カーソルのある行が「幅の合計ぶんのマーカー(またはその空白)だけで、中身が無い」ことを
-  // 確認する。ネストしたリストの浅い階層は空白としてしか現れないため、内容を厳密に
-  // 突き合わせるのではなく幅の合計とその後が空白のみであることだけを見る。
-  const totalWidth = infos.reduce((n, t) => n + t.width, 0);
-  const line = doc.lineAt(pos);
-  if (totalWidth > line.text.length) return [];
-  if (line.text.slice(totalWidth).trim() !== "") return [];
+  // すべての階層を消費し終えた残りが空白のみでなければ対象外(本文が続く通常の継続行、
+  // または遅延継続の本文行なので、ここでは扱わず通常の処理に委ねる)。
+  if (line.text.slice(consumedInLine).trim() !== "") return [];
   return infos;
 }
 // 1段浅くした後の行の先頭に置くべき文字列を組み立てる(markupContext()のコメント参照)。
@@ -1303,9 +1338,23 @@ function handleEnterExitEmptyMarkup(view) {
   const totalWidth = context.reduce((n, t) => n + t.width, 0);
   if (sel.from - line.from < totalWidth) return false; // カーソルがまだマーカーの途中
   const newPrefix = renderMarkupPrefix(context.slice(0, -1)); // 最も内側の階層を1つ取り除く
+  // 不具合修正(実機のPlaywrightで再現・特定): 引用から完全に抜ける(=最も内側の階層が
+  // 引用で、1段浅くした結果もう何も残らずプレーンな行になる)ときは、間に空行を1つ挟んで
+  // 引用ブロックを閉じる。CommonMarkでは空行が無いと遅延継続(直前行が引用パラグラフの
+  // 続きとみなされる)が働くため、マーカー文字を消して見た目上抜けたつもりでも、パーサ上は
+  // ずっと引用の中のまま扱われてしまう。保存した.mdを他のMarkdownビューア(GitHub等)で
+  // 開くと、続けて書いた段落が引用の中に表示されてしまう=文字の見た目だけでなく文書の
+  // 意味そのものが変わる不具合のため、空行を挟むのが正しい(Typoraも引用から抜けると
+  // 空行を入れる)。
+  // 「引用の中のリスト」から抜けてまだ引用だけが残る場合(context.length > 1のまま。
+  // context[0]は外側から見た配列なので、除去されるのは常にcontextの最後の要素)や、
+  // リストから完全に抜ける場合は今までどおり空行を挟まない(空行が無くてもCommonMark上
+  // 問題が起きないため)。
+  const exitingQuoteCompletely = context.length === 1 && context[0].kind === "quote";
+  const insert = exitingQuoteCompletely ? "\n" + newPrefix : newPrefix;
   view.dispatch({
-    changes: { from: line.from, to: sel.from, insert: newPrefix },
-    selection: { anchor: line.from + newPrefix.length },
+    changes: { from: line.from, to: sel.from, insert },
+    selection: { anchor: line.from + insert.length },
     userEvent: "input",
   });
   return true;
@@ -2678,6 +2727,81 @@ function toggleFoldRange(view, range) {
   else view.dispatch({ effects: foldEffect.of(range) });
 }
 
+// ---- 言語未設定のコードモードでのインデントベース折りたたみ(改善③) ----
+// 【背景】 上のcollectFoldChainAt()はfoldNodeProp(構文木のノードに付いた折りたたみ範囲の
+// 情報)を辿る作りのため、言語が未選択(またはハイライトのロードに失敗してプレーン表示に
+// フォールバックした)コードモードでは構文木そのものが無く、常に0件になる(実測: 新規文書を
+// コードモードのまま「function outer() {...}」などと打ってもマーカーが1個も出ない)。
+// VS Codeは言語未設定でもインデントの深さだけで折りたたみを提供しており、それに倣う。
+//
+// 【実装方式: foldServiceを採用】 自前でチェーンを組む方式ではなく、@codemirror/language の
+// foldService(Facet)を使う方式にした。理由:
+//   1. foldable(state, lineStart, lineEnd)(@codemirror/language)は「foldServiceに登録した
+//      関数を優先的に呼び、何も返さなければfoldNodeProp由来のsyntaxFolding()にフォール
+//      バックする」という実装になっている。foldCode/unfoldCode/foldAll/unfoldAll
+//      (このファイルのfoldKeymapSafe、Alt-[ / Alt-] / Ctrl-Alt-[ / Ctrl-Alt-])は内部で
+//      すべてこのfoldable()を呼ぶため、foldServiceとして登録するだけでキーボード操作にも
+//      追加コード無しで同じ範囲が使われる(「キーボード操作との整合」の要求をこれだけで
+//      満たせる)。
+//   2. 「1行につき深さごとに複数のマーカーを出す」現行のcollectFoldChainAt/
+//      collectLineFoldOpens方式との両立可否を検討した: あの方式は「1行の中で複数階層が
+//      同時に開く」稀な構文ケース(例: 一行に複数ブロックが並ぶ"} else {")を、resolveStack
+//      で祖先チェーンを丸ごと辿って表現するためのものだが、インデントには構文木のような
+//      「同じ行に複数の兄弟ブロックが同時に開く」概念が存在しない
+//      (ある行が新たに開く範囲は、その行自身が開始する範囲ただ1つに限られる)。そのため
+//      チェーンを辿る仕組みは不要で、1行につきfoldable()を1回呼ぶだけの単純な方式で
+//      過不足なく表現できると判断し、既存の複数マーカー設計と無理なく両立させた
+//      (下記buildFoldOpenMarkers内の分岐を参照。言語が有る場合は従来どおり
+//      collectLineFoldOpensを使い、この関数には一切触れない)。
+//   3. 登録は「言語が未設定のときだけ」codeModeExtras()から追加する(currentCodeLanguage
+//      === nullの分岐)。言語が設定されている通常のコードモード・Markdownモードでは
+//      一切登録しないため、foldServiceが構文木由来の結果より先に呼ばれてしまい既存挙動を
+//      壊す、という心配が構造的に起こらない(そもそも登録されていない)。
+//
+// 【アルゴリズム】(VS Codeのインデント折りたたみプロバイダと同じ考え方)
+//   - 対象行の行頭空白の文字数を「その行のインデント」とする(タブ・スペース混在は
+//     厳密な列換算をせず文字数のまま比較する。大半のコードはインデント方式が
+//     ファイル内で統一されているため実用上問題にならない)
+//   - 対象行より後ろを1行ずつ見ていき、空白のみの行は読み飛ばしつつ、対象行より深い
+//     インデントの行が続く限りその範囲に含める。対象行以下(浅い/同じ)のインデントの
+//     行に当たったら、そこで打ち切る(その行自体は範囲に含めない)
+//   - 空行は範囲の途中に含めてよいが、範囲の終端は「最後に見つかった対象行より深い
+//     実内容行」の行末にする(=末尾の空行は範囲に含めない)
+//   - 対象行の直後から数えて、対象行より深い実内容行が1行も見つからなければ
+//     (何も畳めない)nullを返す
+//
+// 【性能への配慮】 マーカー描画(buildFoldOpenMarkers)は画面内の行(view.viewportLineBlocks、
+// 通常数十行)ぶんしか本関数を呼ばないが、各行ごとに「後ろに深い行がどこまで続くか」を
+// 前方走査する必要があるため、病的な入力(例: 1万行ぶん単調に字下げが深くなり続ける
+// ファイル)で画面内の行すべてが数千行先まで走査してしまうと重くなりうる。
+// INDENT_FOLD_SCAN_LIMITで走査行数に上限を設け、文書全体を舐めることは無いようにする
+// (上限に達したらそこで打ち切り、範囲はそこまでの分だけを返す近似で構わない。折りたたみは
+// あくまで表示上の便宜であり、多少範囲が実際のブロック終端より手前で切れても実害は無い)。
+// 1万行での実測(変更前後の比較)は今回の対応報告を参照。
+const INDENT_FOLD_SCAN_LIMIT = 500;
+function leadingWhitespaceLength(text) {
+  const m = /^[ \t]*/.exec(text);
+  return m[0].length;
+}
+function indentFoldRangeForLine(state, docLine) {
+  const baseIndent = leadingWhitespaceLength(docLine.text);
+  if (baseIndent === docLine.text.length) return null; // 空行自身は畳めない(中身が無い)
+  const doc = state.doc;
+  let lastDeepLine = 0; // 最後に見つかった「対象行より深い」実内容行の行番号(0=未発見)
+  const limit = Math.min(doc.lines, docLine.number + INDENT_FOLD_SCAN_LIMIT);
+  for (let n = docLine.number + 1; n <= limit; n++) {
+    const t = doc.line(n).text;
+    if (t.trim() === "") continue; // 空行は範囲の途中に含めてよい(打ち切り判定はしない)
+    if (leadingWhitespaceLength(t) <= baseIndent) break; // 対象行以下の深さに戻った→ここで終わり
+    lastDeepLine = n;
+  }
+  if (!lastDeepLine) return null; // 深い行が1つも無かった→折りたためない
+  return { from: docLine.to, to: doc.line(lastDeepLine).to };
+}
+// foldService(state, lineStart, lineEnd) => {from,to}|null の形。foldable()経由でfoldCode等の
+// 標準コマンドから呼ばれる(上記コメント参照)。
+const indentFoldService = foldService.of((state, lineStart) => indentFoldRangeForLine(state, state.doc.lineAt(lineStart)));
+
 // 表示範囲(view.viewportLineBlocksのみ。文書全体は舐めない)から、マーカーが必要な行だけの
 // widget decorationを組み立てる。indentGuideMarksと同じ「viewportだけを見る」作法。
 function buildFoldOpenMarkers(view) {
@@ -2686,6 +2810,13 @@ function buildFoldOpenMarkers(view) {
   const lineHeightPx = view.defaultLineHeight;
   const charWidthPx = view.defaultCharacterWidth; // 不具合修正(上記FoldOpenMarkerWidgetの
   // コメント参照): CSSの`ch`単位は使わず、実測した1文字ぶんのpx幅を直接使う。
+  // 改善③: 言語(構文木)が設定されているかどうかをループの外で一度だけ判定する
+  // (state.facet(language)は現在アクティブなLanguageオブジェクト、無ければnull。
+  // @codemirror/languageの公開APIで、docModeComp.reconfigure()に言語のsupportが
+  // 積まれているかどうかをそのまま反映する)。構文木由来の判定(collectLineFoldOpens、
+  // foldNodeProp経由)は言語が有る場合に限って従来どおり使い、無い場合だけインデント
+  // ベースのフォールバック(indentFoldRangeForLine、上記コメント参照)に切り替える。
+  const hasLanguage = !!state.facet(language);
   for (const line of view.viewportLineBlocks) {
     // 不具合修正(旧実装から継承): 範囲が畳まれている行は、view.viewportLineBlocksの
     // BlockInfo自体が「畳まれた範囲全体(複数のソース行ぶん)」を1つの行として表す
@@ -2696,7 +2827,16 @@ function buildFoldOpenMarkers(view) {
     // これにより「折りたたんだ状態({…}表示)でもマーカーが正しい位置に出る」ことが
     // 保証される(依頼の確認項目)。
     const docLine = state.doc.lineAt(line.from);
-    const opens = collectLineFoldOpens(state, docLine.from, docLine.to, docLine.number);
+    let opens;
+    if (hasLanguage) {
+      opens = collectLineFoldOpens(state, docLine.from, docLine.to, docLine.number);
+    } else {
+      // 言語未設定のフォールバック(改善③)。インデントベースでは1行につき「その行自身が
+      // 開始する範囲」が高々1つしか無いため、collectLineFoldOpensのような複数階層の
+      // チェーン集約は不要(上記の設計判断コメント参照)。
+      const range = indentFoldRangeForLine(state, docLine);
+      opens = range ? [{ range, folded: isRangeFolded(state, range) }] : [];
+    }
     if (opens.length === 0) continue;
     const m = /^[ \t]+/.exec(docLine.text);
     const leadingLen = m ? m[0].length : 0; // 行頭の空白の文字数(=コードが始まる列)
@@ -3032,7 +3172,15 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
   // (ウィンドウ/タブ)ごとの状態のため、この関数自体もここ(createEditor内)で定義する。
   const codeModeExtras = () => [
     lineNumbers(),
-    ...(codeFoldingOn ? [codeFolding(), foldOpenMarkerPlugin, foldOpenMarkerTheme, keymap.of(foldKeymapSafe)] : []),
+    ...(codeFoldingOn ? [
+      codeFolding(), foldOpenMarkerPlugin, foldOpenMarkerTheme, keymap.of(foldKeymapSafe),
+      // 改善③: 言語が未設定(currentCodeLanguage===null。ハイライトのロードに失敗して
+      // プレーン表示にフォールバックした場合も含む)のときだけ、インデントベースの
+      // フォールバックfoldServiceを追加する(indentFoldService定義部のコメント参照)。
+      // 言語が設定されている通常のコードモードでは登録しない=既存の構文木ベースの
+      // 折りたたみ(foldNodeProp)を一切妨げない。
+      ...(currentCodeLanguage === null ? [indentFoldService] : []),
+    ] : []),
     bracketMatching(),
     ...(codeIndentGuidesOn ? [indentGuideMarks, indentGuideTheme(codeIndentSizeValue)] : []),
   ];
