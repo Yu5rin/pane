@@ -30,3 +30,17 @@
   仕様書にない機能を推測で追加しない。
 - 実装フェーズ（第9章）の順序を守る。現在のフェーズを超える機能を先取りしない。
 - SyncMemoとは分離した別プロダクトである。SyncMemo側との互換性は考慮しない。
+
+## Windows実機での確認手順
+
+ユーザーがWindows側で動作確認するときの手順は次で固定する。**この形から勝手に
+変えない**（`dotnet run` に置き換えない）。Paneはポータブルな単一exeとして配布する
+方針のため、確認も `dotnet publish` で作った `publish\Pane.exe` を起動して行う。
+
+```powershell
+cd C:\Users\YUGO\pane; Get-Process Pane -ErrorAction SilentlyContinue | Stop-Process -Force; git pull origin claude/pane-phase-1-setup-87833g; npm install; Remove-Item -Recurse -Force dist,publish -ErrorAction SilentlyContinue; npm run build; dotnet publish Pane\Pane.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o publish; .\publish\Pane.exe
+```
+
+- パス（`C:\Users\YUGO\pane`）は省略せず毎回そのまま書く
+- `cd` と各コマンドは `;` でつないだ**1つのPowerShellコードブロック**として提示する
+- この手順は**プッシュしたときだけ**提示する
