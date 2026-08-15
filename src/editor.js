@@ -407,7 +407,10 @@ class HrWidget extends WidgetType {
   toDOM() { const hr = document.createElement("hr"); hr.className = "cm-hr"; return hr; }
 }
 class CodeCopyWidget extends WidgetType {
-  constructor(code) { super(); this.code = code; }
+  // view: フォールバックコピー(下記)でフォーカスがtextareaへ奪われた際、本文へ戻すために
+  // 保持しておく(バグチェック②)。ビルドのたびに毎回同じEditorViewインスタンスが渡される
+  // ため、eq()の比較対象には含めない(含めると常に同一のはずが差分検知になる意味がない)。
+  constructor(code, view) { super(); this.code = code; this.view = view; }
   eq(o) { return o.code === this.code; }
   toDOM() {
     const btn = document.createElement("button");
@@ -424,8 +427,35 @@ class CodeCopyWidget extends WidgetType {
     btn.addEventListener("mousedown", (e) => e.preventDefault());
     btn.addEventListener("click", async (e) => {
       e.preventDefault(); e.stopPropagation();
+      const view = this.view;
+      // 不具合②の修正: navigator.clipboard.writeText()が失敗する(実機で権限が拒否された、
+      // NotAllowedErrorになる等)とtextarea+execCommand("copy")のフォールバックへ落ちるが、
+      // t.select()が本文からtextareaへフォーカスを奪い、t.remove()後もフォーカスが
+      // どこにも戻らず本文が以後入力不能になっていた。フォールバック実行前に選択範囲を
+      // 保存しておき、コピー処理の後で本文の外にフォーカスが逃げていたら復元する
+      // (成功経路はmousedownのpreventDefault()で最初からフォーカスが動かないため、
+      // ここでの復元は実質フォールバック時のみ効くが、経路を問わず一律で安全側に倒す)。
+      const savedSelection = view?.state.selection;
       try { await navigator.clipboard.writeText(this.code); }
-      catch { try { const t = document.createElement("textarea"); t.value = this.code; document.body.appendChild(t); t.select(); document.execCommand("copy"); t.remove(); } catch { /* コピーはベストエフォート、表示は常に行う */ } }
+      catch {
+        try {
+          const t = document.createElement("textarea");
+          t.value = this.code;
+          // body直下に生のtextareaを足すため、レイアウトへ影響しないよう画面外・不可視・
+          // クリック不能にしておく(不具合②で一緒に見つかったスタイル未指定の問題)。
+          Object.assign(t.style, { position: "fixed", top: "0", left: "0", opacity: "0", pointerEvents: "none" });
+          document.body.appendChild(t);
+          t.select();
+          document.execCommand("copy");
+          t.remove();
+        } catch { /* コピーはベストエフォート、表示は常に行う */ }
+      }
+      if (view && !view.dom.contains(document.activeElement)) {
+        view.focus();
+        // 文書がコピー処理中に変わっていた場合(通常は起きないが)、保存した選択範囲が
+        // 無効になっている可能性があるためベストエフォートで復元する。
+        try { view.dispatch({ selection: savedSelection }); } catch { /* 位置復元は諦めてもフォーカスは戻す */ }
+      }
       // コピー後の短いフィードバック(依頼①): アイコンをチェックマークに切り替える(CSS の
       // .done)のに加え、aria-label/titleも一時的に「コピーしました」へ変える。ボタンは
       // ホバー/カーソルが無ければ既定で不透明度0(表示条件は下記CSS参照)だが、.doneの間だけは
@@ -820,7 +850,7 @@ const livePreview = ViewPlugin.fromClass(class {
               state.doc.line(Math.min(open.number + 1, close.number)).from,
               close.from > 0 ? close.from - 1 : close.from
             );
-            marks.push({ from: open.to, to: open.to, deco: Decoration.widget({ widget: new CodeCopyWidget(codeText), side: 1 }) });
+            marks.push({ from: open.to, to: open.to, deco: Decoration.widget({ widget: new CodeCopyWidget(codeText, view), side: 1 }) });
           }
           if (!blockLive) {
             // フェンス行の```記号のみ隠す(改行は含めない。ViewPluginでは改行をreplaceできない)
@@ -4609,20 +4639,51 @@ function shiftHeadingLevel(view, delta) {
   }
   view.focus();
 }
+// 選択範囲(複数行にまたがる場合を含む)が実際にかかっている行をすべて集める
+// (バグチェック③の修正: linePrefix/convertListType/indent/outdentが選択開始行だけにしか
+// 効いていなかったのを直すための共通ヘルパー)。
+//   - 選択が空(カーソルのみ)ならカーソル行だけを対象にする(従来どおり)。
+//   - 非空選択の終端がちょうどある行の行頭に一致する場合、その行は対象に含めない
+//     (例: 2行目の途中〜3行目の行頭ちょうどまでの選択は2行目までを対象とする)。
+//     これは一般的なエディタの作法で、@codemirror/commandsの標準コマンド群
+//     (indentMore/indentLess等)が内部で使うchangeBySelectedLine()と同じ判定条件
+//     (range.empty || range.to > line.from)を踏襲している。
+function linesForRange(state, range) {
+  const lines = [];
+  for (let pos = range.from; pos <= range.to; ) {
+    const line = state.doc.lineAt(pos);
+    if (range.empty || range.to > line.from) lines.push(line);
+    pos = line.to + 1;
+  }
+  return lines;
+}
 // リスト種別の相互変換(仕様書 P-13)。target: "bullet" | "ordered" | "check"
 // 新しく付け直すマーカーは設定(unorderedListMarker/orderedListMarker)に従う。
+// バグチェック③の修正: 選択範囲にかかる全行のうち、既にリスト行になっているものだけを
+// 対象にする(段落行を巻き込んで新規にリスト化するコマンドではないため)。番号付きへの
+// 変換は対象範囲内で連番(1, 2, 3, ...)になるようにし、全行ぶんの変更を1回のdispatchに
+// まとめる(1行ずつdispatchすると、アンドゥが行数分に分かれてしまう・後続行の位置計算が
+// 前の変更でずれる、という問題があったため)。
 function convertListType(view, target) {
   const { state } = view;
   const toggles = state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
   const uMarker = toggles.unorderedListMarker || "-";
   const oSep = toggles.orderedListMarker || ".";
-  const line = state.doc.lineAt(state.selection.main.from);
-  const m = line.text.match(/^(\s*)(?:[-*+]\s+\[[ xX]\]\s?|[-*+]\s|\d+[.)]\s)/);
-  if (!m) return;
-  const indent = m[1];
-  const marker = target === "bullet" ? indent + uMarker + " " : target === "ordered" ? indent + "1" + oSep + " " : indent + uMarker + " [ ] ";
+  const re = /^(\s*)(?:[-*+]\s+\[[ xX]\]\s?|[-*+]\s|\d+[.)]\s)/;
+  const lines = linesForRange(state, state.selection.main).filter((l) => re.test(l.text));
+  if (!lines.length) return;
+  const changes = [];
+  let seq = 1; // 番号付きリストへの変換は選択範囲内で連番にする
+  for (const line of lines) {
+    const m = line.text.match(re);
+    const indent = m[1];
+    const marker = target === "bullet" ? indent + uMarker + " "
+      : target === "ordered" ? indent + String(seq++) + oSep + " "
+      : indent + uMarker + " [ ] ";
+    changes.push({ from: line.from, to: line.from + m[0].length, insert: marker });
+  }
   // 不具合2と同じ理由でuserEventを付ける(連続実行時に1操作=1アンドゥにするため)。
-  view.dispatch({ changes: { from: line.from, to: line.from + m[0].length, insert: marker }, userEvent: "input.mdAction" });
+  view.dispatch({ changes, userEvent: "input.mdAction" });
   view.focus();
 }
 // Setext形式の見出し(仕様書 headingStyle="setext")。レベル1・2のみ表現できるため、
@@ -4912,18 +4973,49 @@ function applyMdAction(view, action, payload) {
   // まとめて1回のアンドゥ対象になってしまう(表操作で実際に再現したのと同じ原因)。
   // "input.type"/"delete"系にマッチしない専用のuserEventを共通で付ける。
   const MD_ACTION_USER_EVENT = "input.mdAction";
+  // バグチェック③の修正: 見出し・箇条書き・番号付きリスト・引用・タスクリストへの変換は、
+  // 選択開始行だけでなく選択範囲にかかる全行に適用する(3行選択してCtrl+Shift+]を押しても
+  // 先頭行にしか"- "が付かなかった不具合)。トグル判定は「対象行がすべて同じプレフィックスを
+  // 持っていれば解除、そうでなければ全行に付与する」という一般的なエディタの作法にする
+  // (選択範囲の一部だけが既に該当形式、という中途半端な状態では常に「全部その形式にする」
+  // 側へ倒れる)。番号付きリストだけは"1. "のような固定文字列と単純比較すると既存の番号と
+  // 一致せずトグルが機能しないため、区切り文字(.か)か)と末尾の空白が一致するかで判定する。
+  // 全行ぶんの変更は1回のdispatchにまとめる(1行ずつdispatchするとアンドゥが行数分に
+  // 分かれ、後続行のfrom/toが前の変更でずれてしまうため)。選択範囲(anchor/head)は
+  // dispatchに明示的なselectionを渡さないことで、変更後の位置へ自動的にマッピングされる
+  // (単一行・空選択のときは従来の明示計算と同じ結果になる)。
   const linePrefix = (p) => {
-    // 既存の同種プレフィックスがあればトグル、無ければ付与。浅いインデント(3個まで)の後ろで判定する
-    const ind = line.text.match(/^ {0,3}/)[0].length;
-    const base = line.from + ind;
-    const cur = line.text.slice(ind).match(/^(#{1,6}\s|[-*+]\s\[[ xX]\]\s|[-*+]\s|\d+[.)]\s|>\s)/);
-    if (cur && cur[0] === p) {
-      view.dispatch({ changes: { from: base, to: base + p.length }, selection: { anchor: Math.max(base, s - p.length) }, userEvent: MD_ACTION_USER_EVENT });
-    } else if (cur) {
-      view.dispatch({ changes: { from: base, to: base + cur[0].length, insert: p }, selection: { anchor: s - cur[0].length + p.length }, userEvent: MD_ACTION_USER_EVENT });
-    } else {
-      view.dispatch({ changes: { from: base, insert: p }, selection: { anchor: s + p.length }, userEvent: MD_ACTION_USER_EVENT });
+    const patRe = /^(#{1,6}\s|[-*+]\s\[[ xX]\]\s|[-*+]\s|\d+[.)]\s|>\s)/;
+    const isOrdered = /^\d+[.)]\s/.test(p);
+    // p(呼び出し元では常に先頭が"1")から数字部分だけを取り除いた"区切り文字+空白"
+    // (例: "1. "→". "、"1) "→") ")。実際の行の番号(1でなくてもよい)を無視して
+    // 区切り文字だけで「既に番号付きリストか」を判定するために使う。
+    const orderedTail = isOrdered ? p.replace(/^\d+/, "") : null;
+    const matchesTarget = (curText) => {
+      if (!curText) return false;
+      return isOrdered ? (/^\d+[.)]\s/.test(curText) && curText.endsWith(orderedTail)) : curText === p;
+    };
+    const lines = linesForRange(state, sel);
+    const allMatch = lines.length > 0 && lines.every((l) => {
+      const ind = l.text.match(/^ {0,3}/)[0].length;
+      const cur = l.text.slice(ind).match(patRe);
+      return matchesTarget(cur && cur[0]);
+    });
+    const changes = [];
+    let seq = 1;
+    for (const l of lines) {
+      const ind = l.text.match(/^ {0,3}/)[0].length;
+      const base = l.from + ind;
+      const cur = l.text.slice(ind).match(patRe);
+      if (allMatch) {
+        changes.push({ from: base, to: base + cur[0].length });
+      } else {
+        const insertText = isOrdered ? p.replace(/^\d+/, String(seq++)) : p;
+        if (cur) changes.push({ from: base, to: base + cur[0].length, insert: insertText });
+        else changes.push({ from: base, insert: insertText });
+      }
     }
+    view.dispatch({ changes, userEvent: MD_ACTION_USER_EVENT });
     view.focus();
   };
   const insert = (t, cursorOffset) => view.dispatch({ changes: { from: s, to: e, insert: t }, selection: { anchor: s + (cursorOffset ?? t.length) }, userEvent: MD_ACTION_USER_EVENT });
@@ -5180,15 +5272,22 @@ function applyMdAction(view, action, payload) {
     case "undo": undo(view); break;
     case "redo": redo(view); break;
     // 引用・リストのインデント幅(仕様書 indentSizeOnSave、既定4)。2/4/8以外の値は既定4にフォールバックする。
+    // バグチェック③の修正: 選択範囲にかかる全行を対象にする(1回のdispatchにまとめる)。
     case "indent": {
       const n = [2, 4, 8].includes(toggles.indentSizeOnSave) ? toggles.indentSizeOnSave : 4;
-      view.dispatch({ changes: { from: line.from, insert: " ".repeat(n) }, userEvent: MD_ACTION_USER_EVENT });
+      const changes = linesForRange(state, sel).map((l) => ({ from: l.from, insert: " ".repeat(n) }));
+      view.dispatch({ changes, userEvent: MD_ACTION_USER_EVENT });
       break;
     }
     case "outdent": {
       const n = [2, 4, 8].includes(toggles.indentSizeOnSave) ? toggles.indentSizeOnSave : 4;
-      const m = line.text.match(new RegExp(`^( {1,${n}}|\\t)`));
-      if (m) view.dispatch({ changes: { from: line.from, to: line.from + m[0].length }, userEvent: MD_ACTION_USER_EVENT });
+      const re = new RegExp(`^( {1,${n}}|\\t)`);
+      const changes = [];
+      for (const l of linesForRange(state, sel)) {
+        const m = l.text.match(re);
+        if (m) changes.push({ from: l.from, to: l.from + m[0].length });
+      }
+      if (changes.length) view.dispatch({ changes, userEvent: MD_ACTION_USER_EVENT });
       break;
     }
 
