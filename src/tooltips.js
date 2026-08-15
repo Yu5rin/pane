@@ -69,6 +69,17 @@ export const TOOLTIP_CATEGORIES = {
 //   shortcut:    "Ctrl+,"のような文字列。あれば全段階(none以外)の末尾に" (Ctrl+,)"を付記する
 // }
 export const TOOLTIPS = {
+  // ---- 設定画面 ----
+  // 依頼③: インデントガイド(縦線)の表示モード設定。settings.js側のfieldSelect呼び出しが
+  // 自動生成するフォールバック文言(ラベル+desc)でも4段階(none/minimal/standard/detailed)は
+  // 一応成立するが、standard/detailedが同一文になってしまう。この項目はTOOLTIPSに専用の
+  // 文言を用意し、detailedでは3つの選択肢それぞれの意味まで書く。
+  codeIndentGuides: {
+    category: "settings",
+    minimalMode: "suppress", // 設定画面の項目はラベル自体で何の設定か分かるため(他の設定項目と同じ扱い)
+    standard: "コードモードで、インデントの深さを示す縦線をどこまで表示するかです",
+    detailed: "コードモードのインデントガイド(縦線)の表示範囲を選びます。「表示しない」は縦線を一切引きません。「折りたたみできる範囲のみ」(既定)は、関数・オブジェクト・配列など折りたたみマーカーが実際にある階層にだけ、マーカーの中心から折りたたみ範囲の最終行まで線を引きます。「すべてのインデント」は、折りたたみとは無関係にインデントの深さすべてに一律で線を引きます(以前の既定の見た目)。",
+  },
   // ---- メニューバー ----
   "btn-theme": {
     category: "menubar",

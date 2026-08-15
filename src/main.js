@@ -2331,6 +2331,10 @@ async function handleHostMessage(msg) {
       editor.setCodeIndentSize(msg.codeIndentSize);
       // コードモードの折りたたみ(仕様書 codeFoldingEnabled、既定true)。
       editor.setCodeFolding(msg.codeFoldingEnabled !== false);
+      // 依頼③: インデントガイドの表示モード("none"|"fold"|"all"、既定"fold")。
+      // 旧バージョンのC#(未対応)からはmsg.codeIndentGuidesがundefinedで届くため、その場合は
+      // 既定の"fold"を保つ(setCodeIndentGuides側で不正値を"fold"へ倒す)。
+      editor.setCodeIndentGuides(msg.codeIndentGuides);
       // 自動ペアリング(仕様書 第2.10節 C-05、括弧・引用符)。setAutoPairing自体は既に実装済みだが
       // ここからの配線が抜けていたため、他の設定と同じ流儀で追加する。
       editor.setAutoPairing(msg.autoPairing !== false);
