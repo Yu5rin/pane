@@ -1,7 +1,5 @@
 // 検索・置換パネル(仕様書 E-17〜E-19)。マッチの検出・ハイライトは
 // @codemirror/search の SearchQuery / search() 拡張(editor.js側)に委ねる。
-import { EditorView } from "@codemirror/view";
-import { StateEffect } from "@codemirror/state";
 
 // F3/Shift+F3 等のグローバルショートカット(commands.js)経由のnext/prevは、この
 // パネル内のボタンクリックを経由しないため updateCount() が呼ばれない(不具合2)。
@@ -64,11 +62,9 @@ export function createSearchUI(editor, container) {
     els.count.textContent = els.query.value ? (count === 0 ? "見つかりません" : `${index + 1 >= 1 ? index + 1 : "-"} / ${count}`) : "";
   }
 
-  // 不具合3: 検索パネルを開いたまま本文を編集しても、検索欄への再入力やnext/prevボタンを
-  // 押すまで件数表示が古いままだった。CodeMirrorのEditorView.updateListenerを
-  // StateEffect.appendConfigで既存の拡張構成に追加し、本文の変更(update.docChanged)を
-  // 監視して件数表示を追従させる。editor.js側の拡張一覧を直接いじらずに済むよう、
-  // このファイル単体で完結させている。
+  // 不具合3(初出)/バグ2(タブ切替での再発、ラウンド1)の修正: 検索パネルを開いたまま
+  // 本文を編集しても、検索欄への再入力やnext/prevボタンを押すまで件数表示が古いままだった。
+  // 本文の変更(docChanged)を監視して件数表示を追従させる。
   // 1万行規模の文書ではgetSearchMatchInfo()(全文書を走査してマッチを数え直す)が
   // 軽くないため、キー入力のたびに毎回呼ぶと重くなる。デバウンス(150ms)して、
   // 入力が止まってから1回だけ再計算する。
@@ -80,30 +76,38 @@ export function createSearchUI(editor, container) {
       debounceTimer = null;
     }
   }
-  // タブ形式(仕様書 第2.10節 C-14、既定オフの隠し機能)のタブ切替はeditor.js内で
-  // view.setState()によりEditorStateをまるごと差し替える(createFreshState()には
-  // このappendConfigは含まれない)ため、そのタイミングでこのリスナーが失われ得る。
-  // stateのconfigは通常のdispatch(doc編集等)では使い回されるが、setState/reconfigure
-  // されると新しいconfigに変わる性質を利用し、「いまのconfigに付け済みか」をWeakSetで
-  // 覚えておいて、未付与なら付け直す。既に付いていれば何もしない(多重登録を防ぐ)。
-  const configsWithListener = new WeakSet();
-  function ensureDocChangeListener() {
-    if (configsWithListener.has(editor.view.state.config)) return;
-    editor.view.dispatch({
-      effects: StateEffect.appendConfig.of(
-        EditorView.updateListener.of((update) => {
-          if (!update.docChanged || panel.hidden) return;
-          cancelDebouncedUpdate();
-          debounceTimer = setTimeout(() => {
-            debounceTimer = null;
-            if (!panel.hidden) updateCount();
-          }, DOC_CHANGE_DEBOUNCE_MS);
-        })
-      ),
-    });
-    configsWithListener.add(editor.view.state.config);
-  }
-  ensureDocChangeListener();
+  // 過去の実装は、EditorView.updateListenerをStateEffect.appendConfigでその時点の
+  // state.configにだけ追加していた。タブ形式(仕様書 第2.10節 C-14、既定オフの隠し機能)の
+  // タブ切替はeditor.js内でview.setState()によりEditorStateをまるごと(configごと)
+  // 差し替えるため、appendConfigで足したリスナーはそこで失われる。当時、「いまのconfigに
+  // 付け済みか」をWeakSetで追跡し、未付与なら付け直す防御(ensureDocChangeListener)を
+  // 用意していたが、これはこの関数自体が呼ばれて初めて効く防御であり、呼び出し箇所は
+  // createSearchUI()の初期化時とopen()の中の2箇所しかなかった。タブ切替(main.jsの
+  // switchToTab→editor.setEditorState)はこのどちらも経由しないため、パネルを開いたまま
+  // 裏でタブだけが切り替わるケース(バグ2の再現手順)ではWeakSetの判定自体が一度も
+  // 実行されず、防御が「効かない」のではなく「そもそも呼ばれない」状態になっていた。
+  // 対策として、config(=EditorState)側にリスナーをぶら下げるのをやめ、editor.js側に
+  // 常設した購読機構(onDocChange。createEditor()のクロージャに属し、タブ切替をまたいで
+  // 生き続ける)を使う。これにより「configの生死を追跡して付け直す」という設計自体が
+  // 不要になり、タブ切替の呼び出し経路を気にしなくてよくなる。
+  //
+  // なお、ここでは単なるupdateCount()ではなくapplyQuery()(setSearchQuery再送+updateCount)を
+  // 呼ぶ。@codemirror/searchのクエリ(searchState)はEditorStateのフィールドであり、タブごとに
+  // 独立している(defaultQuery()はそのタブの選択範囲から作られるだけで、他タブの検索語を
+  // 引き継がない)。そのため、b.mdで"hello"を検索した状態のままa.mdへ切り替えても、a.mdの
+  // EditorStateには"hello"というクエリがまだ一度も適用されていない。updateCount()は現在の
+  // クエリで数え直すだけなので、それだけでは切替先タブに検索語を適用し直せず「見つかりません」の
+  // ままになってしまう。applyQuery()は検索欄(DOM、タブ間で共有)の現在値を「いま有効な
+  // EditorView(=いま表示中のタブ)」へ改めて適用してから数えるため、doc変更(バグ2の再現手順の
+  // 「a.mdへ本文を追記する」操作)をきっかけに、タブ切替後も正しい件数へ自己修復する。
+  editor.onDocChange(() => {
+    if (panel.hidden) return;
+    cancelDebouncedUpdate();
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null;
+      if (!panel.hidden) applyQuery();
+    }, DOC_CHANGE_DEBOUNCE_MS);
+  });
 
   els.query.addEventListener("input", applyQuery);
   els.replaceQuery.addEventListener("input", applyQuery);
@@ -140,9 +144,6 @@ export function createSearchUI(editor, container) {
 
   function open(withReplace) {
     panel.hidden = false;
-    // タブ切替(隠し機能)でパネルが閉じている間にEditorStateがまるごと差し替わっている
-    // 可能性があるため、開くたびに件数更新リスナーが付いているか確認しておく(上記参照)。
-    ensureDocChangeListener();
     els.replaceRow.hidden = !withReplace;
     const view = editor.view;
     const sel = view.state.sliceDoc(view.state.selection.main.from, view.state.selection.main.to);

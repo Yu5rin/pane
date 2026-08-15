@@ -214,14 +214,12 @@ export function isAssignableShortcut(shortcutString) {
 // 経路から開いたかに関わらず同じメッセージ形で届く。同時に開けるポップアップは常に1つだけ
 // (NativeMenu.Show内のCloseCurrent()が前のポップアップを必ず閉じる)なので、最後に開いた側だけが
 // 応答を受け取れるよう、ここで「いま応答を受けるべき相手」を1つだけ覚えておく。
-let activeNativeOwner = null; // { handleMenuCommand(id), handleMenuClosed(menu), handleMenuHoverSwitch?(menu) } | null
+let activeNativeOwner = null; // { handleMenuCommand(id), handleMenuClosed(menu), handleMenuArrowSwitch?(menu, direction) } | null
 export function routeNativeMenuCommand(id) { activeNativeOwner?.handleMenuCommand(id); }
 export function routeNativeMenuClosed(menu) { activeNativeOwner?.handleMenuClosed(menu); }
-// handleMenuHoverSwitchは今のところメニューバー(initMenuBar)側しか持たない(右クリック
-// メニュー側では隣へのホバー切り替えという概念自体が無いため)。activeNativeOwnerが
-// 右クリックメニュー側を指している間にC#から届いても(通常は起きないが)落ちないよう、
-// メソッド自体の存在も一緒に確認する。
-export function routeNativeMenuHoverSwitch(menu) { activeNativeOwner?.handleMenuHoverSwitch?.(menu); }
+// handleMenuArrowSwitchは今のところメニューバー(initMenuBar)側しか持たない(右クリック
+// メニュー側では隣へのメニュー切り替えという概念自体が無いため、handleMenuHoverSwitchと同じ扱い)。
+export function routeNativeMenuArrowSwitch(menu, direction) { activeNativeOwner?.handleMenuArrowSwitch?.(menu, direction); }
 
 // ---- メニューバー(仕様書 第10.1節・第10.4節) ----
 // 既定は表示。Altキーで表示・非表示をトグルする(表示中はショートカット一覧としても機能する)。
@@ -247,16 +245,19 @@ export function initMenuBar(container, commands, ctx) {
   // 既存のcommand.run()経路をそのまま使う(コマンドの実装はC#側に持たせない)。
   //
   // 開いている間に別の見出しへマウスを移動すると、クリックしなくても隣のメニューへ切り替わる
-  // (Windows標準のメニューバーの挙動)。ただしネイティブのポップアップが表示されている間、
-  // マウスはOS側のポップアップに捕捉され、HTML側の見出しボタンのmouseenterはそもそも
-  // 発火しない(WebView2のウィンドウは、画面上のどこにカーソルがあってもマウスメッセージを
-  // 受け取れなくなる)。そのためC#側(Pane/NativeMenu.cs・MainForm.cs)がポップアップ自身の
-  // 受け取るマウス移動(キャプチャにより画面全体で発火する)を見て、下のheadersで渡す見出し
-  // ボタンの画面座標と突き合わせて判定し、"menu-hover-switch"で知らせてくる
-  // (受け口はhandleMenuHoverSwitch)。実際の切り替えはopenNativeMenuを呼び直すだけで、
-  // クリックしたときとまったく同じ経路(前のポップアップを閉じて新しいものを開く→前の
-  // ポップアップの遅れたmenu-closedはnativeOpenMenuNameとの突き合わせで無視される)に乗るため、
-  // 既存の「連打しても1回で消えない」対策をそのまま利用できる。
+  // (Windows標準のメニューバーの挙動)。
+  // 【ラウンド2で見つかった不具合の修正】以前は「ネイティブのポップアップが表示されている間、
+  // マウスはOS側のポップアップに捕捉されHTML側のmouseenterは発火しない」という前提のもと、
+  // C#側(Pane/NativeMenu.cs・MainForm.cs)がポップアップ自身の受け取るマウス移動を見て
+  // 判定・通知する方式を実装していたが、実機ではその通知("menu-hover-switch")が一度も
+  // 送られておらず機能していないことが確認された。加えて、ユーザー自身が実機で「メニュー表示中に
+  // 別の見出しへカーソルを乗せると、その見出しの:hover色が実際に変わる」ことを確認しており、
+  // これはHTML側がマウスの位置変化を検知できていることの証拠である(上記前提が誤りだった)。
+  // そこでこの版では、見出しボタン自体のmouseenter(下のforループ内)でホバーを検知し、
+  // handleMenuHoverSwitchを直接呼ぶ(C#との往復は不要)。実際の切り替えはopenNativeMenuを
+  // 呼び直すだけで、クリックしたときとまったく同じ経路(前のポップアップを閉じて新しいものを
+  // 開く→前のポップアップの遅れたmenu-closedはnativeOpenMenuNameとの突き合わせで無視される)に
+  // 乗るため、既存の「連打しても1回で消えない」対策をそのまま利用できる。
   const useNative = !!ctx.bridge;
   // id→実行関数の対応表。開くたびに作り直す(「最近使ったファイル」等の動的なsubmenuは
   // 開くたびに内容が変わり得るため)。submenu項目は元々idを持たないため、ここで
@@ -267,10 +268,19 @@ export function initMenuBar(container, commands, ctx) {
   // いま開いているネイティブメニューの名前("File"等)。C#から遅れて届く「前のメニューが
   // 閉じた」通知(menu-closed)と、いま開いているメニューを取り違えないために持つ。
   let nativeOpenMenuName = null;
-  // 見出し名→ボタン要素。ホバー切り替え(handleMenuHoverSwitch)で、C#から届いた見出し名から
-  // 実際のボタン要素を引くために使う。ボタン自体は下のforループで生成されるため、この時点では
-  // まだ空(参照は関数呼び出し時点で解決されるので問題ない)。
+  // 見出し名→ボタン要素。ホバー切り替え(handleMenuHoverSwitch)で、mouseenterが発火した
+  // 見出し名から実際のボタン要素を引くために使う。ボタン自体は下のforループで生成されるため、
+  // この時点ではまだ空(参照は関数呼び出し時点で解決されるので問題ない)。
   const menuButtons = new Map();
+  // 実機での切り分け用ログ(仕様書外・デバッグ支援)。mouseenterが実際に発火しているか、
+  // どう判定したかをC#側のログファイルへも残す(main.jsのlogToHostと同じプロトコル)。
+  // 50msごとの連続発火のような大量ログにならないよう、mouseenter自体が「見出しの上に
+  // カーソルが乗った瞬間」にしか発火しない離散イベントであることを利用し、判定結果を
+  // 都度1行だけ出す(ポーリングではないため、これ自体がログ量の抑制になっている)。
+  function hoverLog(message) {
+    console.log(message);
+    ctx.bridge?.postMessage({ type: "log", level: "log", message: String(message) });
+  }
 
   function buildNativeItem(item) {
     const grayed = item.grayed?.(ctx) ?? false;
@@ -295,9 +305,28 @@ export function initMenuBar(container, commands, ctx) {
     return node;
   }
 
-  function openNativeMenu(menuName, btn) {
-    // 開いている見出しをもう一度押したら閉じるだけにする(一般的なメニューの挙動)。
+  // 直前にopenNativeMenu()を開いたのがホバー切り替え(handleMenuHoverSwitch)によるものかどうか。
+  // 【ラウンド2のmouseenter対応で新たに気づいた不具合の修正】実際のマウス操作では、別の見出しへ
+  // クリックする際に必ず先にその見出しへのmouseenterが発火する(ポインタが移動してからでないと
+  // クリックできないため)。そのため「Fileが開いている間にEditへクリックしよう」とすると、
+  // 先にmouseenterでホバー切り替えが起きてEditが開き(nativeOpenBtnがEditボタンに変わり)、
+  // 直後に届くclickイベントが「もう同じ見出しが開いているので閉じる」という
+  // トグル閉じ判定に引っかかってしまい、開いたばかりのEditを即座に閉じてしまっていた
+  // (クリックでの通常のメニュー切り替えそのものが機能しなくなる、という重大な回帰)。
+  // ホバー切り替えで開いた直後の(=まだ再クリックによる明示的な閉じる意図ではない)クリックは
+  // トグル閉じの対象から除外し、開いたままにする(1回だけ判定を消費する)。ホバーを経由せず
+  // 同じ見出しを連続でクリックした場合(このフラグがfalseのまま)は従来どおり閉じる。
+  let nativeOpenedByHover = false;
+
+  function openNativeMenu(menuName, btn, { viaHover = false } = {}) {
     if (nativeOpenBtn === btn) {
+      if (nativeOpenedByHover && !viaHover) {
+        // ホバーで開いたばかりの見出しへの、直後のクリック(上のコメント参照) → 何もせず
+        // 開いたままにする。このクリック1回ぶんだけの猶予なので、ここで消費しておく。
+        nativeOpenedByHover = false;
+        return;
+      }
+      // 開いている見出しをもう一度押したら閉じるだけにする(一般的なメニューの挙動)。
       clearNativeHighlight();
       ctx.bridge?.postMessage({ type: "close-menu" });
       return;
@@ -310,32 +339,48 @@ export function initMenuBar(container, commands, ctx) {
     const items = commands.filter((c) => c.menu === menuName && !c.contextOnly).map(buildNativeItem);
     nativeOpenBtn = btn;
     nativeOpenMenuName = menuName;
-    activeNativeOwner = { handleMenuCommand, handleMenuClosed, handleMenuHoverSwitch }; // 応答は自分宛てとして受け取る
+    nativeOpenedByHover = viaHover;
+    activeNativeOwner = { handleMenuCommand, handleMenuClosed, handleMenuArrowSwitch }; // 応答は自分宛てとして受け取る
     btn.classList.add("open");
     // WebView2内のCSSピクセル座標で送る。C#側(Pane/MainForm.HandleOpenMenuRequest)で
     // DeviceDpiとWebView2の画面上の位置(_webView.PointToScreen)を使って画面座標へ変換する。
     const rect = btn.getBoundingClientRect();
-    // ホバー切り替え用: 全見出しボタンの矩形も併せて送る(自分自身も含めてよい。C#側で
-    // 「いま開いている見出し自身」は除外して判定する)。開くたびに送り直すのは、ウィンドウの
-    // 移動・リサイズで画面座標が変わり得るため(C#側は毎回のopen-menuでしか座標を持たない)。
-    const headers = menus.map((name) => {
-      const b = menuButtons.get(name);
-      const r = b.getBoundingClientRect();
-      return { menu: name, left: r.left, top: r.top, right: r.right, bottom: r.bottom };
-    });
-    ctx.bridge.postMessage({ type: "open-menu", menu: menuName, x: rect.left, y: rect.bottom, items, headers });
+    ctx.bridge.postMessage({ type: "open-menu", menu: menuName, x: rect.left, y: rect.bottom, items });
     watchOutsideClick();
   }
 
-  // C#(Pane/MainForm.HandleMenuBarHoverMouseMove)から届く「隣の見出しへ切り替えてほしい」
-  // 通知。メニューが開いていない(クリックされていない)ときはホバーだけでは開かない、という
-  // 標準の挙動を守るため、nativeOpenMenuNameがnullなら何もしない(C#側もメニュー表示中しか
-  // マウス移動を監視していないので通常起きないが、念のための二重の防御)。
+  // メニューバーの見出しボタンのmouseenter(下のforループ内)から呼ぶ「隣の見出しへ
+  // 切り替えてほしい」判定。メニューが開いていない(クリックされていない)ときはホバー
+  // だけでは開かない、という標準の挙動を守るため、nativeOpenMenuNameがnullなら何もしない。
+  // 開いている見出し自身へのホバーも何もしない(menuName === nativeOpenMenuNameで弾く)。
   function handleMenuHoverSwitch(menuName) {
-    if (!nativeOpenMenuName || menuName === nativeOpenMenuName) return;
+    if (!nativeOpenMenuName) return; // どのメニューも開いていない → ホバーだけでは開かない
+    if (menuName === nativeOpenMenuName) return; // 開いている見出し自身へのホバーは無視
     const btn = menuButtons.get(menuName);
     if (!btn) return;
-    openNativeMenu(menuName, btn);
+    hoverLog(`メニューのホバー切り替え: ${nativeOpenMenuName} → ${menuName}`);
+    openNativeMenu(menuName, btn, { viaHover: true });
+  }
+
+  // メニューのキーボード操作(ユーザー報告: ←→で隣の見出しへ移動できない)。C#側
+  // (Pane/NativeMenu.cs)が←→キーを検知して"menu-arrow-switch"で知らせてくる。
+  // ToolStripDropDownMenu単体には「隣のメニューへ移る」機能が無く、メニューバーの並び順
+  // (menus配列)を知っているのはJS側だけなので、実際にどのメニューへ切り替えるかの決定は
+  // ここで行う。切り替え自体はhandleMenuHoverSwitchと全く同じopenNativeMenu経路を再利用する
+  // (要望どおりホバー切り替えと共通化)。
+  //   ・見出し(File/Edit/View/Paragraph/Format)の並びはmenus配列の順そのまま。
+  //   ・端(先頭/末尾)では折り返す(Windows標準のメニューバーに合わせる。左端で←を押すと
+  //     右端(Format)へ、右端で→を押すと左端(File)へ回り込む)。
+  function handleMenuArrowSwitch(currentMenuName, direction) {
+    if (!nativeOpenMenuName || currentMenuName !== nativeOpenMenuName) return; // 届いた時点で既に別のメニューへ切り替わっていた等、状態が食い違っていれば何もしない
+    const idx = menus.indexOf(currentMenuName);
+    if (idx < 0) return;
+    const nextIdx = direction === "next" ? (idx + 1) % menus.length : (idx - 1 + menus.length) % menus.length;
+    const nextMenuName = menus[nextIdx];
+    const btn = menuButtons.get(nextMenuName);
+    if (!btn) return;
+    hoverLog(`キーボードでのメニュー切り替え: ${currentMenuName} → ${nextMenuName} (${direction})`);
+    openNativeMenu(nextMenuName, btn);
   }
 
   // ネイティブポップアップは別のウィンドウとして表示されるため、WebView2の中(=本文や
@@ -364,6 +409,7 @@ export function initMenuBar(container, commands, ctx) {
     nativeOpenBtn?.classList.remove("open");
     nativeOpenBtn = null;
     nativeOpenMenuName = null;
+    nativeOpenedByHover = false;
   }
 
   // C#(Pane/NativeMenu.cs)からの応答。main.jsのhandleHostMessageから呼ばれる。
@@ -474,6 +520,14 @@ export function initMenuBar(container, commands, ctx) {
     menuButtons.set(menuName, btn);
     if (useNative) {
       btn.addEventListener("click", () => openNativeMenu(menuName, btn));
+      // ホバー切り替え(ラウンド2の修正、上のコメント参照)。切り分けのため、mouseenter
+      // 自体が実際に発火しているかをまず常にログへ残す(離散イベントなので大量にはならない)。
+      // 実際の切り替えが起きるのは「いずれかのメニューが開いている」かつ「開いている見出し
+      // 自身へのホバーではない」場合だけ(handleMenuHoverSwitch内で判定)。
+      btn.addEventListener("mouseenter", () => {
+        hoverLog(`メニュー見出しへmouseenter: menu=${menuName}, 開いているメニュー=${nativeOpenMenuName ?? "(なし)"}`);
+        handleMenuHoverSwitch(menuName);
+      });
     } else {
       btn.addEventListener("click", () => {
         if (openMenu === menuName) { closeAll(); return; }

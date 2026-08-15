@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
@@ -27,6 +28,15 @@ namespace Pane;
 ///     このウィンドウも明示的に閉じる。PaneApplicationContext.OnWindowClosed参照)。
 ///   ・quitOnLastWindowClosed=false またはプリロード常駐時に本体ウィンドウをすべて閉じても、
 ///     設定画面は取り残されず、そのまま開いた状態を維持する(アプリ自体がまだ生きているため)。
+///
+/// 体感速度対策(事前生成・インスタンス再利用): WebView2の初期化~ページ読み込みには実測で
+/// 無視できない時間がかかる(下記の各Loggerログで実機計測できる)ため、<see cref="PaneApplicationContext"/>が
+/// アイドル時にこのクラスを1つ裏で作っておく(<see cref="Prewarm"/>)。ユーザーが実際に設定を
+/// 開く操作をした時点では、既に読み込みが終わっている前提で<see cref="Reveal"/>を呼ぶだけで済む
+/// (間に合っていなければ、Revealされた後もこれまでどおりinitial-render-ready/フォールバックの
+/// 仕組みで表示される)。閉じる操作(Escape・×ボタン・「戻る」等)ではインスタンスを破棄せず
+/// 非表示にするだけにし(<see cref="OnFormClosing"/>)、次に開く時も同じインスタンス・同じ
+/// WebView2を使い回す。アプリを本当に終了する時だけ<see cref="CloseForReal"/>で破棄する。
 /// </summary>
 internal sealed class SettingsWindow : Form
 {
@@ -48,9 +58,24 @@ internal sealed class SettingsWindow : Form
     /// 同じ役割(このクラスにはタブ・複数ウィンドウの概念が無いぶん単純)。</summary>
     private readonly System.Windows.Forms.Timer _webViewRevealFallbackTimer;
     private bool _webViewRevealed;
+    /// <summary>各段階の所要時間をログに残すための計測開始点(このインスタンスが生成された瞬間)。
+    /// 事前生成の場合はここが「裏で作り始めた時刻」になり、ユーザーが実際に設定を開いた瞬間の
+    /// 体感速度は別途<see cref="PaneApplicationContext.OpenSettingsWindow"/>側で計測する。</summary>
+    private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
+    /// <summary>trueの間だけ<see cref="Close"/>が実際にウィンドウを破棄する。既定はfalseで、
+    /// その間の「閉じる」操作は<see cref="OnFormClosing"/>が非表示化に読み替える
+    /// (インスタンス再利用のため)。アプリ終了時は<see cref="CloseForReal"/>がこれをtrueにしてから
+    /// Closeを呼ぶ。</summary>
+    private bool _realCloseAllowed;
 
-    public SettingsWindow(Form owner, Action broadcastSettingsChanged)
+    /// <summary>初期描画(initial-render-ready受信 or フォールバック)が完了済みかどうか。
+    /// <see cref="PaneApplicationContext.OpenSettingsWindow"/>が、事前生成が間に合っていたかを
+    /// ログに残すために参照する。</summary>
+    public bool IsRevealed => _webViewRevealed;
+
+    public SettingsWindow(Form? owner, Action broadcastSettingsChanged)
     {
+        Logger.Write("SettingsWindow: 生成開始");
         _broadcastSettingsChanged = broadcastSettingsChanged;
 
         Text = "Pane の設定";
@@ -92,12 +117,73 @@ internal sealed class SettingsWindow : Form
         _webViewRevealFallbackTimer.Tick += (_, _) => RevealWebView(viaFallback: true);
 
         Load += OnLoadAsync;
+        // 「閉じる」操作(Escape・×ボタン・キャンセル等、いずれもJS側からの
+        // close-settings-windowメッセージ経由でCloseが呼ばれる、または×ボタン直接)では
+        // インスタンスを破棄せず非表示にするだけにする(体感速度対策: 次に開く時に同じ
+        // WebView2・同じ読み込み済みページを使い回すため)。アプリを本当に終了する時は
+        // CloseForRealが_realCloseAllowedをtrueにしてからCloseを呼ぶので、その場合だけ
+        // ここを素通りして本当に破棄される。
+        FormClosing += OnFormClosing;
         FormClosed += (_, _) =>
         {
-            Logger.Write("SettingsWindow.FormClosed");
+            Logger.Write("SettingsWindow.FormClosed(実破棄)");
             _webViewRevealFallbackTimer.Stop();
             _webViewRevealFallbackTimer.Dispose();
         };
+    }
+
+    private void OnFormClosing(object? sender, FormClosingEventArgs e)
+    {
+        if (_realCloseAllowed) return; // アプリ終了時: 本当に閉じる(FormClosedまで進める)
+        e.Cancel = true;
+        Hide();
+        Logger.Write("SettingsWindow: 閉じる操作 -> 非表示化のみ(インスタンスは再利用のため破棄しない)");
+    }
+
+    /// <summary>アプリ終了時(<see cref="PaneApplicationContext.OnWindowClosed"/>)専用。
+    /// 通常の<see cref="Close"/>は<see cref="OnFormClosing"/>が非表示化に読み替えてしまうため、
+    /// 本当に破棄したい場合はこちらを呼ぶ。</summary>
+    public void CloseForReal()
+    {
+        _realCloseAllowed = true;
+        Close();
+    }
+
+    /// <summary>事前生成(裏読み込み)用。Show()を呼ばずにネイティブハンドルを生成し、
+    /// Loadイベント(→OnLoadAsync、WebView2初期化・Navigateまで)を開始させる。
+    /// Formは通常Show()で初めてハンドルが作られてLoadが発火するが、CreateControl()を
+    /// 直接呼ぶことでVisible=falseのまま(画面には一切出さずに)同じパイプラインを
+    /// 裏で進められる。実際に見せる時は<see cref="Reveal"/>がShow()を呼ぶだけで済む。</summary>
+    public void Prewarm()
+    {
+        Logger.Write("SettingsWindow: 事前生成(Prewarm)開始 - Show()なしでLoadパイプラインを開始する");
+        CreateControl();
+    }
+
+    /// <summary>ユーザーが実際に設定を開いた時に呼ぶ。事前生成・前回のインスタンスを
+    /// そのまま見せるだけで済ませる(WebView2の再初期化・再Navigateは行わない)。
+    /// 既に表示中(既に開いている設定画面をもう一度「設定を開く」で前面に出すだけの
+    /// ケース)では、ユーザーが調整済みのサイズ・位置や入力中の内容を一切変更しない
+    /// (Activateのみ、旧来の「既に開いているため前面へ」と同じ挙動)。実際に非表示状態
+    /// から見せ直す場合だけ、呼び出し元(owner。前回生成時とは別のウィンドウの可能性がある)に
+    /// 合わせて位置・サイズを計算し直し、隠れている間に他の本体ウィンドウ経由で変わった
+    /// 可能性がある項目(最近使ったファイル等)を最新化する。</summary>
+    public void Reveal(Form? owner)
+    {
+        bool wasHidden = !Visible;
+        if (wasHidden)
+        {
+            Size = ComputeInitialSize(owner);
+            Location = ComputeCenteredLocation(owner, Size);
+            if (_webView.CoreWebView2 is not null)
+            {
+                SettingsBridge.PostSettingsSnapshot(PostToWeb);
+            }
+        }
+        if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+        Show();
+        Activate();
+        Logger.Write($"SettingsWindow: Reveal (既存インスタンスを表示, wasHidden={wasHidden}, 読み込み完了済み={_webViewRevealed})");
     }
 
     /// <summary>MainForm.RevealWebViewと同じ役割・同じ二重防御(JS側の正常な通知と
@@ -109,13 +195,15 @@ internal sealed class SettingsWindow : Form
         _webViewRevealFallbackTimer.Stop();
         _webView.Visible = true;
         Logger.Write(viaFallback
-            ? $"SettingsWindow: WebView2を表示(フォールバック: {WebViewRevealFallbackMs}ms以内にinitial-render-readyが届かなかったため強制表示)"
+            ? $"SettingsWindow: WebView2を表示(フォールバック: {WebViewRevealFallbackMs}ms以内にinitial-render-readyが届かなかったため強制表示, 経過={_stopwatch.ElapsedMilliseconds}ms)"
             : "SettingsWindow: WebView2を表示(JS側からinitial-render-ready受信)");
+        Logger.Write($"SettingsWindow: 表示 (合計 {_stopwatch.ElapsedMilliseconds}ms)");
     }
 
     /// <summary>既定サイズ960x760。呼び出し元(owner)が表示されている画面より大きい場合は
-    /// その画面の作業領域に収める。</summary>
-    private static Size ComputeInitialSize(Form owner)
+    /// その画面の作業領域に収める。ownerがnull(事前生成の待機中で本体ウィンドウがまだ無い場合)
+    /// はプライマリスクリーンを基準にする。</summary>
+    private static Size ComputeInitialSize(Form? owner)
     {
         const int defaultWidth = 960;
         const int defaultHeight = 760;
@@ -126,13 +214,13 @@ internal sealed class SettingsWindow : Form
     }
 
     /// <summary>呼び出し元ウィンドウの中央に配置する位置を求める。画面外にはみ出す場合は
-    /// 画面の作業領域内に収める。ownerがまだハンドルを持たない(表示前)の場合は
+    /// 画面の作業領域内に収める。ownerがnull、またはまだハンドルを持たない(表示前)の場合は
     /// 画面中央にフォールバックする。</summary>
-    private static Point ComputeCenteredLocation(Form owner, Size size)
+    private static Point ComputeCenteredLocation(Form? owner, Size size)
     {
         Rectangle area = ResolveWorkingArea(owner);
-        int centerX = owner.IsHandleCreated ? owner.Bounds.Left + owner.Bounds.Width / 2 : area.Left + area.Width / 2;
-        int centerY = owner.IsHandleCreated ? owner.Bounds.Top + owner.Bounds.Height / 2 : area.Top + area.Height / 2;
+        int centerX = owner is { IsHandleCreated: true } o1 ? o1.Bounds.Left + o1.Bounds.Width / 2 : area.Left + area.Width / 2;
+        int centerY = owner is { IsHandleCreated: true } o2 ? o2.Bounds.Top + o2.Bounds.Height / 2 : area.Top + area.Height / 2;
         int x = centerX - size.Width / 2;
         int y = centerY - size.Height / 2;
         x = Math.Max(area.Left, Math.Min(x, area.Right - size.Width));
@@ -140,9 +228,9 @@ internal sealed class SettingsWindow : Form
         return new Point(x, y);
     }
 
-    private static Rectangle ResolveWorkingArea(Form owner)
+    private static Rectangle ResolveWorkingArea(Form? owner)
     {
-        Screen screen = owner.IsHandleCreated ? Screen.FromControl(owner) : Screen.PrimaryScreen ?? Screen.AllScreens[0];
+        Screen screen = owner is { IsHandleCreated: true } o ? Screen.FromControl(o) : Screen.PrimaryScreen ?? Screen.AllScreens[0];
         return screen.WorkingArea;
     }
 
@@ -181,8 +269,10 @@ internal sealed class SettingsWindow : Form
         _webViewRevealFallbackTimer.Start();
 
         // WebView2環境はMainForm側で生成・キャッシュされたものを再利用する(プロセス全体で1つ)。
+        // 既に(preload起動・別ウィンドウ経由で)生成済みならここは即座に返る。
         CoreWebView2Environment env = await MainForm.EnsureEnvironmentAsync();
         await _webView.EnsureCoreWebView2Async(env);
+        Logger.Write($"SettingsWindow: WebView2初期化完了 ({_stopwatch.ElapsedMilliseconds}ms)");
 
         // ブラウザ既定のアクセラレータキー・ページズームの無効化はMainFormと同じ設定に揃える。
         _webView.CoreWebView2.Settings.AreBrowserAcceleratorKeysEnabled = false;
@@ -207,7 +297,7 @@ internal sealed class SettingsWindow : Form
         _webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
             VirtualHostName, distPath, CoreWebView2HostResourceAccessKind.Allow);
         _webView.CoreWebView2.Navigate($"https://{VirtualHostName}/settings-window.html");
-        Logger.Write("SettingsWindow: Navigate呼び出し完了");
+        Logger.Write($"SettingsWindow: Navigate呼び出し ({_stopwatch.ElapsedMilliseconds}ms)");
     }
 
     private void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
@@ -222,7 +312,7 @@ internal sealed class SettingsWindow : Form
             case "initial-render-ready":
                 // 起動時の白フラッシュ対策(新方式)の本体。JS側(src/settings-entry.js)が
                 // 設定画面の初期描画(テーマ適用・内容の描画)を終えた時点で送ってくる。
-                Logger.Write("SettingsWindow: initial-render-ready受信(JS側の初期描画完了通知)");
+                Logger.Write($"SettingsWindow: initial-render-ready受信 ({_stopwatch.ElapsedMilliseconds}ms)");
                 RevealWebView(viaFallback: false);
                 break;
             case "get-settings":

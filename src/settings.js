@@ -228,7 +228,10 @@ const FIELD_DEFS = {
   // Markdownモードのときだけ適用する(コード/プレーンテキストは無制限のまま。src/style.css参照)。
   // 0を指定すると従来どおり無制限になる。
   editorMaxWidthPx: { kind: "number", def: DEFAULT_FONT_SIZE * 42, min: 0, max: 5000 },
-  editorPaddingX: { kind: "number", def: 32, min: 0, max: 200 },
+  // 左右個別に指定できる(ユーザー要望)。旧・editorPaddingX(左右共通1値)からの移行は
+  // Pane/AppSettings.cs GetEffectiveEditorPaddingLeft/Rightが行う。
+  editorPaddingLeft: { kind: "number", def: 32, min: 0, max: 200 },
+  editorPaddingRight: { kind: "number", def: 32, min: 0, max: 200 },
   showWordCount: { kind: "bool", def: true },
 
   // ---- ファイルの関連付け ----
@@ -1445,7 +1448,8 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
       </div>
       <div class="settings-group">
         <div class="settings-group-title">レイアウト</div>
-        ${fieldNumber("editorPaddingX", "本文の左右の余白(px)")}
+        ${fieldNumber("editorPaddingLeft", "本文の左余白(px)")}
+        ${fieldNumber("editorPaddingRight", "本文の右余白(px)")}
         ${fieldNumber("editorMaxWidthPx", "本文の最大幅(px)", "0を指定するとテーマの既定値を使います")}
       </div>
       <div class="settings-group">

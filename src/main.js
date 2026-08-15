@@ -4,7 +4,7 @@
 // 使えない場合(単体のブラウザで動作確認する場合)は File System Access API /
 // File API による仮実装にフォールバックする(Phase 1からの経路をそのまま維持)。
 import { createEditor, DEFAULT_FONT_SIZE } from "./editor.js";
-import { buildCommands, initMenuBar, initCommandPalette, initContextMenu, routeNativeMenuCommand, routeNativeMenuClosed, routeNativeMenuHoverSwitch, bindShortcuts, applyKeyBindings, showContextMenu } from "./commands.js";
+import { buildCommands, initMenuBar, initCommandPalette, initContextMenu, routeNativeMenuCommand, routeNativeMenuClosed, routeNativeMenuArrowSwitch, bindShortcuts, applyKeyBindings, showContextMenu } from "./commands.js";
 import { createSearchUI } from "./search-ui.js";
 import { createSidebar } from "./sidebar.js";
 import { createQuickOpen } from "./quick-open.js";
@@ -387,6 +387,19 @@ function applyFontSetting(rootStyle, cssVar, rawName, label) {
     : `"${name.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
   rootStyle.setProperty(cssVar, value);
   logToHost("info", `${label}: ${value} を適用`);
+}
+
+// 本文の左右余白(仕様書 editorPaddingLeft/editorPaddingRight)用。数値として解釈できない
+// (未設定・欠落)場合だけCSS変数を消して既定値(32px)に戻し、"0"は有効な値として
+// そのまま反映する(不具合修正: 従来は数値が0以下かどうかで「未設定」を判定しており、
+// 明示的に0を指定してもnullと区別できず既定の32pxのままになっていた)。
+function applyEditorPaddingSetting(rootStyle, cssVar, rawValue) {
+  const value = Number(rawValue);
+  if (!Number.isFinite(value)) {
+    rootStyle.removeProperty(cssVar);
+    return;
+  }
+  rootStyle.setProperty(cssVar, `${Math.max(0, value)}px`);
 }
 
 function setDirty(v) {
@@ -2358,11 +2371,16 @@ async function handleHostMessage(msg) {
       const lineHeight = Number(msg.editorLineHeight);
       if (Number.isFinite(lineHeight) && lineHeight > 0) rootStyle.setProperty("--editor-line-height", String(lineHeight));
       else rootStyle.removeProperty("--editor-line-height");
-      // 本文の左右余白(仕様書 editorPaddingX、既定32)。style.css側が
-      // var(--editor-padding-x, 32px) を参照する想定。0以下や未指定なら変数を消してCSS既定に戻す。
-      const paddingX = Number(msg.editorPaddingX);
-      if (Number.isFinite(paddingX) && paddingX > 0) rootStyle.setProperty("--editor-padding-x", `${paddingX}px`);
-      else rootStyle.removeProperty("--editor-padding-x");
+      // 本文の左右余白(仕様書 editorPaddingLeft/editorPaddingRight、既定どちらも32)。
+      // style.css側が var(--editor-padding-left, 32px) / var(--editor-padding-right, 32px) を
+      // 参照する想定。未指定(値自体が届いていない・数値でない)なら変数を消してCSS既定(32px)に
+      // 戻すが、"0"は有効な値として扱う(不具合修正: 従来はeditorPaddingXが0のときも
+      // "0以下や未指定"とまとめて判定していたため、余白を0にする設定が効かず既定の32pxのまま
+      // だった。設定画面では最小値0を選べるため、この2つは区別する必要がある。「未設定」は
+      // 「値自体が届いていない/数値として解釈できない」ことで判定し、0という値そのものは
+      // 未設定と見なさない)。
+      applyEditorPaddingSetting(rootStyle, "--editor-padding-left", msg.editorPaddingLeft);
+      applyEditorPaddingSetting(rootStyle, "--editor-padding-right", msg.editorPaddingRight);
       // カスタムCSS(仕様書 第2.10節 C-07)。C#側がファイル内容を読み込んで文字列として送ってくる
       // (file://は仮想ホスト配下から読めないため)。<head>内の専用<style>要素のtextContentへ
       // 反映する(innerHTMLは使わない)。要素が無ければここで生成する。
@@ -2481,10 +2499,17 @@ async function handleHostMessage(msg) {
       // 解除を、開いていた側(メニューバー or 右クリックメニュー)だけに委ねる。
       routeNativeMenuClosed(msg.menu);
       break;
-    case "menu-hover-switch":
-      // C#側(Pane/MainForm.HandleMenuBarHoverMouseMove)が、開いているメニューの隣の見出しに
-      // マウスが乗ったと判定した。実際の切り替え(commands.jsのhandleMenuHoverSwitch)へ委ねる。
-      routeNativeMenuHoverSwitch(msg.menu);
+    // メニューバーのホバー切り替えは、以前はC#側(ポップアップのMouseMove監視)からの
+    // "menu-hover-switch"通知を受けてここでルーティングしていたが、実機でその通知自体が
+    // 一度も届かないことが確認された。現在はcommands.js側がメニューバーの見出しボタン自体の
+    // mouseenterでホバーを検知して直接切り替えるため、C#からのメッセージは経由しない
+    // (詳細はcommands.js initMenuBarのコメント参照)。
+    case "menu-arrow-switch":
+      // メニューのキーボード操作(ユーザー報告)。ポップアップ表示中に←→キーが押されたことを
+      // C#側(Pane/NativeMenu.cs)が検知して知らせてくる。どのメニュー名へ実際に切り替えるかは
+      // メニューバーの並び順を知っているcommands.js側(ホバー切り替えのhandleMenuHoverSwitchと
+      // 同じopenNativeMenu経路を再利用)に委ねる。
+      routeNativeMenuArrowSwitch(msg.menu, msg.direction);
       break;
   }
 }

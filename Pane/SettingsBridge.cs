@@ -150,7 +150,8 @@ internal static class SettingsBridge
             editorFontSize = settings.EditorFontSize,
             editorLineHeight = settings.EditorLineHeight,
             editorMaxWidthPx = settings.EditorMaxWidthPx,
-            editorPaddingX = settings.EditorPaddingX,
+            editorPaddingLeft = settings.GetEffectiveEditorPaddingLeft(),
+            editorPaddingRight = settings.GetEffectiveEditorPaddingRight(),
             showWordCount = settings.ShowWordCount,
 
             // ---- ファイルの関連付け ----
@@ -419,7 +420,12 @@ internal static class SettingsBridge
             if (TryGetInt(s, "editorFontSize", out int editorFontSize)) settings.EditorFontSize = editorFontSize;
             if (TryGetDouble(s, "editorLineHeight", out double editorLineHeight)) settings.EditorLineHeight = editorLineHeight;
             if (TryGetInt(s, "editorMaxWidthPx", out int editorMaxWidthPx)) settings.EditorMaxWidthPx = editorMaxWidthPx;
-            if (TryGetInt(s, "editorPaddingX", out int editorPaddingX)) settings.EditorPaddingX = editorPaddingX;
+            // editorPaddingX(左右共通1値)はEditorPaddingLeft/Rightに置き換えられた(廃止予定、
+            // 旧設定ファイルからの移行のためだけにAppSettings側に残っている。詳細はAppSettings.cs
+            // EditorPaddingX/GetEffectiveEditorPaddingLeft参照)。設定画面からの保存では常に新しい
+            // 2キーが届くため、ここでは新キーだけを読む。
+            if (TryGetInt(s, "editorPaddingLeft", out int editorPaddingLeft)) settings.EditorPaddingLeft = editorPaddingLeft;
+            if (TryGetInt(s, "editorPaddingRight", out int editorPaddingRight)) settings.EditorPaddingRight = editorPaddingRight;
             if (TryGetBool(s, "showWordCount", out bool showWordCount)) settings.ShowWordCount = showWordCount;
 
             // ---- キーボード ----
