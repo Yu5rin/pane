@@ -37,6 +37,9 @@ internal static class WindowChrome
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int dwAttribute, ref int pvAttribute, int cbAttribute);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
     // ---- 案B: アプリ既定の代表色 ----
     // src/style.css の --paper(背景)・--ink(文字)の実際の値に合わせる。
     // style.cssは:rootブロックを複数回定義しており(仕様書改訂の経緯)、CSSは同じ特異度なら
@@ -179,6 +182,59 @@ internal static class WindowChrome
         {
             Logger.WriteException($"WindowChrome.ToColorRef('{hex}')", ex);
             return 0;
+        }
+    }
+
+    /// <summary>
+    /// 不具合修正: 「エクスプローラからファイルを開いたとき、Paneのウィンドウが前面に来ない
+    /// ことがある」対策。名前付きパイプ経由でウィンドウを開く/切り替えるすべての経路
+    /// (<see cref="PaneApplicationContext.OpenWindowFromPipeRequest"/>・
+    /// <see cref="PaneApplicationContext"/>内のタブ追加・新規ウィンドウ作成・Ctrl+Tab切替)が
+    /// ここを通ることで、確実な前面化を1箇所にまとめる。
+    /// 1. 非表示ならShow()する
+    /// 2. 最小化されていればWindowState=Normalで復元する
+    /// 3. Activate()する(内部でForm.Activate→SetForegroundWindowを試みるが、
+    ///    受信側プロセスにフォアグラウンド権が無いと失敗し得る)
+    /// 4. SetForegroundWindowを明示的にもう一度呼ぶ(SingleInstance側のAllowSetForegroundWindow
+    ///    による権限譲渡と対になっており、こちらは譲渡が効いていれば成功する)
+    /// TopMostを一時的にtrueへ切り替えて戻すようなハックは使わない(ちらつき・
+    /// 「常に手前に表示」設定(MainForm.ToggleAlwaysOnTop)との競合を避けるため)。
+    /// </summary>
+    public static void ForceActivate(Form form)
+    {
+        if (form.IsDisposed) return;
+
+        if (!form.Visible)
+        {
+            form.Show();
+        }
+        if (form.WindowState == FormWindowState.Minimized)
+        {
+            form.WindowState = FormWindowState.Normal;
+        }
+        form.Activate();
+
+        if (form.IsHandleCreated)
+        {
+            TrySetForegroundWindow(form.Handle);
+        }
+    }
+
+    /// <summary>SetForegroundWindowを1回呼び出す。Windows以外の環境ではuser32.dll自体が
+    /// 存在せず呼び出しがDllNotFoundException等になり得るため、丸ごとtry-catchして
+    /// 呼び出し元(ForceActivate)へは例外を伝播させない。失敗してもログに残すのみ。</summary>
+    private static void TrySetForegroundWindow(IntPtr handle)
+    {
+        try
+        {
+            if (!SetForegroundWindow(handle))
+            {
+                Logger.Write($"WindowChrome.TrySetForegroundWindow: 失敗(GetLastError=0x{Marshal.GetLastWin32Error():X8})。フォアグラウンド権が譲渡されていない可能性がある");
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException("WindowChrome.TrySetForegroundWindow", ex);
         }
     }
 
