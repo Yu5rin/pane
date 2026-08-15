@@ -273,6 +273,16 @@ let idleDetectTimer = null;
 let suppressNextAutoDetectChange = false;
 const AUTO_DETECT_PASTE_MIN_CHARS = 80;
 const AUTO_DETECT_IDLE_MS = 1500;
+// バグチェック①の調査で0.55のままにした理由: detect-mode.jsのLANGUAGE_SCORE_THRESHOLD=3
+// (言語判定が何か返すための最低点)と、confidenceの計算式 min(0.9, 0.3+score*0.09) から、
+// 言語判定が非ゼロのconfidenceを返す時点で必ず0.57以上になる(0.3+3*0.09=0.57)。つまり
+// 「コードとして言語が特定できた」場合は、この定数をどこに置いても実質この閾値では
+// 弾けない(0.55を上げるなら0.57超まで上げないと無意味で、そこまで上げるとMarkdown側の
+// 弱い判定(スコア3の下限で0.4+3*0.08=0.64)まで一緒に締め出してしまう)。今回の誤判定
+// (JS 0.57 / CSS 0.66で発火)の真因は、フェンスの中身を言語判定に含めてしまっていたこと
+// (上のdetectContentMode参照)であり、閾値の甘さではなかった。実際、その修正後は
+// 同じ入力の言語スコアが0(判定なし)まで落ちることを確認済みのため、この定数自体は
+// 変更しない。
 const AUTO_DETECT_CONFIDENCE_MIN = 0.55;
 // 全画面表示・常に手前に表示(仕様書 V-08/V-12)の状態。実際のトグルはC#側(WinForms)が
 // 持っており、"window-state"で都度届く値をそのまま保持するだけ(第10.5節: JS側は表示専用)。

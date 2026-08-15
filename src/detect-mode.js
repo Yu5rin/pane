@@ -265,7 +265,21 @@ export function detectContentMode(text) {
   // 2〜4. 言語判定(シバン行→JSON→予約語スコアリングの順、scoreLanguageOnly参照)。
   //       Markdownと断定できるほどではなかった場合に、コードだと確信できるシグナルが
   //       あればそちらを優先する。
-  const lang = scoreLanguageOnly(raw);
+  //
+  // 実機報告(バグチェック①)への対応: ここに生のrawをそのまま渡すと、Markdown文書中の
+  // フェンスコードブロックの「中身」(例: ```python ブロックの中のPythonコード)がそのまま
+  // 言語判定のシグナルとして使われてしまい、「見出し+説明文+フェンス1個」程度のごく
+  // 普通のMarkdownメモが、フェンスの中身だけで(md.score自体は3未満で1のMarkdown判定が
+  // 通らないにもかかわらず)コードモードへ誤って切り替わってしまっていた。scoreMarkdown()が
+  // 既にstripFencedCodeBodies()でフェンスの中身を除いた上でMarkdownシグナルを数えているのと
+  // 同じ理由(「中身をそのまま判定に使うと事故を招く」)で、言語判定にもフェンスの中身を
+  // 除いたテキストを渡す。
+  //
+  // 素のJS/Python等のファイル(フェンス記法自体が無い)では、stripFencedCodeBodies()は
+  // 何も変えない(``` で始まる行が無ければinFenceに入らずそのまま出力するだけ)ため、
+  // 「本当にコードだけの無題文書」の判定には影響しない。
+  const stripped = stripFencedCodeBodies(raw);
+  const lang = scoreLanguageOnly(stripped);
   if (lang.language) {
     return { mode: "code", language: lang.language, confidence: lang.confidence, reason: lang.reason };
   }
