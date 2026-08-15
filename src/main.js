@@ -5,7 +5,7 @@
 // File API による仮実装にフォールバックする(Phase 1からの経路をそのまま維持)。
 import { createEditor, DEFAULT_FONT_SIZE } from "./editor.js";
 import { buildCommands, initMenuBar, initCommandPalette, initContextMenu, routeNativeMenuCommand, routeNativeMenuClosed, routeNativeMenuArrowSwitch, bindShortcuts, applyKeyBindings, showContextMenu } from "./commands.js";
-import { createSearchUI } from "./search-ui.js";
+import { createSearchUI, refreshOpenSearchCount } from "./search-ui.js";
 import { createSidebar } from "./sidebar.js";
 import { createQuickOpen } from "./quick-open.js";
 import { createWordCountPopup } from "./word-count.js";
@@ -1948,6 +1948,13 @@ function switchToTab(id, { skipSaveCurrent = false } = {}) {
     editor.view.scrollDOM.scrollLeft = scrollLeft || 0;
   });
   updateCount();
+  // 【不具合2の修正】検索パネルの「n / 総数」表示(ステータスバーのupdateCount()とは別物)。
+  // ここを呼び忘れていたため、タブを切り替えても前のタブでの検索件数が表示されたまま残り、
+  // 実際のハイライト件数(0件になりうる)とズレていた。refreshOpenSearchCount()自身が
+  // パネル非表示時は何もしない実装なので、無条件に呼んで問題ない(検索パネルを開いていない
+  // 通常のタブ切替では何も起きない)。newTab()/closeTab()もこの関数を経由するため、
+  // 「タブを閉じたとき・新しいタブを開いたとき」も合わせて直る。
+  refreshOpenSearchCount();
   updateStatusMeta();
   updateStatusMode();
   sidebar.setCurrentPath(currentPath);

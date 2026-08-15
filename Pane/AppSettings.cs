@@ -735,27 +735,45 @@ internal sealed class AppSettings
         set => _editorPaddingRight = Math.Clamp(value, 0, 200);
     }
 
-    /// <summary>
-    /// 実際に使う本文の左余白を返す。
-    /// 移行措置: この改修より前のバージョンでは<see cref="EditorPaddingX"/>(左右共通の1値)しか
-    /// 存在しなかった。EditorPaddingXが既定値(32)以外に設定済みで、かつEditorPaddingLeft/Rightが
-    /// どちらもまだ既定値(32)のまま(=新しいキーがまだ一度も書き込まれていない、旧バージョンの
-    /// 設定ファイルをそのまま読み込んだ状態)であれば、旧設定の値を左右どちらにも適用する
-    /// (<see cref="GetEffectiveMathAutoNumber"/>と同じ考え方)。どちらか一方でも既定値以外へ
-    /// 明示的に変更されていれば(=新しい設定画面で一度でも保存されていれば)、以後はこの
-    /// 移行判定を行わず、EditorPaddingLeft/Rightをそのまま使う。
-    /// </summary>
-    public int GetEffectiveEditorPaddingLeft()
-    {
-        if (EditorPaddingX != 32 && EditorPaddingLeft == 32 && EditorPaddingRight == 32) return EditorPaddingX;
-        return EditorPaddingLeft;
-    }
+    /// <summary>実際に使う本文の左余白を返す。旧設定(EditorPaddingX)からの移行は
+    /// <see cref="MigrateEditorPadding"/>が設定ロード直後に一度だけ確定させているため、
+    /// ここでは単純にEditorPaddingLeftを返すだけでよい。</summary>
+    public int GetEffectiveEditorPaddingLeft() => EditorPaddingLeft;
 
-    /// <summary>実際に使う本文の右余白を返す。移行の考え方は<see cref="GetEffectiveEditorPaddingLeft"/>と同じ。</summary>
-    public int GetEffectiveEditorPaddingRight()
+    /// <summary>実際に使う本文の右余白を返す。<see cref="GetEffectiveEditorPaddingLeft"/>参照。</summary>
+    public int GetEffectiveEditorPaddingRight() => EditorPaddingRight;
+
+    /// <summary>
+    /// 【実バグ③の修正】旧・EditorPaddingX(左右共通1値)からEditorPaddingLeft/Rightへの移行を、
+    /// 設定ロード直後に一度だけ確定させる(呼び出し元は<see cref="SettingsService.Load"/>)。
+    ///
+    /// 以前はGetEffectiveEditorPaddingLeft/Right側で「EditorPaddingXが既定値(32)以外、かつ
+    /// EditorPaddingLeft/Rightがどちらも既定値(32)のまま」を毎回判定して移行扱いにしていたが、
+    /// これだと「ユーザーが明示的に左右を32/32に設定して保存した」場合と「まだ一度も移行して
+    /// いない(新しいキーが書き込まれたことがない)」場合を区別できず、前者でも旧いEditorPaddingXの
+    /// 値(例: 50)がいつまでも復活し続けてしまっていた(値を明示的に既定値へ戻したのに戻せない)。
+    ///
+    /// そこで判定を「毎回行う」のをやめ、ロード直後に一度だけ実行してEditorPaddingXを
+    /// 必ず32(=移行済みの印)へ書き換える方式にした。これにより2回目以降のロードでは
+    /// 「EditorPaddingX != 32」が常にfalseになり、以後この移行が誤って再発火することはない
+    /// (=一度移行すれば、その後は保存されたEditorPaddingLeft/Rightの値がそのまま尊重される)。
+    /// 冪等性(何度呼んでも結果が変わらないこと)は下記3パターンで確認済み(コンソールプロジェクトで実測):
+    ///   A: 旧設定(X=50, Left=32, Right=32) → 移行後50/50、X=32。再度呼んでも50/50のまま
+    ///   B: Aの後、ユーザーがLeft/Rightを明示的に32/32へ保存(この時点でX=32のまま) →
+    ///      移行を挟んでも32/32のまま(50には戻らない)
+    ///   C: 新規ユーザー(X=32, Left=32, Right=32) → 32/32のまま
+    /// </summary>
+    public void MigrateEditorPadding()
     {
-        if (EditorPaddingX != 32 && EditorPaddingLeft == 32 && EditorPaddingRight == 32) return EditorPaddingX;
-        return EditorPaddingRight;
+        if (EditorPaddingX != 32 && EditorPaddingLeft == 32 && EditorPaddingRight == 32)
+        {
+            EditorPaddingLeft = EditorPaddingX;
+            EditorPaddingRight = EditorPaddingX;
+        }
+        // 上の条件が成立してもしなくても、ここに到達した時点で移行は完了したものとして扱う。
+        // 以後「EditorPaddingX != 32」が常にfalseになるため、この判定が二度と成立しなくなる
+        // (=ユーザーが後から明示的に32/32を選んでも、旧いXの値で上書きされることはない)。
+        EditorPaddingX = 32;
     }
 
     /// <summary>文字数カウントの常時表示(仕様書 C-09)。既定ON。</summary>

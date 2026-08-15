@@ -425,6 +425,20 @@ const REPLACEMENT_TOKENS_DESC = "使える置換文字列: <code>{title}</code> 
 // DOM構造・データの流れ・保存/検証ロジックはすべて共通)。
 export function createSettings(ctx, { mode = "modal" } = {}) {
   let overlay = null;
+  // 「開いている(=ユーザーに見えている)か」を表すフラグ。以前は!!overlayで代用していたが、
+  // pageモード(専用ウィンドウ)ではウィンドウを閉じてもoverlay(DOM)を破棄せず残すように
+  // なったため(実バグ①の修正、destroy()参照)、overlayの有無と「開いているか」が一致しなく
+  // なった。isOpen()・schedulePrefetch()はこちらを見る。
+  // 注意(pageモードでの制約): open()〜destroy()の間だけtrueにする、というJS側から見える
+  // 唯一のライフサイクルで判定している。pageモードでは専用ウィンドウを閉じたあとC#側が
+  // インスタンスを再利用してHide()/Reveal()を繰り返すが、Reveal()はJS側のopen()を
+  // 呼び直さない("settings"メッセージを送るだけ)ため、このフラグは初回close以降ずっと
+  // falseのままになる(=ネイティブウィンドウが実際に再表示されていてもtrueへは戻らない)。
+  // 現状isOpen()の呼び出し元は無く、schedulePrefetch()にとってはこの「closeされたら
+  // 二度とtrueに戻らない」という性質はむしろ好都合(閉じたあとは常に先読みしてキャッシュを
+  // 温め続けられる)なので、このままにしている。将来isOpen()に「今まさに画面に出ているか」を
+  // 厳密に問い合わせる用途が増えたら、C#側からReveal()時に何らかの通知を送るなど別の仕組みが要る。
+  let isShown = false;
   let navEl = null;
   let contentEl = null;
   let msgEl = null;
@@ -466,7 +480,9 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     prefetchPending = true;
     idleSchedule(() => {
       prefetchPending = false;
-      if (overlay) return;
+      // 「開いている間はopen()自身が最新を取りに行く」の判定はisShownで行う(overlayでは
+      // pageモードで閉じた後も常にtrueになってしまい、以後この先読みが永久に走らなくなるため)。
+      if (isShown) return;
       ctx.bridge.postMessage({ type: "get-settings" });
     });
   }
@@ -524,7 +540,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
   window.__paneSettingsDebug = { getCache: () => settingsCache, getPrefetchPending: () => prefetchPending };
 
   function isOpen() {
-    return !!overlay;
+    return isShown;
   }
 
   function setMessage(text, isError) {
@@ -688,16 +704,63 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
 
   function destroy() {
     cancelActiveCapture();
-    document.removeEventListener("keydown", onDocumentKeydown, true);
-    overlay?.remove();
-    overlay = null;
-    navEl = contentEl = msgEl = saveBtn = searchInput = null;
-    draft = null;
-    themeBaseline = null;
-    tooltipBaseline = null;
-    dirty = false;
-    searchQuery = "";
-    blockedExtensions = [];
+    // 「開いているか」はoverlayの有無ではなくこのフラグで判定する(pageモードでは
+    // 下記のとおりoverlayが閉じた後も残り続けるため)。isOpen()/schedulePrefetch()参照。
+    isShown = false;
+
+    if (mode === "page") {
+      // 【実バグ①の修正】pageモード(専用ウィンドウ)の「閉じる」は、C#側
+      // (Pane/SettingsWindow.OnFormClosing)がウィンドウを非表示にするだけでインスタンス・
+      // WebView2を破棄せず、次にReveal()で同じものを使い回す方式になっている。もしここで
+      // 従来どおりoverlayをDOMから除去すると、settings-entry.jsはページ読み込み時に
+      // open()を一度しか呼ばないため、次にReveal()経由で"settings"応答が届いても
+      // handleSettingsLoaded()が「if (!overlay) return;」で早期リターンし続け、
+      // 二度と再描画されなくなってしまう(ここが実際のバグの原因)。そのためpageモードでは
+      // DOM(overlayとその子要素への参照)を残したまま、「まだ何も読み込んでいない」相当の
+      // 状態までリセットするだけにする。
+      //
+      // documentへのkeydownリスナー(onDocumentKeydown)はbuildShell()内で一度だけ登録して
+      // おり、pageモードはoverlayが残り続ける以上buildShell()を二度と呼ばない
+      // (=登録し直すこともない)ため、ここで外さなくても二重登録にはならない。
+      // 閉じている間はネイティブウィンドウごと非表示(Hide())でこのドキュメントがキー入力を
+      // 受け取ること自体が無いので、外さずに付けたままにしておく。
+      draft = null;
+      themeBaseline = null;
+      tooltipBaseline = null;
+      dirty = false;
+      searchQuery = "";
+      if (searchInput) searchInput.value = "";
+      blockedExtensions = [];
+      // キャッシュ(settingsCache)があれば、それを使って即座に(次のget-settings応答を
+      // 待たずに)再描画しておく。ネイティブウィンドウがHide()されている間はこの再描画は
+      // ユーザーから見えないが、狙いはReveal()時の体感速度: Reveal()もPostSettingsSnapshotで
+      // 最新値を送ってくるがpostMessage経由の非同期応答になるため、先にキャッシュから
+      // 復元しておけばShow()した瞬間には既に(多少古いかもしれないが)正しい形の内容が
+      // 乗っている状態にできる(open()が先読みキャッシュを使う場合と同じ考え方)。
+      // その直後にReveal()からの新しい"settings"応答がhandleSettingsLoaded経由で
+      // 最新値に上書きする。キャッシュが無ければ、open()の初回と同じく
+      // 「読み込んでいます…」に戻し、Reveal()からの応答を待つ。
+      if (settingsCache) {
+        applyLoadedSettings(settingsCache);
+      } else {
+        renderNav(); // searchQueryをリセットしたので、これに合わせてナビだけ描き直す
+        contentEl.innerHTML = '<div class="settings-loading">読み込んでいます…</div>';
+      }
+    } else {
+      // modalモード(本文ウィンドウ内のオーバーレイ)は従来どおりDOMごと破棄する
+      // (pageモードの都合でこちらの挙動を変えないこと)。
+      document.removeEventListener("keydown", onDocumentKeydown, true);
+      overlay?.remove();
+      overlay = null;
+      navEl = contentEl = msgEl = saveBtn = searchInput = null;
+      draft = null;
+      themeBaseline = null;
+      tooltipBaseline = null;
+      dirty = false;
+      searchQuery = "";
+      blockedExtensions = [];
+    }
+
     // 開く前にフォーカスがあった要素(設定ボタン等)へ戻す(focus-trap.js)。
     restoreFocus?.();
     restoreFocus = null;
@@ -734,6 +797,9 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
   }
 
   function open(category) {
+    // isOpen()の判定はこのフラグを見る(overlayの有無ではない。pageモードでは閉じた後も
+    // overlayが残るため。destroy()のコメント参照)。呼ばれた時点で「開いている」とみなす。
+    isShown = true;
     if (overlay) {
       if (category) { activeCategory = category; renderNav(); renderContent(); }
       return;
