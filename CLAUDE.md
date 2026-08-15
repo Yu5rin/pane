@@ -44,3 +44,9 @@ cd C:\Users\YUGO\pane; Get-Process Pane -ErrorAction SilentlyContinue | Stop-Pro
 - パス（`C:\Users\YUGO\pane`）は省略せず毎回そのまま書く
 - `cd` と各コマンドは `;` でつないだ**1つのPowerShellコードブロック**として提示する
 - この手順は**プッシュしたときだけ**提示する
+
+## 時刻の扱い
+
+- ユーザーへの報告で時刻に触れるときは、**必ず日本時間(JST, UTC+9)で書く**。
+- 開発コンテナのシステム時刻はUTCなので、`date` の出力をそのまま書かないこと。
+  `TZ=Asia/Tokyo date` を使うか、UTCに9時間を足して換算する。
