@@ -68,6 +68,16 @@ html[data-theme="dark"] {
   --rule: #E4E7E6;
   --accent: #2F6F68;
   --accent-soft: #E1EFED;
+  /* 依頼⑤: 折りたたみマーカーにマウスを乗せたとき、対応するインデントガイド(縦線・L字)を
+     強調する色。既存のvar(--accent)をそのまま使う(マーカー自体の既存hover配色
+     ―var(--ink-sub)→var(--accent)、editor.js foldOpenMarkerTheme―と揃え、「マーカーと
+     同じ色に変わった線がその範囲」と直感的に対応づけられるようにするため)。
+     var(--accent)を直接参照する新しい変数として切り出したのは、将来「強調色だけ別の色に
+     したい」という要望が出た場合に、themes.css側でこの変数だけ個別に上書きできるように
+     しておくため(9テーマすべてで実測したコントラスト比は今回の対応報告を参照。
+     いずれもvar(--accent)は既にマーカーのhover配色として実測済みで問題ないことが
+     分かっているため、themes.css側への個別追加は不要と判断した)。 */
+  --fold-guide-hover: var(--accent);
 
   /* ===== 画面の各部で色を分けるためのトークン(ユーザー要望: Typora Nightのように
      本文・サイドバー・メニューバー/ステータスバー・タイトルバーそれぞれに違う色を
@@ -1170,14 +1180,17 @@ html[data-theme="dark"] .cm-search-hit { background: rgba(61,193,181,.25); color
   max-width: var(--editor-max-width, none);
 }
 /* コードモードは行番号の余白があるので、本文ほど左を空けない。
-   不具合修正(実機で発見): 左余白は以前12pxだったが、折りたたみマーカー(editor.js
-   FOLD_MARKER_SIZE=15px)はインデント0の行で最大15px左(マーカーの右端をコード開始位置に
-   揃えるため)へはみ出す構造になっている。12px<15pxのため、インデントの無い行のマーカーが
-   3px(=15-12)だけ本文エリアの左端を越え、行番号ガターとの区切り線に食い込んでいた。
-   マーカー幅15pxに少し余裕(5px)を足した20pxへ広げ、マーカーが常に本文エリア内へ収まる
-   ようにする(右余白は変更しない)。念のための保険(設定で極端に狭い値へ変更された場合の
-   クランプ)はeditor.js側のbuildFoldOpenMarkers/FoldOpenMarkerWidgetに別途入れてある。 */
-#cm-host.mode-code .cm-content { padding-left: 20px !important; padding-right: 12px !important; }
+   マーカーの位置を本文エリアの左端に固定する変更(editor.js FOLD_MARKER_GAP_LEFT/
+   FOLD_MARKER_SIZE/FOLD_MARKER_GAP_RIGHT)に伴い、左余白の内訳を次のとおり左右対称にした
+   (ユーザー指摘「プラスマイナスの位置とコードの開始位置が近すぎるので、本文エリアの
+   左端とプラスマイナスマーカーの隙間と同じ分開けてください」への対応)。
+     本文エリア左端 --5px-- マーカー左端 --15px(マーカー本体)-- マーカー右端 --5px-- コード開始位置
+   合計 5 + 15 + 5 = 25px。この3つの数値(5/15/5)を変えるときは、editor.jsの
+   FOLD_MARKER_GAP_LEFT/FOLD_MARKER_SIZE/FOLD_MARKER_GAP_RIGHTと必ず連動させて変更すること
+   (双方が独立している値のため、片方だけ変えると隙間の左右対称が崩れる)。
+   念のための保険(設定で極端に狭い値へ変更された場合、マーカーが本文エリアの外へ出ない
+   ようにするクランプ)はeditor.js側のcomputeFixedMarkerLeftPxに別途入れてある。 */
+#cm-host.mode-code .cm-content { padding-left: 25px !important; padding-right: 12px !important; }
 
 /* ===== コード中のカラープレビュー・カラーピッカー(docs/カラープレビュー仕様.md) =====
    スウォッチ・カラーピッカーパネルとも、色は--paper/--ink/--accent等の既存トークンから

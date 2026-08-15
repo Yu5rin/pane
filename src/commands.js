@@ -138,7 +138,49 @@ export function buildCommands(ctx) {
     { id: "view.sourceMode", menu: "View", label: "ソースコードモード", shortcut: `${MOD}+/`, run: app((c) => c.actions.toggleSourceMode()), checked: () => ctx.getState().sourceMode },
     { id: "view.focusMode", menu: "View", label: "フォーカスモード", shortcut: "F8", run: app((c) => c.actions.toggleFocusMode()), checked: () => ctx.getState().focusMode },
     { id: "view.typewriterMode", menu: "View", label: "タイプライターモード", shortcut: "F9", run: app((c) => c.actions.toggleTypewriterMode()), checked: () => ctx.getState().typewriterMode, separatorAfter: true },
-    { id: "view.wordWrap", menu: "View", label: "折り返し表示", run: app((c) => c.actions.toggleWordWrap()), checked: () => ctx.getState().wordWrap },
+    { id: "view.wordWrap", menu: "View", label: "折り返し表示", run: app((c) => c.actions.toggleWordWrap()), checked: () => ctx.getState().wordWrap, separatorAfter: true },
+    // ---- 折りたたみ(依頼④、VS Codeのコマンドを参考に追加。コードモード限定) ----
+    // enabled: コードモードかつコードモードの折りたたみ機能自体がON(editor().isCodeFolding())
+    // のときだけ有効にする。他のモードでは畳める範囲という概念自体が無く、折りたたみが
+    // OFFのときはfoldNodeProp由来の情報はあっても実際に開閉する仕組み(codeFolding()拡張)が
+    // 積まれていないため(src/editor.js codeModeExtras参照)。既存のenabled運用(例:
+    // file.quickOpenのfolderLoaded)に合わせた作法。
+    //
+    // カーソル位置の折りたたみ/展開・すべて折りたたむ/展開は、既存のCodeMirrorキーマップ
+    // (Alt-[ / Alt-] / Ctrl-Alt-[ / Ctrl-Alt-]、src/editor.js foldKeymapSafe)と全く同じ
+    // 実体(foldCode/unfoldCode/foldAll/unfoldAll)を呼ぶ。ここにも同じshortcutを設定して
+    // メニューに表示することで、bindShortcuts(window捕捉フェーズ)がその組み合わせの
+    // 実際の発火元になる(para.olistがCtrl+Shift+[を横取りしているのと全く同じ構造。
+    // 詳細はeditor.js foldKeymapSafe定義部のコメント参照)。CodeMirror側のキーマップは
+    // 実質的にフォールバックとして残る形になるが、二重発火はしない(bindShortcutsが
+    // stopPropagation()するため後続のCodeMirror側キーマップには到達しない)。
+    { id: "view.foldAtCursor", menu: "View", label: "カーソル位置を折りたたむ", shortcut: "Alt+[", run: () => editor().foldAtCursor(), enabled: () => ctx.getState().mode === "code" && editor().isCodeFolding() },
+    { id: "view.unfoldAtCursor", menu: "View", label: "カーソル位置を展開", shortcut: "Alt+]", run: () => editor().unfoldAtCursor(), enabled: () => ctx.getState().mode === "code" && editor().isCodeFolding() },
+    { id: "view.foldAllRanges", menu: "View", label: "すべて折りたたむ", shortcut: "Ctrl+Alt+[", run: () => editor().foldAllRanges(), enabled: () => ctx.getState().mode === "code" && editor().isCodeFolding() },
+    { id: "view.unfoldAllRanges", menu: "View", label: "すべて展開", shortcut: "Ctrl+Alt+]", run: () => editor().unfoldAllRanges(), enabled: () => ctx.getState().mode === "code" && editor().isCodeFolding(), separatorAfter: true },
+    // 再帰的な折りたたみ/展開(VS Code Fold/Unfold Recursively相当)。判断ポイント(和音
+    // キーについて): VS Codeはこの系統のコマンドに既定でCtrl+K Ctrl+[のような2打鍵の
+    // 和音キーを割り当てているが、Paneの既存のショートカット体系(src/commands.js
+    // bindShortcuts/parseShortcut/matchesShortcut)は「1回のkeydownイベント+同時押しの
+    // 修飾キー」しか認識しない単発方式で、2打鍵を待ち受ける仕組みそのものが存在しない
+    // (設定画面のキーバインド変更(C-10)も単発の組み合わせしか入力できない作り)。
+    // 無理に和音キーの仕組みを新設すると、既存の全ショートカットが前提にしている
+    // 「1回のkeydownで即判定する」設計や、キーバインド設定UIとの整合を広く見直す
+    // 必要が生じ、この依頼の範囲を大きく超える。以下6コマンド(再帰的な折りたたみ/展開・
+    // レベル1〜5・すべてのコメントブロック)は、既存の空いている単発の組み合わせも
+    // 見当たらなかったため、無理に割り当てず、メニュー(および同じ配列を参照する
+    // コマンドパレット)からのみ実行できる形にとどめた。
+    { id: "view.foldRecursively", menu: "View", label: "カーソル位置を再帰的に折りたたむ", run: () => editor().foldRecursivelyAtCursor(), enabled: () => ctx.getState().mode === "code" && editor().isCodeFolding() },
+    { id: "view.unfoldRecursively", menu: "View", label: "カーソル位置を再帰的に展開", run: () => editor().unfoldRecursivelyAtCursor(), enabled: () => ctx.getState().mode === "code" && editor().isCodeFolding(), separatorAfter: true },
+    // レベル1〜5で折りたたむ(VS Code Fold Level 1..5相当)。
+    { id: "view.foldLevel1", menu: "View", label: "レベル1で折りたたむ", run: () => editor().foldToLevel(1), enabled: () => ctx.getState().mode === "code" && editor().isCodeFolding() },
+    { id: "view.foldLevel2", menu: "View", label: "レベル2で折りたたむ", run: () => editor().foldToLevel(2), enabled: () => ctx.getState().mode === "code" && editor().isCodeFolding() },
+    { id: "view.foldLevel3", menu: "View", label: "レベル3で折りたたむ", run: () => editor().foldToLevel(3), enabled: () => ctx.getState().mode === "code" && editor().isCodeFolding() },
+    { id: "view.foldLevel4", menu: "View", label: "レベル4で折りたたむ", run: () => editor().foldToLevel(4), enabled: () => ctx.getState().mode === "code" && editor().isCodeFolding() },
+    { id: "view.foldLevel5", menu: "View", label: "レベル5で折りたたむ", run: () => editor().foldToLevel(5), enabled: () => ctx.getState().mode === "code" && editor().isCodeFolding(), separatorAfter: true },
+    // すべてのコメントブロックを折りたたむ(VS Code Fold All Block Comments相当。
+    // ユーザーが例に挙げた項目そのもの)。
+    { id: "view.foldAllBlockComments", menu: "View", label: "すべてのコメントブロックを折りたたむ", run: () => editor().foldAllBlockComments(), enabled: () => ctx.getState().mode === "code" && editor().isCodeFolding(), separatorAfter: true },
     { id: "view.gotoLine", menu: "View", label: "指定行へジャンプ", shortcut: `${MOD}+G`, run: app((c) => c.actions.gotoLineFlow()), separatorAfter: true },
     { id: "view.fullscreen", menu: "View", label: "全画面表示", shortcut: "F11", run: app((c) => c.actions.toggleFullscreen()), checked: () => ctx.getState().fullscreen },
     { id: "view.zoomReset", menu: "View", label: "実際のサイズ", shortcut: `${MOD}+Shift+0`, run: app((c) => c.actions.zoomReset()) },
