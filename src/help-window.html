@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pane 取扱説明書</title>
+<link rel="icon" type="image/svg+xml" href="icon.svg">
+<script>
+  // index.html/settings-window.htmlと同じ起動時スクリプト(起動時の白フラッシュ対策):
+  // C#側(Pane/HelpWindow.cs)がAddScriptToExecuteOnDocumentCreatedAsyncで、保存されている
+  // テーマ設定に基づくdata-theme属性をこのスクリプトより先に設定している(ブリッジ経由で
+  // Paneアプリとして動いている場合)。それが既に付いていればOS設定より優先して尊重し、
+  // 無い場合(ブラウザ単体検証時など)だけOS設定(prefers-color-scheme)へフォールバックする。
+  // 実際のテーマ(手動選択・プリセット)はhelp-entry.jsがブリッジからの応答を受けて上書きする。
+  try {
+    if (!document.documentElement.dataset.theme) {
+      var dark = matchMedia("(prefers-color-scheme: dark)").matches;
+      document.documentElement.dataset.theme = dark ? "dark" : "light";
+    }
+  } catch (e) {}
+</script>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="themes.css">
+<style>
+  /* 取扱説明書専用ウィンドウ: 本文エディタ・メニューバー・ステータスバーは持たず、
+     ウィンドウの中身はhelp-entry.jsが描画する「左に目次サイドバー・右に本文」の
+     2ペイン構成だけで占める(設定ウィンドウのカテゴリ一覧と同じ見た目)。 */
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--paper); color: var(--ink); font-family: var(--font-body); overflow: hidden; }
+</style>
+</head>
+<body>
+  <script type="module" src="help-entry.js"></script>
+</body>
+</html>

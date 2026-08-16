@@ -1,0 +1,20 @@
+node_modules/
+dist/
+
+# .NET (Pane/)
+bin/
+obj/
+
+# ローカル検証用のPlaywrightスクリプト(コミット対象外)
+.verify-*.mjs
+
+# npm run build が自動生成する。追跡するとビルドのたびに差分が出てpullを妨げるため対象外にする
+Pane/FileTypes.generated.cs
+
+# リリース用Zipの組み立て先(scripts/release.ps1が作る。配布物そのものなので追跡しない)
+publish/
+release/
+
+# ローカル検証用のスクリーンショット・性能計測スクリプト(コミット対象外)
+.shots/
+.perf-*.mjs
