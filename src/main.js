@@ -2729,12 +2729,15 @@ imageInput.addEventListener("change", async () => {
 // 不具合修正: 標準のDOM File APIはセキュリティ上実パスを返さないため、ブリッジがある場合
 // (実アプリ)、dropイベントで分かるのはファイル名とサイズ、そしてFileオブジェクト経由の
 // バイト列のみで、そのままでは拡張子に基づくコードモード判定・保存先の特定ができない
-// 「無題」の文書としてしか開けない。C#側は、ドラッグがウィンドウに入った時点(WebView2の
-// 領域より前)で発火するOnDragEnterでDataFormats.FileDropからフルパスを先に取得できているため
-// (Pane/MainForm.cs _pendingDragFiles参照)、ここではバイト列を送らずファイル名+サイズだけを
-// "open-dropped-file-by-name"として送り、C#側で照合してもらう。C#が照合できればフルパス経由の
-// 正規の経路(拡張子に基づくコードモード判定が効く)で開かれる。ブリッジが無いブラウザ単体動作
-// (開発確認用、WebView2を介さないため上記の仕組みが使えない)では、従来どおりここで処理する。
+// 「無題」の文書としてしか開けない。そこでdropハンドラは次の優先順位でC#へ渡す:
+//   第1経路: WebView2公式のpostMessageWithAdditionalObjectsでFileそのものを渡し、
+//            C#側がCoreWebView2File.Pathからフルパスを直接取得する(dropハンドラ内コメント参照)。
+//   第2経路(保険): 上記APIが無い古いランタイムでは、バイト列を送らずファイル名+サイズだけを
+//            "open-dropped-file-by-name"として送り、C#側がOnDragEnterで先取りしたフルパス
+//            (Pane/MainForm.cs _pendingDragFiles参照)と照合する。照合できればフルパス経由の
+//            正規の経路(拡張子に基づくコードモード判定が効く)で開かれる。
+// ブリッジが無いブラウザ単体動作(開発確認用、WebView2を介さないため上記の仕組みが
+// 使えない)では、従来どおりここで処理する。
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
   let binary = "";
@@ -2771,10 +2774,28 @@ window.addEventListener("drop", async (e) => {
   // 同じ判断)。
   const file = e.dataTransfer.files[0];
   if (bridge) {
-    // 実アプリ: フルパスの照合はC#側に任せる(上のコメント参照)。ここでは名前とサイズだけを
-    // 送り、バイト列はC#が照合に失敗してフォールバックを要求してきたときだけ送る
-    // (下のhandleHostMessageの"request-dropped-file-fallback"参照)。
+    // 実アプリ: どの経路でもC#がフォールバック(request-dropped-file-fallback)を要求して
+    // くる可能性があるため、先にFileを覚えておく。
     pendingDroppedFile = file;
+    // 第1経路(正規): WebView2公式のpostMessageWithAdditionalObjects(SDK 1.0.1774.30以降)。
+    // 第2引数にDOMのFileを含むArrayLike(e.dataTransfer.filesそのまま)を渡すと、C#側の
+    // WebMessageReceivedのAdditionalObjectsへCoreWebView2Fileとして届き、Pathプロパティで
+    // フルパスが取れる(WebView2Feedback specs/WebMessageObjects.mdに記載の公式ユースケース)。
+    // メッセージ本体にも従来同様name/sizeを載せる(C#側でAdditionalObjectsが空だった場合に
+    // 従来の名前+サイズ照合へ倒すための判断材料)。画像かどうかの判定はここでは行わず、
+    // C#側(IsImageFileForDrop)で一元処理する(画像なら本文挿入に分岐する既存挙動を保つ)。
+    if (typeof bridge.postMessageWithAdditionalObjects === "function") {
+      logToHost("log", `open-dropped-file-with-pathを送信(AdditionalObjects付き): name=${file.name}, size=${file.size}`);
+      bridge.postMessageWithAdditionalObjects(
+        { type: "open-dropped-file-with-path", name: file.name, size: file.size },
+        e.dataTransfer.files,
+      );
+      return;
+    }
+    // 第2経路(保険): postMessageWithAdditionalObjectsが未定義の古いランタイムでは、
+    // 従来どおり名前+サイズだけを送ってC#側の照合(DragEnterで先取りしたパスとの
+    // 名前+サイズ照合)に任せる。バイト列はC#が照合に失敗してフォールバックを
+    // 要求してきたときだけ送る(下のhandleHostMessageの"request-dropped-file-fallback"参照)。
     logToHost("log", `open-dropped-file-by-nameを送信: name=${file.name}, size=${file.size}`);
     bridge.postMessage({ type: "open-dropped-file-by-name", name: file.name, size: file.size });
     return;

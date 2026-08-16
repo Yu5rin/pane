@@ -474,11 +474,6 @@ internal sealed class MainForm : Form
         Logger.Write(viaFallback
             ? $"WebView2を表示(フォールバック: {WebViewRevealFallbackMs}ms以内にinitial-render-readyが届かなかったため強制表示)"
             : "WebView2を表示(JS側からinitial-render-ready受信)");
-        // WebView2子ウィンドウのIDropTarget登録解除(3箇所目、実際にユーザーがドラッグ操作を
-        // 始められるようになる直前の最後のタイミング)。EnsureCoreWebView2Async完了直後・
-        // NavigationCompleted時点より後に子ウィンドウが生成/再生成されていた場合の取りこぼしを
-        // ここで拾う。詳細はRevokeWebView2ChildDragDropのコメント参照。
-        RevokeWebView2ChildDragDrop("RevealWebView");
     }
 
     /// <summary>
@@ -532,43 +527,30 @@ internal sealed class MainForm : Form
         await _webView.EnsureCoreWebView2Async(env);
         Logger.Write($"WebView2初期化完了: バージョン={_webView.CoreWebView2.Environment.BrowserVersionString}");
 
-        // ファイルのD&D: AllowExternalDropは既定のtrueのまま変更しない(下記参照)。
+        // ファイルのD&D: AllowExternalDropは既定のtrueのまま変更しない。
         //
-        // 経緯(不具合修正→その副作用の修正→さらにその副作用の修正、計4回目の対応):
-        // 1回目: AllowExternalDropをfalseにしてWebView2に外部ドロップを一切受け取らせず、
-        // 代わりにこのフォーム自身のDragDrop(OnDragDrop)で一括して受け切る方式にしていた。
-        // DataFormats.FileDropからフルパスが取れる利点はあったが、副作用として本文エリア上へ
-        // ファイルをドラッグしている間ずっとカーソルが禁止マーク(🚫)になることが実機で
-        // 確認された(falseにすると、WebView2は「外部からのドロップを一切受け付けない」旨を
-        // OSへ表明するため、OS側のドラッグカーソルが常に拒否扱いになる。参照: Microsoft Learn、
-        // CoreWebView2Controller.AllowExternalDropの解説)。これはUXとして受け入れられないため
-        // 撤回した。
-        // 2回目: AllowExternalDropはtrueに戻し、ドラッグがウィンドウに入った時点で発火する
-        // このフォーム自身のOnDragEnterでDataFormats.FileDropからフルパスを先に読み取り
-        // (_pendingDragFiles)、JSから届く名前+サイズと照合する方式にした。ところが実機ログで
-        // OnDragEnterが本文エリア上では一度も発火していないことが判明した——原因は、Windowsの
-        // OSレベルD&Dが「カーソル直下のHWNDに登録されたIDropTarget」だけを見る仕組みにあり、
-        // AllowExternalDrop=trueのWebView2が自分の子ウィンドウへIDropTargetを登録している
-        // ため、本文エリア(≒クライアント領域のほぼ全体)上ではOSの通知が常にWebView2側で
-        // 止まり、親のこのFormまでは届いていなかった(以前の実機ログでOnDragEnterが発火して
-        // いたのは、WebView2の外側の数ピクセル=formRelativePos=(914,509)に対し
-        // webViewBounds.Width=910、を通過したときだけだった)。
-        // 3回目(今回): WebView2の子ウィンドウ群に登録されているIDropTarget自体を、
-        // Win32のRevokeDragDrop(ole32.dll)で解除する(RevokeWebView2ChildDragDrop参照)。
-        // 登録が無くなれば、OSはドロップ先を探すためウィンドウの親方向を辿り、登録済みの
-        // このForm(AllowDrop=true)へ届く。AllowExternalDropはtrueのままなので禁止マークは
-        // 出ない(WebView2は引き続き「外部ドロップを受け付ける」旨を表明したままだが、
-        // 実際の登録=IDropTargetの実体を外してあるので、OSはFormまで探しに行く)。
-        // 呼び出しはここ(EnsureCoreWebView2Async完了直後)に加え、NavigationCompleted・
-        // RevealWebViewの計3箇所で行う(理由はRevokeWebView2ChildDragDropのコメント参照)。
+        // 経緯(不具合修正、計4回の試行を経た最終形):
+        // 1回目: AllowExternalDrop=falseでこのフォームのOnDragDropへ流す方式は、本文エリア上で
+        // ドラッグ中ずっと禁止マーク(🚫)が出る副作用が実機で確認され撤回。
+        // 2回目: フォームのOnDragEnterでフルパスを先取りし、JSからの名前+サイズと照合する方式は、
+        // WebView2がクライアント領域をほぼ覆っているためOnDragEnter自体が本文エリア上では
+        // 発火しない(OSレベルD&Dは「カーソル直下のHWNDに登録されたIDropTarget」だけを見るため、
+        // 通知が常にWebView2側で止まる)ことが実機ログで判明。ウィンドウ端の数pxを通過した
+        // ときしか動かなかった。
+        // 3回目: Win32のRevokeDragDrop(ole32.dll)でWebView2子ウィンドウのIDropTarget登録を
+        // 解除する方式は、肝心のChrome_WidgetWin_1だけがHRESULT=0x8001010E(RPC_E_WRONG_THREAD)で
+        // 失敗し効果ゼロと実機ログで確定(ウィンドウの所有が別プロセスmsedgewebview2.exeのため
+        // 原理的に不成立)。関連コードは撤去済み。
+        // 4回目(現在の方式): WebView2公式のpostMessageWithAdditionalObjects(SDK 1.0.1774.30
+        // 以降)を使う。JS側(src/main.js)のdropハンドラがDOMのFileを添えて
+        // "open-dropped-file-with-path"を送り、C#側はAdditionalObjectsに届く
+        // CoreWebView2File.Pathからフルパスを直接取得する(HandleOpenDroppedFileWithPath参照)。
+        // C#側でのドラッグの横取りが一切不要なため、禁止マークも発火しない問題も起きない。
         //
-        // 保険として、JS側(src/main.js)の「名前+サイズをC#へ送り、照合できなければバイト列で
-        // フォールバック」という従来の2段構え(HandleOpenDroppedFileByName/
-        // TryResolveDraggedPath/HandleOpenDroppedFile)はそのまま残してある。RevokeDragDropが
-        // 効かない実機環境があった場合でも、そちらの経路(パスなし・ファイル名からの
-        // コードモード推定)で開けるため、デグレードはしない。
-        RevokeWebView2ChildDragDrop("EnsureCoreWebView2Async完了直後");
-        _webView.CoreWebView2.NavigationCompleted += (_, _) => RevokeWebView2ChildDragDrop("NavigationCompleted");
+        // 保険として、JS側の「名前+サイズをC#へ送り、照合できなければバイト列でフォールバック」
+        // という従来の2段構え(HandleOpenDroppedFileByName/TryResolveDraggedPath/
+        // HandleOpenDroppedFile)はそのまま残してある。postMessageWithAdditionalObjectsが
+        // 使えない古いランタイムでも、そちらの経路で開けるため、デグレードはしない。
 
         // ブラウザ既定のアクセラレータキー(Ctrl+U=ソース表示、Ctrl+F=検索、Ctrl+P=印刷、
         // F3=検索、F12=DevTools等)を無効化する。無効化しないとPane独自のショートカット
@@ -1168,8 +1150,16 @@ internal sealed class MainForm : Form
                 // pane-file.localホストが存在しない環境で単体のファイルとして開かれるため)。
                 HandleReadLocalImageRequest(root);
                 break;
+            case "open-dropped-file-with-path":
+                // 実アプリでのD&Dの主経路(第1経路)。JS側がWebView2公式の
+                // postMessageWithAdditionalObjectsでDOMのFileを添えて送ってきており、
+                // AdditionalObjectsのCoreWebView2File.Pathからフルパスを直接取得できる
+                // (詳細はHandleOpenDroppedFileWithPathのコメント参照)。
+                HandleOpenDroppedFileWithPath(root, e);
+                break;
             case "open-dropped-file-by-name":
-                // 実アプリでのD&Dの主経路(AllowExternalDrop=trueのまま、名前+サイズの照合で
+                // 実アプリでのD&Dの第2経路(保険。postMessageWithAdditionalObjectsが使えない
+                // 古いランタイム向け。AllowExternalDrop=trueのまま、名前+サイズの照合で
                 // フルパスを復元する。詳細はHandleOpenDroppedFileByNameのコメント参照)。
                 HandleOpenDroppedFileByName(root);
                 break;
@@ -2341,145 +2331,14 @@ internal sealed class MainForm : Form
         _webView.CoreWebView2.PostWebMessageAsJson(json);
     }
 
-    // ---- WebView2子ウィンドウのOSドロップ先(IDropTarget)登録解除 ----
+    // ---- (撤去済み) WebView2子ウィンドウのOSドロップ先(IDropTarget)登録解除 ----
     //
-    // 経緯(不具合修正、4回目の対応): 従来はAllowExternalDropを既定(true)のままにし、
-    // DragEnterでフルパスを先取りしてJSからの名前+サイズと照合する方式を取っていたが、
-    // 実機でDragEnter自体が(本文エリア上では)発火しないことが判明した。原因は、Windowsの
-    // OSレベルのドラッグ&ドロップが「カーソル直下のHWNDに登録されたIDropTarget」を基準に
-    // 通知先を決める仕組みにあり、AllowExternalDrop=trueのWebView2は自分の子ウィンドウへ
-    // IDropTarget(受け入れる側)を登録しているため、本文エリア(=WebView2がほぼ全体を覆う
-    // クライアント領域)上ではOSの通知が常にWebView2側で止まり、親であるこのForm(こちらも
-    // AllowDrop=trueでIDropTargetを登録済み)までは決して届かなかった。
-    //
-    // 対策: Win32のRevokeDragDrop(ole32.dll)でWebView2の子ウィンドウ群のIDropTarget登録
-    // 自体を解除する。登録が無くなれば、OSはドロップ先を探すために(Windows既定の挙動として)
-    // ウィンドウの親方向を辿り、登録済みのこのForm(AllowDrop=true)へたどり着く。
-    // AllowExternalDropはfalseにしない(既定のtrueのまま)ため、「拒否する」旨をOSへ
-    // 表明することもなく、禁止マーク(🚫)は出ない——Formが実際にDragDropEffects.Copyを
-    // 返すことで「コピー可」の通常カーソルになる。
-    //
-    // 対象HWND: WebView2は自分の内部に複数の子ウィンドウを持つ(Chrome_WidgetWin_*等の
-    // 階層。実際にIDropTargetがどの階層のどのウィンドウへ登録されるかはWebView2/Chromiumの
-    // 内部実装に依存し、このリポジトリのヘッドレス環境では実機で確認できない)。
-    // どれが本命か特定できないため、EnumChildWindowsでWebView2配下の子ウィンドウすべてを
-    // 再帰的に列挙し(EnumChildWindowsは孫以降の子孫ウィンドウも辿る)、WebView2コントロール
-    // 自身のハンドルも含めて全部にRevokeDragDropを呼ぶ。すでに登録が無いウィンドウに対しては
-    // DRAGDROP_E_NOTREGISTERED(0x80040100)が返るだけで、これは異常ではない(下記参照)。
-    //
-    // 呼び出しタイミング(重要、実機で再登録され得ることへの対策):
-    //   (1) EnsureCoreWebView2Async完了直後(OnLoadAsync) ——
-    //       この時点でWebView2コントロール自体のハンドルは存在するが、Chromium側の
-    //       レンダリング用子ウィンドウ群がまだ生成し切っていない可能性がある。それでも
-    //       早い段階の保険として呼んでおく(無駄があっても実害は無い。EnumChildWindowsが
-    //       0件を返すだけ)。
-    //   (2) NavigationCompleted(初回ナビゲーション完了時)——
-    //       ページの読み込みが完了し、Chromiumのレンダリング用子ウィンドウ群が実際に
-    //       生成し終わっている可能性が高いタイミング。このアプリはSPA(index.html 1枚)で
-    //       以後の追加ナビゲーションを行わないため、通常は1回しか発火しないが、将来
-    //       リロード等が入っても自動的に効くようにイベント購読の形にしてある。
-    //   (3) RevealWebView(WebView2を実際に表示する瞬間、initial-render-ready受信または
-    //       そのフォールバックタイマー)——ユーザーが実際にドラッグできるようになる
-    //       直前の最後のタイミングであり、(1)(2)より後に子ウィンドウが生成・再生成されて
-    //       いた場合でも、ここで呼んでおけば取りこぼしを防げる。
-    // 上記3箇所いずれも「イベント一回につき1回呼ぶ」だけで、タイマーによる定期的な
-    // 呼び直しはしていない。理由: このアプリはナビゲーションを1回しか行わないSPAであり、
-    // WebView2がユーザー操作(リサイズ・DevTools起動等)のたびに子ウィンドウのIDropTarget
-    // 登録をやり直す、という公式な仕様上の裏付けは無い。定期呼び出しは常時IDropTarget登録が
-    // 外れた状態を作ってしまい、その間に外部からの通常のOLEドラッグ操作(ファイル以外の
-    // 何か)を誤って壊す副作用の方が心配なため、まずは上記3箇所で十分かを実機で確認する
-    // 方針とした(実機で再登録が確認された場合は、ここへ追加のフックを足す)。
-    //
-    // 既知のリスク(実機で必ず確認すること、詳細は本メソッドを呼び出している各箇所のコメントと
-    // 併せてリポジトリのコミットメッセージ相当の報告を参照): RevokeDragDropはOSレベルの
-    // ドロップ先登録を解除するだけで、ページ内で完結するHTML5ドラッグ(dragstart→drop、
-    // 本文のテキストドラッグ移動やsrc/main.jsのタブ並べ替え)には影響しない“はず”だが、
-    // Windows版ChromiumはHTML5のドラッグ&ドロップ自体をOSのOLEドラッグ&ドロップ機構
-    // (DoDragDrop/IDropTarget)の上に実装しているため、ページ内で完結するドラッグであっても
-    // 同じ登録解除の影響を受け、Formの登録へ横取りされてしまう可能性が否定できない
-    // (このリポジトリのヘッドレス環境では実機のWebView2が動かせず検証不能。ここで正直に
-    // そう明記しておく)。実機で本文のテキストドラッグ移動・タブ並べ替えが機能するか
-    // 必ず確認すること。
-    [DllImport("ole32.dll")]
-    private static extern int RevokeDragDrop(IntPtr hwnd);
-
-    private delegate bool EnumChildWindowsCallback(IntPtr hwnd, IntPtr lParam);
-
-    [DllImport("user32.dll")]
-    private static extern bool EnumChildWindows(IntPtr hWndParent, EnumChildWindowsCallback lpEnumFunc, IntPtr lParam);
-
-    [DllImport("user32.dll", CharSet = CharSet.Auto)]
-    private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
-
-    /// <summary>RevokeDragDropの戻り値(HRESULT)のうち、「元々登録されていなかった」ことを示す値。
-    /// 異常ではない(まだChromium側の子ウィンドウが生成されていない、または既に解除済み等)。</summary>
-    private const int DRAGDROP_E_NOTREGISTERED = unchecked((int)0x80040100);
-
-    /// <summary>
-    /// WebView2コントロール自身のハンドルと、その配下の子孫ウィンドウすべてに対して
-    /// RevokeDragDropを呼び、OSレベルのドロップ先(IDropTarget)登録を解除する。
-    /// 呼び出しタイミング・理由の詳細は直前のコメント群を参照。
-    /// 戻り値(HRESULT)は成否に関わらずすべてログへ残す(実機での切り分け用。
-    /// DRAGDROP_E_NOTREGISTEREDは正常、それ以外の失敗HRESULTは要調査)。
-    /// </summary>
-    /// <param name="trigger">ログ用: どの呼び出し経路から来たか(例: "NavigationCompleted")。</param>
-    private void RevokeWebView2ChildDragDrop(string trigger)
-    {
-        if (!_webView.IsHandleCreated)
-        {
-            Logger.Write($"RevokeWebView2ChildDragDrop({trigger}): WebView2のハンドルが未生成のためスキップ");
-            return;
-        }
-
-        IntPtr rootHandle = _webView.Handle;
-        var targets = new List<IntPtr> { rootHandle };
-        // EnumChildWindowsは孫・ひ孫以降の子孫ウィンドウも含めて再帰的に列挙する
-        // (直接の子だけではない。MSDN: 子の子も辿る旨の記載あり)。
-        EnumChildWindows(rootHandle, (hwnd, _) => { targets.Add(hwnd); return true; }, IntPtr.Zero);
-
-        Logger.Write($"RevokeWebView2ChildDragDrop({trigger}): 対象HWND数={targets.Count}(WebView2自身+子孫)");
-        foreach (IntPtr hwnd in targets)
-        {
-            string className = GetWindowClassNameSafe(hwnd);
-            int hr;
-            try
-            {
-                hr = RevokeDragDrop(hwnd);
-            }
-            catch (Exception ex)
-            {
-                // ole32.dll自体が無い等、通常のWindows実機では起こらないはずの状況への保険。
-                // ここで例外を投げるとOnLoadAsync/NavigationCompleted等の呼び出し元を巻き込んで
-                // しまうため、握りつぶしてログにだけ残す(D&D関連機能が使えないだけで済ませる)。
-                Logger.WriteException($"RevokeWebView2ChildDragDrop({trigger}): hwnd=0x{hwnd:X}({className}) RevokeDragDropの呼び出し自体が失敗", ex);
-                continue;
-            }
-            string resultDesc = hr switch
-            {
-                0 => "S_OK(登録解除に成功)",
-                DRAGDROP_E_NOTREGISTERED => "DRAGDROP_E_NOTREGISTERED(元々未登録。正常)",
-                _ => $"HRESULT=0x{hr:X8}(想定外。要調査)",
-            };
-            Logger.Write($"RevokeWebView2ChildDragDrop({trigger}): hwnd=0x{hwnd:X}(class={className}) -> {resultDesc}");
-        }
-    }
-
-    /// <summary>指定HWNDのウィンドウクラス名を取得する(ログ用の診断情報。取得に失敗しても
-    /// D&D自体の動作には影響しないため、例外は握りつぶして代替文字列を返す)。</summary>
-    private static string GetWindowClassNameSafe(IntPtr hwnd)
-    {
-        try
-        {
-            var buffer = new StringBuilder(256);
-            int length = GetClassName(hwnd, buffer, buffer.Capacity);
-            return length > 0 ? buffer.ToString(0, length) : "(空)";
-        }
-        catch (Exception ex)
-        {
-            Logger.WriteException($"GetWindowClassNameSafe: hwnd=0x{hwnd:X} の取得に失敗", ex);
-            return "(取得失敗)";
-        }
-    }
+    // かつてここにRevokeWebView2ChildDragDrop(Win32のRevokeDragDrop/EnumChildWindows/
+    // GetClassNameのP/Invoke)があったが、実機ログで肝心のChrome_WidgetWin_1だけが
+    // HRESULT=0x8001010E(RPC_E_WRONG_THREAD)で解除できず(ウィンドウの所有が別プロセス
+    // msedgewebview2.exeのため原理的に不成立)、効果ゼロと確定したため全て削除した。
+    // 現在のD&Dのフルパス取得はpostMessageWithAdditionalObjects経由
+    // (HandleOpenDroppedFileWithPath参照)。
 
     private string? _lastDragLogKey;
 
@@ -2627,13 +2486,51 @@ internal sealed class MainForm : Form
         OpenFile(path);
     }
 
-    /// <summary>JS側(src/main.js)から届く"open-dropped-file-by-name"の受け口。標準のDOM File
+    /// <summary>JS側(src/main.js)から届く"open-dropped-file-with-path"の受け口(D&amp;Dの第1経路)。
+    /// JSはWebView2公式のpostMessageWithAdditionalObjects(SDK 1.0.1774.30以降)でDOMのFileを
+    /// 添えて送ってきており、<see cref="CoreWebView2WebMessageReceivedEventArgs.AdditionalObjects"/>
+    /// の各要素が<see cref="CoreWebView2File"/>として届く。そのPathプロパティがフルパスで、
+    /// そのまま正規の経路(<see cref="OpenDroppedPathAsync"/>: 画像分岐・フォルダ分岐・
+    /// 空文書判定→現ウィンドウ/新ウィンドウ)へ渡せる。複数ドロップは先頭の1件のみ使う
+    /// (既存挙動の維持。JS側・<see cref="OnDragDrop"/>と同じ判断)。
+    /// AdditionalObjectsがnull/空・キャスト失敗・Pathが空のときは、メッセージ本体の
+    /// name/sizeを使って従来の名前+サイズ照合(<see cref="HandleDroppedFileByNameCore"/>)へ倒す。</summary>
+    private void HandleOpenDroppedFileWithPath(JsonElement message, CoreWebView2WebMessageReceivedEventArgs e)
+    {
+        string name = TryGetString(message, "name", out string nameValue) ? nameValue : "";
+        // サイズの受け取り方の理由はHandleOpenDroppedFileByName参照。
+        long size = TryGetDouble(message, "size", out double sizeValue) ? (long)sizeValue : -1;
+        int count = e.AdditionalObjects?.Count ?? -1;
+        Logger.Write($"open-dropped-file-with-path受信: name={name}, size={size}, " +
+            $"AdditionalObjects件数={(count < 0 ? "(null)" : count.ToString())}");
+
+        if (e.AdditionalObjects is { Count: > 0 } objects)
+        {
+            // 先頭の1件のみ使う(複数ドロップ時は残りを無視する既存挙動を維持)。
+            if (objects[0] is CoreWebView2File file && !string.IsNullOrEmpty(file.Path))
+            {
+                Logger.Write($"open-dropped-file-with-path: AdditionalObjects経由でフルパス取得: {file.Path}");
+                _pendingDragFiles = null; // 保険経路用の保持パスはもう不要(次回以降の誤照合を防ぐ)
+                _ = OpenDroppedPathAsync(file.Path);
+                return;
+            }
+            Logger.Write($"open-dropped-file-with-path: AdditionalObjects[0]がCoreWebView2Fileでない、" +
+                $"またはPathが空(実際の型={objects[0]?.GetType().FullName ?? "(null)"})。名前+サイズ照合へ倒す");
+        }
+        else
+        {
+            Logger.Write("open-dropped-file-with-path: AdditionalObjectsがnullまたは空。名前+サイズ照合へ倒す");
+        }
+
+        // フォールバック: 従来の"open-dropped-file-by-name"と同じ処理
+        // (DragEnterで先取りしたパスとの照合→駄目ならバイト列フォールバック要求)。
+        HandleDroppedFileByNameCore("open-dropped-file-with-path(フォールバック)", name, size);
+    }
+
+    /// <summary>JS側(src/main.js)から届く"open-dropped-file-by-name"の受け口(D&amp;Dの第2経路。
+    /// postMessageWithAdditionalObjectsが使えない古いランタイム向けの保険)。標準のDOM File
     /// APIはセキュリティ上フルパスを返さないため、JSはファイル名(+サイズ)しか送ってこない。
-    /// <see cref="_pendingDragFiles"/>(DragEnterで先に取得済みのフルパス一覧)と名前・サイズで
-    /// 照合し、一致すればフルパス経由の正規の経路(<see cref="OpenDroppedPathAsync"/>)へ、
-    /// 一致しなければJSへバイト列を要求し、名前+中身だけの「無題」文書として開く従来経路
-    /// (<see cref="HandleOpenDroppedFile"/>)へフォールバックする(照合に失敗する経路は
-    /// 通常あり得ないはずだが、そこで何も起きないのは最悪のため必ずどちらかへ倒す)。</summary>
+    /// 照合・フォールバックの本体は<see cref="HandleDroppedFileByNameCore"/>参照。</summary>
     private void HandleOpenDroppedFileByName(JsonElement message)
     {
         string name = TryGetString(message, "name", out string nameValue) ? nameValue : "";
@@ -2642,17 +2539,30 @@ internal sealed class MainForm : Form
         // 現実的なファイルサイズの照合には十分)。
         long size = TryGetDouble(message, "size", out double sizeValue) ? (long)sizeValue : -1;
         Logger.Write($"open-dropped-file-by-name受信: name={name}, size={size}");
+        HandleDroppedFileByNameCore("open-dropped-file-by-name", name, size);
+    }
 
+    /// <summary>名前+サイズによるドロップ済みファイルの解決処理の本体。
+    /// <see cref="_pendingDragFiles"/>(DragEnterで先に取得済みのフルパス一覧)と名前・サイズで
+    /// 照合し、一致すればフルパス経由の正規の経路(<see cref="OpenDroppedPathAsync"/>)へ、
+    /// 一致しなければJSへバイト列を要求し、名前+中身だけの「無題」文書として開く従来経路
+    /// (<see cref="HandleOpenDroppedFile"/>)へフォールバックする(照合に失敗する経路でも
+    /// 何も起きないのは最悪のため必ずどちらかへ倒す)。
+    /// "open-dropped-file-by-name"(第2経路)と、"open-dropped-file-with-path"(第1経路)で
+    /// AdditionalObjectsが取れなかった場合の両方から呼ばれる。</summary>
+    /// <param name="logPrefix">ログ用: どの経路から来たか。</param>
+    private void HandleDroppedFileByNameCore(string logPrefix, string name, long size)
+    {
         string? matchedPath = TryResolveDraggedPath(name, size);
         if (matchedPath is not null)
         {
-            Logger.Write($"open-dropped-file-by-name: DragEnterで保持済みのパスと照合成功 -> {matchedPath}");
+            Logger.Write($"{logPrefix}: DragEnterで保持済みのパスと照合成功 -> {matchedPath}");
             _pendingDragFiles = null; // 使い終わったのでクリア(次回以降の誤照合を防ぐ)
             _ = OpenDroppedPathAsync(matchedPath);
             return;
         }
 
-        Logger.Write("open-dropped-file-by-name: フルパスの照合に失敗したため、バイト列によるフォールバックを要求する");
+        Logger.Write($"{logPrefix}: フルパスの照合に失敗したため、バイト列によるフォールバックを要求する");
         PostToWeb(new { type = "request-dropped-file-fallback" });
     }
 
