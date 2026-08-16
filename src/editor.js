@@ -2,7 +2,7 @@
 // index.html から createEditor() で生成し、返り値のAPIで操作する。
 // 依存はすべてesbuildでビルド成果物(dist/)に同梱する。実行時に外部CDNへは一切到達しない。
 import { EditorView, keymap, Decoration, ViewPlugin, WidgetType, lineNumbers, GutterMarker, gutterLineClass } from "@codemirror/view";
-import { EditorState, Compartment, StateEffect, StateField, Prec, Transaction, countColumn, RangeSet } from "@codemirror/state";
+import { EditorState, Compartment, StateEffect, StateField, Prec, Transaction, countColumn, RangeSet, MapMode } from "@codemirror/state";
 import { markdown } from "@codemirror/lang-markdown";
 import { Strikethrough, Table, Superscript, Subscript, Emoji, Autolink } from "@lezer/markdown";
 import { defaultKeymap, history, historyKeymap, indentWithTab, insertNewline, undo, redo, moveLineUp, moveLineDown, copyLineDown, deleteLine, indentLess, indentSelection, selectAll } from "@codemirror/commands";
@@ -777,6 +777,51 @@ function pairInlineHtmlTags(state, tagNodes) {
   return { pairs, singles };
 }
 
+// コードコピーボタンのマウスホバー状態(cm-cb-hot、依頼①)を、DOMへ直接
+// classList.add/removeするのではなく、StateField+StateEffectで保持する(不具合修正)。
+//
+// 【不具合の経緯】 旧実装はcodeCopyHoverPlugin(下記)がview.contentDOMへ直接
+// addEventListenerし、ホバー中の行が属するブロックの開始行(.cm-cb-first)へ
+// classList.add("cm-cb-hot")するだけの、CodeMirrorの装飾システムを経由しない実装だった。
+// ところがCodeMirrorのDecoration.line({class})は、装飾(Decoration)が再構築されるたびに
+// 行DOMのclass属性ごと上書きする(=既存のclass文字列を丸ごと置き換える。個々のクラスを
+// 差分更新するわけではない)。livePreview(下記のViewPlugin)はupdate()内で
+// `u.transactions.length`を見ており、ドキュメントに対するほぼ全てのdispatch
+// (=本文のどこか1文字でも入力すれば)で decorations を作り直す。このとき
+// 「マウスがコードブロックの外の場所へ動いていなくても」該当行のclass属性が
+// cm-cb-hot抜きの文字列で上書きされ、表示中だったコピーボタンが消える不具合になっていた
+// (実測: .verify-codecopy-hover-fix2.mjs参照。このリポジトリでは同種の「DOMへ直接付けた
+// クラスが装飾の再構築で消える」落とし穴を過去にも踏んでいる)。
+// 対策として、ホバー中のブロックの鍵(data-cbと同じ値の文字列。無ければnull)を
+// StateFieldに持たせ、livePreviewのbuild()がcm-cb-first行のclass文字列を組み立てる際に
+// 混ぜて出す(=cm-cb-hotも他のクラスと同じ「装飾が再構築されるたびに正しい値で
+// 書き直される」対象になるため、再構築で消えることが構造的に無くなる)。
+// マウス側は、ホバー対象のブロックが実際に変わった時だけdispatchする(mousemoveのたびに
+// 毎回dispatchすると1文字入力のたびに全行を走査しなくても済む性能上の配慮とは別に、
+// 無駄なdispatch自体を減らせる)。
+// 値は「ホバー中のブロックの開始フェンス行の位置(open.from、数値)」またはnull。文字列化した
+// data-cbと比較するのではなく数値のまま持つのは、mapPos()でドキュメント変更に追従させる
+// ため(下記)。
+//
+// 不具合(このStateFieldを作った直後に実機相当の検証で発覚): ホバー中のコードブロックより
+// 前の位置で編集が起きると(例: 先頭の見出しに1文字入力)、そのブロックの開始フェンス行の
+// 実際の位置(open.from)は編集ぶんだけ動くが、StateFieldにただ効果の値を保持するだけの
+// 実装だと、保持している位置が古いまま(編集前の位置)になってしまい、build()側で
+// 「今のopen.fromと一致するか」を比較しても一致せずcm-cb-hotが付かなくなっていた
+// (=直そうとしていたのと同じ「消える」症状が、別の経路でまた起きていた)。
+// tr.changes.mapPos()でこの位置をトランザクションごとに追従させることで解決する
+// (該当位置自体が編集で削除された場合はMapMode.TrackDelによりnullへ落ちる=そのブロックの
+// 開始フェンス行そのものが編集で無くなった場合はホバー状態を素直に諦める)。
+const setCodeCopyHotBlock = StateEffect.define();
+const codeCopyHotBlockField = StateField.define({
+  create: () => null,
+  update: (v, tr) => {
+    for (const e of tr.effects) if (e.is(setCodeCopyHotBlock)) v = e.value;
+    if (v != null && tr.docChanged) v = tr.changes.mapPos(v, -1, MapMode.TrackDel);
+    return v;
+  },
+});
+
 const livePreview = ViewPlugin.fromClass(class {
   constructor(view) {
     this.decorations = this.build(view);
@@ -833,7 +878,13 @@ const livePreview = ViewPlugin.fromClass(class {
               // コピーボタンの表示条件(依頼①、cursorInside判定の使い回し): カーソルがこの
               // ブロックの中にあれば、ボタンがある開始行(cm-cb-first)にだけ「表示する」印の
               // クラスを付ける(スタイルはstyle.css .cm-cb-first.cm-cb-live参照)。
-              + (ln === open.number && blockLive ? " cm-cb-live" : "");
+              + (ln === open.number && blockLive ? " cm-cb-live" : "")
+              // マウスホバー中の表示(依頼①、cm-cb-hot): codeCopyHotBlockField(上記コメント
+              // 参照、不具合修正)の値をここで読み、装飾の一部として出す。DOMへ直接
+              // classList.add/removeしていた旧実装と違い、この行のclass文字列は装飾が
+              // 再構築されるたびにここで組み立て直されるため、キー入力等で再構築が起きても
+              // ホバー状態が消えない。
+              + (ln === open.number && state.field(codeCopyHotBlockField, false) === open.from ? " cm-cb-hot" : "");
             // data-cb: このブロックの一意な鍵(開始フェンス行の位置)。マウスホバーで
             // ボタンを表示する処理(livePreviewExt内のdomEventHandlers)が、ホバーされた
             // 行から「自分はどのブロックに属するか」を辿るために使う(FoldOpenMarkerWidgetの
@@ -2589,26 +2640,30 @@ const markdownLanguageExt = () => markdown({ extensions: [Strikethrough, Table, 
 // 直接addEventListenerする(ViewPlugin.destroy()で確実に後始末する)。これなら
 // ignoreEvent()の判定を経由しないため、行番号やその他将来追加されうる
 // ignoreEvent()=trueな要素の上を通っても確実に拾える。
+// 不具合修正: cm-cb-hotの実体はcodeCopyHotBlockField(livePreview定義部のコメント参照)へ
+// 移した。このプラグインの役割は「マウスがどのブロックの上にあるか」を検出して
+// StateEffectをdispatchすることだけになり、DOMのclassListには一切触れない
+// (装飾の再構築で消える経路が構造的に無くなる)。dispatchはホバー対象のブロックが
+// 実際に変わった時だけ行う(同じブロック内でのmousemove/mouseoverの連続発火のたびに
+// 無駄なdispatch・再描画を起こさないための性能上の配慮)。
 const codeCopyHoverPlugin = ViewPlugin.fromClass(class {
   constructor(view) {
     this.view = view;
     this.onOver = (event) => {
       const line = event.target.closest?.(".cm-codeblock-line");
-      const group = line?.getAttribute("data-cb") ?? null;
-      for (const hot of view.contentDOM.querySelectorAll(".cm-cb-hot")) {
-        if (hot.getAttribute("data-cb") !== group) hot.classList.remove("cm-cb-hot");
-      }
-      if (group) {
-        const first = view.contentDOM.querySelector(`.cm-cb-first[data-cb="${CSS.escape(group)}"]`);
-        if (first) first.classList.add("cm-cb-hot");
-      }
+      // data-cb属性はHTML属性なので常に文字列。codeCopyHotBlockField側は数値(mapPos()で
+      // 追従させるため、上記コメント参照)で持つのでNumber()で揃える。
+      const group = line ? Number(line.getAttribute("data-cb")) : null;
+      const cur = view.state.field(codeCopyHotBlockField, false) ?? null;
+      if (group !== cur) view.dispatch({ effects: setCodeCopyHotBlock.of(group) });
     };
     // 本文エリア(contentDOM)自体からポインタが完全に出た時(ガター・スクロールバー・画面外への
     // 移動を含む)にホバー状態を確実に解除する。mouseoverは子要素間の移動でも発火するため、
     // これだけでは「エリア外に出た」ことを判定できない(mouseleaveはバブリングしないため
     // contentDOMへ直接張ることで確実に拾える)。
     this.onLeave = () => {
-      for (const hot of view.contentDOM.querySelectorAll(".cm-cb-hot")) hot.classList.remove("cm-cb-hot");
+      const cur = view.state.field(codeCopyHotBlockField, false) ?? null;
+      if (cur !== null) view.dispatch({ effects: setCodeCopyHotBlock.of(null) });
     };
     view.contentDOM.addEventListener("mouseover", this.onOver);
     view.contentDOM.addEventListener("mouseleave", this.onLeave);
@@ -2623,7 +2678,7 @@ const codeCopyHoverPlugin = ViewPlugin.fromClass(class {
 // buildExtensions()側に移した。理由はfocusField定義部・emojiCompletionSource定義部の
 // コメント参照)。
 const livePreviewExt = () => [
-  livePreview, tableBlocksField, tableField, tableAutoFormat,
+  livePreview, codeCopyHotBlockField, tableBlocksField, tableField, tableAutoFormat,
   frontmatterField, tocParasField, tocField, extTogglesField,
   mathBlocksField, mathBlockDecoField,
   mermaidBlocksField, mermaidBlockDecoField, // Mermaid図(仕様書 第4.2節・第8.3節)
@@ -2705,12 +2760,15 @@ const FOLD_MARKER_GAP_RIGHT = 5; // マーカー右端→コード開始位置�
 
 // 1行につき1つ(稀に複数)の折りたたみマーカーを、本文側(.cm-content)にwidget decorationで
 // 描画する。マーカーは行の先頭(line.from、行頭の空白より前)に挿入した幅0のアンカー要素の
-// 内側に、position:absoluteで「行頭の空白の文字数ぶん」右へ寄せて配置する。widget自体は
-// 幅0のためテキストの流し込み位置(=コードの開始位置)を一切動かさない(依頼「本文の文字と
-// 重ならないこと」への対応。行頭の空白の上に重ねる形)。
+// 内側に、position:absoluteで配置する。左端の位置は「行頭の空白の文字数ぶん右へ寄せる」の
+// ではなく、下記computeFixedMarkerLeftPxが返す固定px(本文エリアの左端からFOLD_MARKER_GAP_LEFT
+// px、行のインデントの深さには一切依存しない。2713行付近の大きなコメントの「3世代目」が
+// この設計そのもの。旧2世代目は`ch`単位でインデントに追従させていたが、ネストが深いほど
+// 誤差が積み重なる不具合が実機で見つかり、インデント追従自体をやめて固定位置へ変えた)。
+// widget自体は幅0のためテキストの流し込み位置(=コードの開始位置)を一切動かさない
+// (依頼「本文の文字と重ならないこと」への対応。行頭の空白の上に重ねる形)。
 //
-// 不具合修正(実装中に発覚): 当初は横位置をCSSの`ch`単位(calc(leftCh ch - ...px))で
-// マーカーの左端px(view単位で常に同じ1値)を求める。マーカーはwidgetのアンカーとして
+// マーカーはwidgetのアンカーとして
 // line.from(=行頭空白より前、.cm-contentのpadding-left内側の起点)に挿入されるため、
 // アンカー基準のleft座標「-contentPaddingLeftPx」がちょうど.cm-content左端(paddingの
 // 外側=本文エリアの左端)に一致する。そこからさらに右へFOLD_MARKER_GAP_LEFT pxずらせば
@@ -2758,8 +2816,8 @@ class FoldOpenMarkerWidget extends WidgetType {
     });
     // 依頼⑤: マーカーにマウスを乗せたら、その範囲に対応する縦線(GuideLineWidget)だけを
     // 強調する。マーカーが本文エリアの左端に固定されたことで、コード側のどこが折りたためる
-    // 範囲なのか目で追いにくくなったため、その埋め合わせとして始点〜終点(L字含む)を
-    // ひと目で示す。
+    // 範囲なのか目で追いにくくなったため、その埋め合わせとして始点〜終点をまっすぐな縦線で
+    // ひと目で示す(L字終端は廃止済み。経緯は3300行付近の大きなコメント参照)。
     //
     // 実装方式(判断ポイント): decoration set全体を再構築せず、DOM要素へのクラスの
     // 付け外しだけで完結させる(依頼「ホバーのたびに全体を再構築しないこと」)。
@@ -3314,9 +3372,34 @@ function indentFoldAncestorsAt(state, lineNumber) {
   return chain;
 }
 
-// マーカーの中心を通る縦線1本ぶんのwidget。half=true(その範囲の開始行)のときは行の下半分
-// だけ(マーカーの中心から下)を、false(それ以降の行・最終行)のときは行の全高を塗る
-// (依頼「マーカーの中心から下へ」を、開始行では文字どおり中心を起点にすることで表現する)。
+// lineNumber行を包んでいる祖先の実インデント列(lineIndentColumnと同じ測り方)を、
+// 浅い→深い順の配列で返す。indentFoldAncestorsAtとほぼ同じ遡り方だが、あちらが
+// 「折りたたみ範囲(from/to)」まで組み立てるのに対し、こちらは列の数値だけを求める
+// 軽量版(buildAllIndentGuides専用。indentFoldRangeForLine越しの判定を経由しない分、
+// 構文的に折りたためない行(波括弧を持たない単文if等)の内側でも正しく列を拾える)。
+// 空行は無視して遡る(indentFoldAncestorsAtと同じ)。INDENT_FOLD_SCAN_LIMIT行まで
+// 遡ったら打ち切る(同じ定数を共有。病的に深いネストへの対策)。
+function indentAncestorColsAt(state, doc, lineNumber) {
+  const cols = [];
+  if (lineNumber < 1 || lineNumber > doc.lines) return cols;
+  let curCol = lineIndentColumn(state, doc.line(lineNumber).text);
+  let n = lineNumber - 1, scanned = 0;
+  while (n >= 1 && scanned < INDENT_FOLD_SCAN_LIMIT) {
+    const text = doc.line(n).text;
+    scanned++;
+    if (text.trim() === "") { n--; continue; } // 空行は無視して遡る
+    const col = lineIndentColumn(state, text);
+    if (col < curCol) {
+      cols.push(col);
+      curCol = col;
+      if (curCol === 0) break; // これ以上浅い祖先は無い
+    }
+    n--;
+  }
+  cols.reverse(); // 浅い→深い順にする
+  return cols;
+}
+
 // 折りたたみ範囲・インデントレベルを表す縦線1本ぶんのwidget("all"/"fold"共通、依頼②)。
 // 行の全高をまっすぐ塗るだけ(旧elbow引数は廃止。L字はユーザーの希望で取りやめになった)。
 // rangeFrom: この線が属する折りたたみ範囲の一意な鍵(範囲のfrom位置。isRangeFolded/
@@ -3473,53 +3556,61 @@ const foldGuideLinePlugin = ViewPlugin.fromClass(class {
 }, { decorations: (v) => v.decorations });
 
 // "all"モード: すべてのインデント階層に縦線を引く。折りたたみ範囲(foldNodeProp等)の
-// 有無に関係なく、行頭空白のcodeIndentSizeごとの列に機械的に引く(旧indentGuideMarksと
-// 同じ考え方)。ただし列のpx化は"fold"モードと全く同じ経路(view.defaultCharacterWidthの
-// 実測px)を通すため、依頼②「'all'と'fold'で同じ階層の線は必ず同じx座標」が構造的に
-// 成立する(CSSの`ch`単位は一切使わない)。
+// 有無に関係なく、行の実インデント幅から機械的に決める(旧indentGuideMarksと同じ考え方)。
+// 列のpx化は"fold"モードと全く同じ経路(view.defaultCharacterWidthの実測px)を通すため、
+// 依頼②「'all'と'fold'で同じ階層の線は必ず同じx座標」が構造的に成立する
+// (CSSの`ch`単位は一切使わない)。
 //
-// 【設計(重要): 構造的な範囲は"fold"モードと全く同じ規則で先に描き切ってから、残りを
-// 汎用の行インデント幅で埋める】
-// "all"モードでも、折りたたみ範囲(collectActiveGuideSegments)ぶんは"fold"モードと全く
-// 同じロジック(開始行には自分の範囲の線を引かず、終了行はisLineDeeperThanLevelで判定)で
-// 先に描く。その後、まだどの範囲にも属さない列だけを、行自身のインデント幅から汎用に埋める
-// (=allモードの「折りたたみ構造に関係なく全深さを見せる」という役割はここで果たす)。
-// これにより、"all"モードの構造的な部分は"fold"モードの出力を完全に包含する形になる。
+// 【設計(不具合修正版): 「行自身のインデント幅」から求めた実列(indentAncestorColsAt)を
+// 主とし、構文的な折りたたみ範囲(collectActiveGuideSegments)はホバー強調(依頼⑤)用の
+// 付帯情報としてのみ使う】
+// 旧実装は「構造的な範囲をcodeIndentSizeの倍数グリッドで先に描き、そのグリッドに
+// 乗らない列だけを埋める」という順序だったため、以下のケースで"all"が"fold"と
+// 完全に同じ表示にしかならない不具合があった(実測で確認済み。詳細は対応報告参照):
+//   - 折りたたみ範囲が「行の後ろに深い行が続くかどうか」だけで決まる場合(言語未設定の
+//     コードモード等)は、"fold"自体が既にすべての実インデント遷移を拾ってしまうため、
+//     "all"が上乗せする余地が構造的に無くなる。
+//   - 波括弧を持たない単文if等、構文木上は折りたためない行の内側で、実際のインデント幅が
+//     codeIndentSize(設定値)の倍数からずれていると、旧実装のグリッド計算
+//     (Math.floor(実列 / codeIndentSize))が深さを過小に見積もり、本来引くべき列を
+//     取りこぼす(codeIndentSizeの既定値4に対し実際のファイルが2幅インデントの場合など、
+//     現実によくある組み合わせで発生した)。
+// 今回は、表示範囲を上から1行ずつなぞりながら「まだ閉じていない祖先の実インデント列」を
+// 昇順のスタックとして保つ方式に変える(indentAncestorColsAtの考え方を表示範囲全体の
+// 1回の走査に均したもの)。構文木・言語の有無や折りたたみ可否に一切依存せず、行の実際の
+// 字下げの比較だけで決まるため、"fold"では拾えない構造の内側にも正しく列を引ける。
+// スタックの初期状態だけ、表示範囲の先頭行についてindentAncestorColsAt(上限
+// INDENT_FOLD_SCAN_LIMIT行の遡り)で1回求める(collectActiveGuideSegmentsの祖先チェーン
+// 計算と同じ考え方)。以降は表示行を1回なぞる間、浅くなった分だけpopし、新しく深くなった
+// 分だけpushするだけなのでO(表示行数)に収まる(1行ごとに毎回遡り直す旧方式より軽い)。
 function buildAllIndentGuides(view) {
   const { state } = view;
   const doc = state.doc;
   const lineHeightPx = view.defaultLineHeight;
   const charWidthPx = view.defaultCharacterWidth;
-  const indentSize = state.tabSize; // setCodeIndentSizeが設定する値と同じ(codeIndentSize)
   const segments = collectActiveGuideSegments(view);
   const marks = [];
 
-  // (a) 構造的な折りたたみ範囲ぶん。buildFoldGuideLinesと全く同じループ・同じ判定式
-  // (行自身のインデント幅は見ない)。この行・列に構造的な線を引いたことをcoveredByLineへ
-  // 記録し、(b)で二重に描かないようにする。
-  const coveredByLine = new Map(); // lineNumber -> Set(leftCol)
+  // 依頼⑤のホバー強調用の付帯情報: fold相当の判定(開始行には引かない・終了行は
+  // isLineDeeperThanLevelで判定。buildFoldGuideLinesと全く同じ規則)で、
+  // 「行番号→(実インデント列→rangeFrom)」を作る。同じ列に構造的な範囲があれば
+  // そのrangeFromを線に載せ、"all"モードでもマーカーホバー時の強調が効くようにする
+  // (無ければrangeFrom=nullの汎用線として扱う=ホバー強調の対象外)。
+  const structuralByLine = new Map(); // lineNumber -> Map(leftCol -> rangeFrom)
   for (const block of view.viewportLineBlocks) {
     const docLine = doc.lineAt(block.from);
     const n = docLine.number;
     for (const seg of segments) {
-      // 開始行には自分の範囲の線を引かない(buildFoldGuideLinesと同じ判定、VS Codeと同じ)。
       if (n <= seg.fromLine || n > seg.toLine) continue;
-      // 終了行は、実インデントがこの範囲の階層より深い場合だけ引く(isLineDeeperThanLevel参照)。
       if (n === seg.toLine && !seg.toLineDeep) continue;
-      if (!coveredByLine.has(n)) coveredByLine.set(n, new Set());
-      coveredByLine.get(n).add(seg.leftCol);
-      marks.push(Decoration.widget({
-        widget: new GuideLineWidget(seg.leftCol * charWidthPx, lineHeightPx, seg.rangeFrom),
-        side: -1,
-      }).range(block.from));
+      let m = structuralByLine.get(n);
+      if (!m) { m = new Map(); structuralByLine.set(n, m); }
+      m.set(seg.leftCol, seg.rangeFrom);
     }
   }
 
-  // (b) 構造的な範囲でカバーされていない列を、行自身の実際のインデント幅から機械的に
-  // 埋める(旧indentGuideMarksと同じ考え方)。空行の前後にある直近の非空白行の行頭空白の
-  // 列数を求めるための小さなキャッシュ・探索。空行が連続する箇所で毎回ゼロから数え直さない
-  // よう、一度求めた列数は使い回す。探索は上限を設け(病的に長い空行の連続への対策)、
-  // 見つからなければガイド無し(0)扱いにする。
+  // 空行の前後にある直近の非空白行の行頭空白の列数を求めるための小さなキャッシュ・探索
+  // (空行をまたいでも線が途切れないようにする、既存の考え方をそのまま踏襲)。
   const widthCache = new Map();
   const SCAN_CAP = 200;
   function leadingCol(lineNo) {
@@ -3530,13 +3621,6 @@ function buildAllIndentGuides(view) {
     widthCache.set(lineNo, w);
     return w;
   }
-  function prevNonBlankCol(lineNo) {
-    for (let n = lineNo - 1, i = 0; n >= 1 && i < SCAN_CAP; n--, i++) {
-      const w = leadingCol(n);
-      if (w !== null) return w;
-    }
-    return 0;
-  }
   function nextNonBlankCol(lineNo) {
     for (let n = lineNo + 1, i = 0; n <= doc.lines && i < SCAN_CAP; n++, i++) {
       const w = leadingCol(n);
@@ -3545,24 +3629,46 @@ function buildAllIndentGuides(view) {
     return 0;
   }
 
-  for (const { from, to } of view.visibleRanges) {
+  const ranges = view.visibleRanges;
+  const firstLineNo = ranges.length ? doc.lineAt(ranges[0].from).number : 1;
+  const stack = indentAncestorColsAt(state, doc, firstLineNo); // 昇順、firstLineNo未満の実列だけ
+
+  for (const { from, to } of ranges) {
     let pos = from;
     while (pos <= to) {
       const line = doc.lineAt(pos);
-      const col = line.length === 0
-        ? Math.min(prevNonBlankCol(line.number), nextNonBlankCol(line.number)) // 空行: 前後の小さいほうに合わせる
-        : lineIndentColumn(state, line.text);
-      const levelCount = Math.floor(col / indentSize);
-      const covered = coveredByLine.get(line.number);
-      for (let j = 0; j < levelCount; j++) {
-        const levelCol = j * indentSize;
-        if (covered && covered.has(levelCol)) continue; // (a)で既に描画済み(構造的な範囲)
-        // 汎用の目盛り線: 折りたたみ範囲に対応しないため rangeFrom=null(依頼⑤のホバー強調の対象外)。
+      const isBlank = line.length === 0;
+      // 空行の扱い: スタックには既に「この空行より前の実内容行」の祖先が反映済みなので、
+      // 前方(prevNonBlankCol)は見る必要が無い(旧実装は毎行独立に計算していたため
+      // prev/nextの小さいほうを取っていたが、スタック方式ではprev側はスタックの現在値
+      // そのものに既に織り込まれている)。空行の直後の実内容行(nextNonBlankCol)がこの
+      // 空行より浅ければ、そこで閉じる祖先はこの空行にも表示しない(その祖先はもう
+      // 空行の時点で「閉じかけ」であり、次の行でスタックからpopされる運命にあるため)。
+      // これにより、空行をまたいでも同じ深さの区間ではガイドが途切れない(fold構造由来の
+      // 構造的な範囲がその区間をカバーしているときのガイドの本数と一致する)。
+      // isBlank===falseの行はこの判定を使わず、自分の実インデントをそのまま使う。
+      const ownCol = isBlank ? nextNonBlankCol(line.number) : lineIndentColumn(state, line.text);
+      // 実内容行だけスタックを更新する(空行はどの階層にも属さないため祖先の増減に数えない、
+      // indentAncestorColsAtと同じ扱い)。自分より深い/同じ祖先は、この行に来た時点で
+      // もう祖先ではない(閉じた)ので取り除く。
+      if (!isBlank) {
+        while (stack.length && stack[stack.length - 1] >= ownCol) stack.pop();
+      }
+      const structural = structuralByLine.get(line.number);
+      for (const col of stack) {
+        // 空行はスタックを更新しないため(上のisBlank分岐参照)、ここで改めてownCol未満に
+        // 絞る必要がある(非空行では事前のpopにより常にtrue、実質は空行向けの絞り込み)。
+        // stackは昇順なので、以降の要素も全てownCol以上になり打ち切ってよい。
+        if (col >= ownCol) break;
+        const rangeFrom = structural ? (structural.get(col) ?? null) : null;
         marks.push(Decoration.widget({
-          widget: new GuideLineWidget(levelCol * charWidthPx, lineHeightPx, null),
+          widget: new GuideLineWidget(col * charWidthPx, lineHeightPx, rangeFrom),
           side: -1,
         }).range(line.from));
       }
+      // このインデントが以降の行にとって新しい祖先候補になる(次に自分以下の深さの行が
+      // 来るまでスタックに残る)。
+      if (!isBlank && (stack.length === 0 || stack[stack.length - 1] < ownCol)) stack.push(ownCol);
       if (line.to + 1 > to) break;
       pos = line.to + 1;
     }
@@ -3722,7 +3828,8 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
   let codeFoldingOn = true;
   // コードモードのインデントガイド(縦線)。3択の設定(既定は"fold")。
   //   "none" … 表示しない
-  //   "fold" … 折りたたみできる範囲に対応する階層だけ(開始行から最終行のL字まで。既定)
+  //   "fold" … 折りたたみできる範囲に対応する階層だけ(開始行の次の行から、実インデントが
+  //            深い最終行まで、まっすぐな縦線を引く。L字終端は廃止済み。既定)
   //   "all"  … すべてのインデント階層
   // 旧実装は真偽値(codeIndentGuidesOn)で常時ON/OFFしか無かったが、ユーザーから
   // 「インデントごとに罫線する必要はないと考えているが設定で切り替えたほうがいいか」との
@@ -3758,7 +3865,7 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
     // 「マーカーの無い縦線」だけが残るのは見た目上不自然なため(マーカーが1つも出ないのに
     // 縦線だけ生える状態を避ける)。allモードはcodeFoldingOnに関わらず表示する(旧実装から
     // 変更なし。isRangeFolded/foldedRangesはcodeFolding()拡張が無くても安全に呼べるため、
-    // L字判定・ホバー強調も含めて問題なく動く)。
+    // 終了行の判定(isLineDeeperThanLevel)・ホバー強調も含めて問題なく動く)。
     ...(codeIndentGuidesMode === "all" ? [allIndentGuidePlugin, guideLineTheme] : []),
     ...(codeIndentGuidesMode === "fold" && codeFoldingOn ? [foldGuideLinePlugin, guideLineTheme] : []),
     // 依頼②: 現在行の強調表示(本文・行番号ガター両方)。コードモード限定なのでここ

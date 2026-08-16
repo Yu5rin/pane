@@ -1218,8 +1218,15 @@ html[data-theme="dark"] .cm-search-hit { background: rgba(61,193,181,.25); color
    合計 5 + 15 + 5 = 25px。この3つの数値(5/15/5)を変えるときは、editor.jsの
    FOLD_MARKER_GAP_LEFT/FOLD_MARKER_SIZE/FOLD_MARKER_GAP_RIGHTと必ず連動させて変更すること
    (双方が独立している値のため、片方だけ変えると隙間の左右対称が崩れる)。
-   念のための保険(設定で極端に狭い値へ変更された場合、マーカーが本文エリアの外へ出ない
-   ようにするクランプ)はeditor.js側のcomputeFixedMarkerLeftPxに別途入れてある。 */
+   事実確認(2026-08、コメントと実装の食い違いを修正): この25pxもFOLD_MARKER_GAP_LEFT/
+   FOLD_MARKER_SIZE/FOLD_MARKER_GAP_RIGHTもいずれも設定画面から変更できるユーザー設定
+   ではなくハードコードされた定数であり(Markdown/プレーンテキストモードの左余白が従う
+   --editor-padding-left設定は、上のより詳細なセレクタ#cm-host.mode-code .cm-contentに
+   よってコードモードでは常に上書きされる=このpadding-leftはコードモードでは常に25pxの
+   まま変わらない)、editor.js側のcomputeFixedMarkerLeftPxにもクランプ処理は無い(単純な
+   引き算のみ)。両者が食い違う経路は現状の設定項目には存在しないため、保険としての
+   クランプは実装せず、上記の「3つの数値を変えるときは必ず連動させること」という
+   コメント上の注意点だけで一貫性を保つ方針にしてある。 */
 #cm-host.mode-code .cm-content { padding-left: 25px !important; padding-right: 12px !important; }
 
 /* ===== コード中のカラープレビュー・カラーピッカー(docs/カラープレビュー仕様.md) =====
