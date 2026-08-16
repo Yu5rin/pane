@@ -16,7 +16,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$Version = "1.0.0",
+    [string]$Version = "1.0.1",
     [switch]$FrameworkDependent,
     # 既に release フォルダに同名の Zip があるとき、確認せず上書きする
     [switch]$Force

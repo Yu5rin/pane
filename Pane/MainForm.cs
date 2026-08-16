@@ -430,12 +430,24 @@ internal sealed class MainForm : Form
     /// </summary>
     private void ApplyInitialWebViewBackground()
     {
-        AppSettings settings = SettingsService.Load();
-        bool isDark = ResolveIsDarkTheme(settings.Theme);
-        Color background = ResolveThemeBackgroundColor(isDark);
+        Color background = ResolveInitialThemeBackgroundColor(out bool isDark);
         BackColor = background;
         _webView.DefaultBackgroundColor = background;
         Logger.Write($"ApplyInitialWebViewBackground: isDark={isDark}, color={ColorTranslator.ToHtml(background)}");
+    }
+
+    /// <summary>
+    /// 保存済み設定のテーマから「起動直後に見せるべき背景色」を解決する。
+    /// <see cref="ApplyInitialWebViewBackground"/>(BackColor/DefaultBackgroundColor)と
+    /// <see cref="Program"/>のWEBVIEW2_DEFAULT_BACKGROUND_COLOR環境変数が必ず同じ色になるよう、
+    /// 「設定を読む→ダーク判定→色に変換」という手順をここ1か所に集約する
+    /// (色の値そのものの定義は<see cref="ResolveThemeBackgroundColor"/>が唯一の出どころ)。
+    /// </summary>
+    internal static Color ResolveInitialThemeBackgroundColor(out bool isDark)
+    {
+        AppSettings settings = SettingsService.Load();
+        isDark = ResolveIsDarkTheme(settings.Theme);
+        return ResolveThemeBackgroundColor(isDark);
     }
 
     /// <summary>
@@ -566,7 +578,35 @@ internal sealed class MainForm : Form
         // 大原則1)。代わりにJS側(src/main.js)が独自メニューを組み立て、"open-context-menu"で
         // ネイティブポップアップ(Pane/NativeMenu.cs)を表示させる(HandleOpenContextMenuRequest参照)。
         _webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
+        // ブラウザ標準のスクリプトダイアログ(alert/confirm/prompt/beforeunloadの離脱確認)を出さない。
+        // src/main.jsのbeforeunloadハンドラは、未保存時にブラウザ標準の離脱確認を出しうるが、
+        // 保存確認はC#側のFormClosing(ConfirmDiscardDirtyAsync)で一元的に行っているため、
+        // 塞いでも実害は無く、二重にダイアログが出る方が問題になる。第三者ライブラリが
+        // alert()を呼んだ場合もPaneのデザインと無関係な標準ダイアログを出さずに黙殺できる。
+        _webView.CoreWebView2.Settings.AreDefaultScriptDialogsEnabled = false;
+        // タッチ/プレシジョンタッチパッドの2本指ピンチによるズームを無効化する。
+        // IsZoomControlEnabled=false(上)はCtrl+ホイール等のブラウザズームUIを塞ぐだけで、
+        // ピンチズームは塞がらない(公式ドキュメントにも「has no effect on the existing browser
+        // zoom properties」と明記)。有効なままだとページがクリップされ、スクロールバーでは
+        // 到達できない領域が生まれるうえ、Pane独自のズーム(本文フォントサイズ変更)と二重に効く。
+        _webView.CoreWebView2.Settings.IsPinchZoomEnabled = false;
+        // リンクにマウスを乗せたときChromium標準のURLチップ(左下に出る小さな帯)を出さない。
+        // Pane独自のステータスバーと同じ位置に重なって表示されてしまうため。
+        _webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
+        // Chromium標準のオートフィル候補(住所・氏名等)を出さない。Paneのデザインと無関係な
+        // 見た目のポップアップが入力欄に出るうえ、メモ帳アプリとして入力内容をブラウザ
+        // プロファイルへ保存しないのが妥当なため。
+        _webView.CoreWebView2.Settings.IsGeneralAutofillEnabled = false;
         _webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
+        // 外部リンク(window.open・target="_blank"・iframe内のリンク・中クリック等)は、Pane内に
+        // 新しいWebView2ウィンドウを作らせず、OSの既定ブラウザで開く(実機で確認された不具合の修正)。
+        // 購読しない(あるいはHandledをfalseのままにする)と、公式ドキュメントのとおり
+        // 「If this is false and no NewWindow is set, the WebView opens a popup window ...
+        // there is no avenue to control the popup window from the app」となり、Pane内に
+        // 制御不能なポップアップウィンドウが開いてしまう。処理の中身とURL検証・IsUserInitiatedに
+        // ついての判断は、3ウィンドウ共通のExternalLinkServiceを参照。
+        // 本体ウィンドウのログは元から接頭辞を持たないため、接頭辞には空文字を渡す。
+        _webView.CoreWebView2.NewWindowRequested += (_, e) => ExternalLinkService.HandleNewWindowRequested(e, "");
 
         // ローカル画像配信用の専用ホスト(不具合修正: 本文はhttps://pane.local/index.htmlとして
         // 表示されており、そこ(pane.local、下でdist/へマッピング)には編集中の.mdと同じフォルダの
@@ -3295,12 +3335,20 @@ internal sealed class MainForm : Form
 
     // ---- 印刷(仕様書 File項目「印刷」)。WebView2既定の印刷ダイアログを開く。
     //
-    // 制約(WebView2のAPIで実現できない項目): ShowPrintUI()は「印刷ダイアログを表示する」だけの
-    // メソッドで、CoreWebView2PrintSettingsを渡す引数が無い(用紙サイズ・余白・ヘッダー/フッター
-    // 等の既定値を事前設定する手段がAPI上に存在しない)。設定を確実に反映できるのは
-    // PrintToPdfAsync(path, printSettings)のみのため、docs/設定項目一覧.md「エクスポート・印刷」節の
-    // 詳細設定はPDFエクスポート(HandleExportRequestAsync)にのみ適用し、この「印刷」コマンド
-    // (Ctrl+Alt+P・File>印刷)には適用しない。印刷ダイアログ上でユーザー自身が設定し直す前提。 ----
+    // 設計判断(なぜ詳細設定が反映されないか): ShowPrintUI()は「印刷ダイアログを表示する」だけの
+    // メソッドで、CoreWebView2PrintSettingsを渡す引数が無い(これは事実。用紙サイズ・余白・
+    // ヘッダー/フッター等の既定値を事前設定する手段がこのAPIには存在しない)。
+    // 一方でCoreWebView2.PrintAsync(CoreWebView2PrintSettings)は存在し(SDK 1.0.1518.46以降。
+    // Paneが参照する1.0.2903.40で利用可能)、公式にも「Print the current web page asynchronously
+    // to the specified printer with the provided settings」と記載されているとおり、設定を反映した
+    // 印刷自体は技術的に可能である。ただしPrintAsyncは印刷ダイアログを一切出さず、プリンタ名も
+    // 設定側で指定する必要があるため、採用するならプリンタ選択UI(既定プリンタの列挙・選択・
+    // 部数指定等)をPane側で自前に用意しなければならない。現状はそこまで作らず、ユーザーが
+    // 慣れているOS/ブラウザの印刷ダイアログをそのまま出すShowPrintUIを採用している。
+    // その結果として、docs/設定項目一覧.md「エクスポート・印刷」節の詳細設定はPDFエクスポート
+    // (HandleExportRequestAsync、PrintToPdfAsync(path, printSettings))にのみ適用され、この
+    // 「印刷」コマンド(Ctrl+Alt+P・File>印刷)には適用されない。印刷ダイアログ上でユーザー自身が
+    // 設定し直す前提。 ----
     private Task HandlePrintRequestAsync()
     {
         try

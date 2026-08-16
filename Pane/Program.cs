@@ -20,6 +20,8 @@ internal static class Program
         // .NET (Core以降) は既定でこれらのコードページを同梱していないため必須。
         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 
+        ApplyWebView2DefaultBackgroundColorEnvironmentVariable();
+
         // コマンドライン引数でのファイル・フォルダ指定(仕様書 N-25 / F-14):
         // Pane.exe <file> / Pane.exe <folder> 。フォルダかどうかの判定は実際に開く段階
         // (PaneApplicationContext.OpenWindow)でDirectory.Existsにより行うため、ここでは
@@ -88,5 +90,52 @@ internal static class Program
         Application.Run(context);
 
         server.Stop();
+    }
+
+    /// <summary>
+    /// 起動時の白フラッシュ対策(公式ドキュメントが既知不具合として挙げている回避策)。
+    ///
+    /// CoreWebView2Controller.DefaultBackgroundColorの公式ドキュメントには
+    /// 「There is a known issue with background color where just setting the color by property can
+    /// still leave the app with a white flicker before the DefaultBackgroundColor property takes
+    /// effect. Setting the color via environment variable solves this issue.」と明記されている。
+    /// すなわちプロパティ設定(MainForm.ApplyInitialWebViewBackground等)だけでは白のちらつきが
+    /// 残りうるため、環境変数WEBVIEW2_DEFAULT_BACKGROUND_COLORでも同じ色を渡す。
+    ///
+    /// 呼ぶ位置: CoreWebView2Environment.CreateAsync(MainForm.EnsureEnvironmentAsync)より前で
+    /// なければ効かないため、Main冒頭のここで設定する。
+    ///
+    /// 値の形式: 0xAARRGGBB。公式ドキュメントの「The value must be a hex value that can optionally
+    /// prepend a 0x. The value must account for the alpha value which is represented by the first
+    /// 2 digits.」に従い、先頭2桁のアルファ(不透明=FF)を必ず含める。
+    /// 色そのものはMainForm.ResolveInitialThemeBackgroundColor(=ResolveThemeBackgroundColor)から
+    /// 取るため、WinForms側のBackColor/DefaultBackgroundColorと必ず同じ色になる(色の値をここに
+    /// 書き写さない。二重管理を避けるため)。
+    ///
+    /// 重要(方針): 既存の「WebView2をVisible=falseで生成し、JSからのinitial-render-ready受信または
+    /// フォールバックタイマーで表示する」機構(MainForm/SettingsWindow/HelpWindow)は撤去しない。
+    /// あちらは実機で白フラッシュが直らなかった末に採用された機構であり、いま実機で効いている
+    /// 可能性がある。環境変数と同時に外すと、白フラッシュが再発したときにどちらが原因か切り分け
+    /// できなくなるため、この環境変数は「足すだけ」にとどめる。
+    ///
+    /// 起動後のテーマ切替については、公式ドキュメントのとおり環境変数は一度設定したら以降は
+    /// プロパティ側で変更する必要がある。Paneではテーマ変更時のDefaultBackgroundColor設定が
+    /// 既にその役目を担っているため、ここでの追加対応は不要(起動時の1回だけ効けばよい)。
+    /// </summary>
+    private static void ApplyWebView2DefaultBackgroundColorEnvironmentVariable()
+    {
+        try
+        {
+            Color background = MainForm.ResolveInitialThemeBackgroundColor(out bool isDark);
+            string value = $"0xFF{background.R:X2}{background.G:X2}{background.B:X2}";
+            Environment.SetEnvironmentVariable("WEBVIEW2_DEFAULT_BACKGROUND_COLOR", value);
+            Logger.Write($"WEBVIEW2_DEFAULT_BACKGROUND_COLOR={value} (isDark={isDark})");
+        }
+        catch (Exception ex)
+        {
+            // 設定ファイルが壊れている等でテーマを解決できなくても、起動自体は続行する
+            // (白フラッシュ対策が1層減るだけで、既存の非表示+タイマー機構は効いている)。
+            Logger.WriteException("WEBVIEW2_DEFAULT_BACKGROUND_COLORの設定に失敗", ex);
+        }
     }
 }
