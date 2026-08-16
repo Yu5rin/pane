@@ -1752,7 +1752,7 @@ function autoFileMode(fileName) {
 }
 // 編集モード決定(仕様書 第1章)。優先順位: 1.そのファイルパスの手動記憶(perFileModes)
 // 2.拡張子ごとの既定モード上書き(fileModeOverrides) 3.拡張子からの既定判定(resolveFileMode)。
-function decideFileMode(path, fileName) {
+function decideFileMode(path, fileName, fileNameIsReal = false) {
   if (path && Object.prototype.hasOwnProperty.call(perFileModes, path)) {
     return perFileModes[path];
   }
@@ -1760,7 +1760,15 @@ function decideFileMode(path, fileName) {
   // 無題の新規文書と同じ扱いでMarkdownにする。C#側は表示名として"無題"を送ってくるため、
   // これをそのまま拡張子判定に掛けると「"無題"という拡張子」とみなされてプレーンテキストへ
   // 落ちてしまう(復元したMarkdown文書がプレーンテキストで開く不具合の原因だった)。
-  if (!path) return autoFileMode(null);
+  if (!path) {
+    // 保存先が無い文書は既定では無題の新規文書と同じ扱い(Markdown)にする。ただし
+    // D&Dで開いた場合のように「保存先はまだ無いが、ファイル名は実在のファイルのもの」
+    // という場合があり、そのときは拡張子どおりのモードで開くのが正しい
+    // (実機報告: sw.jsをドロップしてもMarkdownで開いてしまっていた)。
+    // C#側(MainForm.OpenDroppedContent)がfileNameIsReal:trueを付けて送ってくる。
+    if (!fileNameIsReal) return autoFileMode(null);
+    return autoFileMode(fileName);
+  }
   return autoFileMode(fileName);
 }
 
@@ -2155,7 +2163,7 @@ async function applyFileOpened(msg) {
   pushClosedFile(currentPath);
   resetAutoDetectState(); // 文書が変わるので内容からの自動判定の状態(仕様書 第1章の拡張)もリセット
   // 拡張子だけでなく、拡張子ごとの既定モード上書き・ファイル単位の手動記憶も考慮する(仕様書 第1章)。
-  await editor.setFileMode(msg.fileName, decideFileMode(msg.path ?? null, msg.fileName));
+  await editor.setFileMode(msg.fileName, decideFileMode(msg.path ?? null, msg.fileName, msg.fileNameIsReal === true));
   // 不具合4の修正: awaitで待っている間により新しい「開く」要求(file-opened/open-in-tab/
   // new-document)が届いていたら、この呼び出しの結果はもう古い。currentPath/本文/ステータス
   // 表示を書き換えると、新しい要求で既に表示している内容を後から上書きして消してしまう
