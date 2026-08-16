@@ -1246,6 +1246,14 @@ const ctx = {
         paneAlert({ title: "設定を開けません", message: "設定画面の読み込みに失敗しました。もう一度お試しください。" });
       });
     },
+    // 取扱説明書(F1、仕様書 第10.1節相当のヘルプ)。設定画面(openSettings)と同じ考え方:
+    // 独立した専用ウィンドウ(Pane/HelpWindow.cs、src/help-entry.js)をC#側に開かせる
+    // (同時に1つしか開かない。既に開いていればC#側が前面に出す)。ブリッジが無いブラウザ単体
+    // 動作(開発確認用)では専用ウィンドウを開かせようが無いため、help-window.htmlを別タブで開く。
+    openHelp() {
+      if (bridge) { bridge.postMessage({ type: "open-help-window" }); return; }
+      window.open("help-window.html", "_blank", "noopener");
+    },
     async closeWindow() {
       // 未保存の変更がある場合の保存確認はC#側(FormClosing)が一元的に行う
       // (ネイティブのXボタン・Alt+F4で閉じた場合と挙動を揃えるため)。
@@ -2290,6 +2298,15 @@ async function handleHostMessage(msg) {
       // 自動保存(仕様書 N-06): C#側は本文を持たないため、要求されたら都度返す。
       bridge?.postMessage({ type: "text-response", text: editor.getValue() });
       break;
+    case "request-is-document-empty":
+      // ネイティブD&D(不具合修正、C#側MainForm.OnDragDrop)が「現在のウィンドウで開くか、
+      // 新しいウィンドウで開くか」を判断するために問い合わせてくる。本文はC#側に無いため、
+      // openFolder()のisEmptyDocument判定と同じ基準(editor.getValue().trim() === "")を
+      // request-text/text-responseと同じ考え方で返す。
+      // requestIdはC#側が付ける通し番号。どの問い合わせへの応答かを区別するため、
+      // 受け取った値をそのまま返す(C#側MainForm._isDocumentEmptyRequestId参照)。
+      bridge?.postMessage({ type: "is-document-empty-response", isEmpty: editor.getValue().trim() === "", requestId: msg.requestId });
+      break;
     case "request-save":
       // 未保存の変更を残したまま閉じる/新規作成する/別ファイルを開く前の保存確認
       // (C#側ConfirmDiscardDirtyAsync)から届く。通常のCtrl+Sと同じ保存フローを使う。
@@ -2689,9 +2706,18 @@ imageInput.addEventListener("change", async () => {
 // ウィンドウへのファイルD&D。WebView2は本文エリアではWebページとしてドラッグ&ドロップを
 // 扱うため、HTML5の標準どおりdragoverでpreventDefault()しないとブラウザが既定で
 // ドロップを拒否し、禁止マークが出て何も起きない(C#側のOLEドラッグ&ドロップ設定とは
-// 無関係)。標準のDOM File APIでは実パスが分からないため、ブリッジがある場合はバイト列を
-// C#へ渡して開き直す(エンコーディング判定・保存はC#側で行う。パスが無いため保存時は
-// 名前を付けて保存になる)。
+// 無関係)。
+//
+// 不具合修正: 実アプリ(ブリッジあり)では、標準のDOM File APIがセキュリティ上実パスを
+// 返さないため、以前はここでファイル名とバイト列しかC#へ渡せず、拡張子に基づく
+// コードモード判定・保存先の特定ができない「無題」の文書としてしか開けなかった。
+// 今はC#側(Pane/MainForm.cs OnLoadAsync)でWebView2のAllowExternalDropをfalseにしており、
+// ウィンドウ外(エクスプローラ等)からのファイルD&Dはこのページのdrop event自体が発火せず、
+// 代わりにC#側のOnDragDrop(DataFormats.FileDropから実フルパスを取得できる)が受け取る
+// ようになっている。そのため、下のdragenter/dragover/dropの各ハンドラは
+// ブリッジがある場合(＝実アプリ)は何もしない(AllowExternalDropの設定漏れ等に備えた
+// 二重の安全策として、念のため明示的にも早期returnしておく)。ブリッジが無いブラウザ単体動作
+// (開発確認用、WebView2を介さないため上記の仕組みが使えない)では、従来どおりここで処理する。
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
   let binary = "";
@@ -2707,10 +2733,20 @@ function hasFileDrag(e) {
 // captureフェーズ(第3引数true)で登録する。CodeMirror自身がエディタ内テキストの
 // ドラッグ移動用にdragover/drop相当を独自処理しており、bubbleフェーズで登録すると
 // そちらが先に処理してこちらまで届かない(stopPropagation等で握りつぶされる)ことがある。
-window.addEventListener("dragenter", (e) => { if (hasFileDrag(e)) e.preventDefault(); }, true);
-window.addEventListener("dragover", (e) => { if (hasFileDrag(e)) e.preventDefault(); }, true);
+window.addEventListener("dragenter", (e) => {
+  if (bridge) return; // 実アプリではC#側(MainForm.OnDragEnter)に任せる(上のコメント参照)。
+  if (hasFileDrag(e)) e.preventDefault();
+}, true);
+window.addEventListener("dragover", (e) => {
+  if (bridge) return; // 実アプリではC#側(MainForm.OnDragEnter/Over)に任せる(上のコメント参照)。
+  if (hasFileDrag(e)) e.preventDefault();
+}, true);
 window.addEventListener("drop", async (e) => {
   logToHost("log", `drop event: hasFileDrag=${hasFileDrag(e)}, filesCount=${e.dataTransfer?.files?.length ?? 0}`);
+  // 実アプリではC#側(MainForm.OnDragDrop、画像は同OnDragDrop経由のInsertLocalImageAndNotify)に
+  // 任せる(上のコメント参照)。AllowExternalDrop=falseによりこのイベント自体、実アプリでは
+  // 通常発火しないはずだが、念のため明示的にも早期returnしておく。
+  if (bridge) return;
   if (!hasFileDrag(e) || !e.dataTransfer.files.length) return;
   e.preventDefault();
   e.stopPropagation();
@@ -2721,21 +2757,8 @@ window.addEventListener("drop", async (e) => {
     await insertImageFile(file);
     return;
   }
-  // 本文が空(新規ファイル等、失われる内容が無い)ならこのウィンドウで開き、
-  // 何か書かれていれば新しいウィンドウで開く。
+  // ブラウザ単体時は新規ウィンドウを作れないため、本文が空でなければ確認のうえこのウィンドウで開く。
   const isEmptyDocument = editor.getValue().trim() === "";
-  if (bridge) {
-    const buf = await file.arrayBuffer();
-    logToHost("log", `open-dropped-fileを送信: name=${file.name}, size=${buf.byteLength}, newWindow=${!isEmptyDocument}`);
-    bridge.postMessage({
-      type: "open-dropped-file",
-      name: file.name,
-      dataBase64: arrayBufferToBase64(buf),
-      newWindow: !isEmptyDocument,
-    });
-    return;
-  }
-  // ブラウザ単体時は新規ウィンドウを作れないため、確認のうえこのウィンドウで開く。
   if (!isEmptyDocument && !(await paneConfirm({ title: "ドロップしたファイルを開きますか?", message: "現在の内容を閉じて、ドロップしたファイルを開きますか?", okLabel: "開く", danger: true }))) return;
   resetAutoDetectState();
   await editor.setFileMode(file.name);

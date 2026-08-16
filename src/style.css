@@ -895,8 +895,46 @@ body:has(.list-pane.drawer-open) .mobile-bar { display: none !important; }
 .cm-search-hit-active { background: #ffd43b; color: #000; } /* ∧∨で選択中のヒット */
 html[data-theme="dark"] .cm-search-hit-active { background: #ffd43b; color: #000; }
 html[data-theme="dark"] .cm-search-hit { background: rgba(61,193,181,.25); color: inherit; }
-/* ④ リスト折り返しのハンギングインデント(1行目のテキスト開始位置に揃える) */
-.cm-line.cm-hang { padding-left: calc(6px + var(--hang)) !important; text-indent: calc(-1 * var(--hang)); }
+/* ④ リスト折り返しのハンギングインデント(1行目のテキスト開始位置に揃える)
+   不具合修正: セレクタに#cm-hostを足した。移植元のSyncMemoでは上の打ち消し規則が
+   `.cm-host .cm-line`(クラス、詳細度0-2-0)で、この規則(.cm-line.cm-hang、同じく0-2-0)とは
+   同点になり「後に書いたほうが勝つ」で成立していた。Paneへ移す際に打ち消し規則の側だけ
+   `#cm-host .cm-line`(ID、詳細度1-1-0)へ変えたため、idを持たないこの規則が常に負け、
+   padding-leftが0pxのまま=リストの折り返しがぶら下がらない状態になっていた
+   (実測で確認)。コードモード側の.cm-code-hangと同じく#cm-hostを付けて確実に上書きする。 */
+#cm-host .cm-line.cm-hang { padding-left: calc(6px + var(--hang)) !important; text-indent: calc(-1 * var(--hang)); }
+
+/* コードモードの折り返し行ハンギングインデント(依頼: 「折り返し行をインデントに揃える」)。
+   --hangはsrc/editor.jsのcodeHangIndentPluginが行頭空白のタブ展開後の表示列数として
+   "Nch"の形で付与する(タブ幅への対応はcodeHangColumnFor定義部のコメント参照)。
+   上のcm-hang(Markdownのリストのぶら下げ)とは--hangの意味(文字数 vs 表示列数)が違うため
+   クラスを分けている。両クラスはモードが排他(docModeComp/livePreviewComp/
+   codeModeExtrasCompの切り替えによりmarkdownモードとcodeモードは同時に有効化されない)
+   なので同じ行に二重適用されることは無い。
+   6pxの下駄(cm-hang側)はMarkdownの箇条書きマーカーがウィジェット描画のため必要だった
+   微調整だが、コード側は行頭の空白がそのまま実テキストとして描画されるだけなので不要
+   (--hangの列数がそのまま実際の字下げ幅と一致する)。
+
+   【詳細度の注意(実装時に実測して判明したこと)】 720行付近の
+   #cm-host .cm-line { padding: 0 !important; margin: 0; text-indent: 0; } は、
+   IDセレクタ(#cm-host)を含むため詳細度が(1 ID, 1 class)。".cm-line.cm-code-hang"の
+   ようにクラスを2つ重ねただけのセレクタは(0 ID, 2 class)にしかならず、IDを含む詳細度には
+   数の大小に関わらず絶対に勝てない(CSSの詳細度比較はIDの数→クラス数の順で、桁上がり的に
+   比較される)。そのため素朴に「クラス2つ」にしただけでは、上のpadding:0 !important
+   (および!importantの付いていないtext-indent:0の側)に競り負けて、padding-left/
+   text-indentが1pxも反映されない。実際に.verify-hang-code.mjsでgetComputedStyleを
+   実測して初めてこの不具合(古いMarkdown版の.cm-hangも同じ理由で現状padding-leftが
+   常に0pxになっており、ぶら下げが実質効いていないことも合わせて判明した)に気づいた。
+   このため、コード版は#cm-hostを含めて同じIDの土俵に乗せたセレクタにし、詳細度
+   (1 ID, 2 class)で確実に上回るようにする。
+   1行目の文字開始位置を変えないため、padding-leftで全体を右へ押し、text-indentの
+   負値で1行目だけ元の位置へ引き戻す(cm-hangと同じ方式。1行目の見た目は1pxも変わらない)。
+
+   なお上のMarkdown用.cm-hangについては、今回の依頼はコードモードの対応であり、
+   Markdown側の見た目を変えないことが要件のため、この詳細度の不具合はあえて直さず
+   現状のまま残している(実際に直すとMarkdownの折り返し行の見た目が変わってしまう)。
+   詳細は対応報告を参照。 */
+#cm-host .cm-line.cm-code-hang { padding-left: var(--hang) !important; text-indent: calc(-1 * var(--hang)); }
 
 /* ---- テーブル(ライブプレビュー描画) ---- */
 .cm-table { padding: 4px 0; overflow-x: auto; }
@@ -1478,3 +1516,69 @@ html[data-theme="dark"] .cm-search-hit { background: rgba(61,193,181,.25); color
    flex-end + gapで右寄せに並べ、「キャンセル→適用」の順にする(dialog.jsのcancelBtn/okBtnの
    並びと同じ視覚的な作法)。ボタン自体は既存のPane共通クラス(.btn.tiny)をそのまま使う。 */
 .cp-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* ===== 取扱説明書ウィンドウ(F1、Pane/HelpWindow.cs、src/help-entry.js) =====
+   新しい色トークンは導入せず、本体のMarkdown表示・設定ウィンドウのカテゴリ一覧
+   (.settings-nav系)で既に使っているトークン(--paper/--ink/--ink-sub/--accent等)だけを使う。 */
+.help-shell { position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.help-body { flex: 1; min-height: 0; display: flex; }
+
+/* サイドバーの目次。.settings-nav(設定ウィンドウのカテゴリ一覧)と全く同じ値に揃える。 */
+.help-sidebar { width: 220px; flex: none; border-right: 1px solid var(--rule); background: var(--paper); padding: 10px; display: flex; flex-direction: column; gap: 1px; overflow-y: auto; }
+.help-toc-item { display: block; width: 100%; border: none; background: transparent; color: var(--ink-sub); font: inherit; font-size: 12.5px; line-height: 1.5; text-align: left; padding: 6px 10px; border-radius: 8px; cursor: pointer; }
+.help-toc-item:hover { background: var(--surface); color: var(--ink); }
+.help-toc-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.help-toc-l2 { padding-left: 20px; }
+.help-toc-l3 { padding-left: 30px; font-size: 12px; }
+.help-toc-l4 { padding-left: 40px; font-size: 12px; }
+.help-toc-l5 { padding-left: 50px; font-size: 11.5px; }
+.help-toc-l6 { padding-left: 60px; font-size: 11.5px; }
+
+.help-content { flex: 1; min-width: 0; overflow-y: auto; }
+.help-article { max-width: 760px; margin: 0 auto; padding: 32px 40px 64px; color: var(--ink); font-family: var(--font-body); line-height: 1.8; font-size: 14.5px; }
+.help-article:focus { outline: none; }
+.help-load-error { color: var(--danger); }
+
+/* 見出し・段落等の本文装飾。Pane本体のMarkdown表示と揃えるため--font-heading(本文の
+   見出しフォント)・--accent(リンク色)等の既存トークンのみを使う。新しい色は導入しない。 */
+.help-article h1, .help-article h2, .help-article h3,
+.help-article h4, .help-article h5, .help-article h6 {
+  font-family: var(--font-heading, var(--font-body));
+  font-weight: 700;
+  color: var(--ink);
+  line-height: 1.4;
+  scroll-margin-top: 12px;
+}
+.help-article h1 { font-size: 1.7em; margin: 0 0 .6em; padding-bottom: .3em; border-bottom: 1px solid var(--rule); }
+.help-article h2 { font-size: 1.35em; margin: 1.6em 0 .5em; padding-bottom: .25em; border-bottom: 1px solid var(--rule); }
+.help-article h3 { font-size: 1.15em; margin: 1.4em 0 .4em; }
+.help-article h4 { font-size: 1.03em; margin: 1.2em 0 .3em; }
+.help-article h5, .help-article h6 { font-size: 1em; color: var(--ink-sub); margin: 1em 0 .3em; }
+.help-article h1:first-child, .help-article h2:first-child { margin-top: 0; }
+.help-article p { margin: 0 0 1em; }
+.help-article a { color: var(--accent); text-decoration: none; }
+.help-article a:hover { text-decoration: underline; }
+.help-article ul, .help-article ol { margin: 0 0 1em; padding-left: 1.6em; }
+.help-article li { margin: .25em 0; }
+.help-article li > ul, .help-article li > ol { margin: .25em 0 0; }
+.help-article blockquote { margin: 0 0 1em; padding: 2px 14px; border-left: 3px solid var(--line); color: var(--ink-sub); }
+.help-article code { font-family: var(--font-mono); font-size: .92em; background: var(--code-bg); border-radius: 4px; padding: .1em .35em; }
+.help-article pre { margin: 0 0 1em; padding: 12px 14px; background: var(--code-bg); border-radius: 8px; overflow-x: auto; }
+.help-article pre code { background: none; padding: 0; font-size: .88em; line-height: 1.6; }
+.help-article hr { border: none; border-top: 1px solid var(--rule); margin: 2em 0; }
+.help-article table { border-collapse: collapse; margin: 0 0 1em; font-size: .92em; }
+.help-article th, .help-article td { border: 1px solid var(--line); padding: 5px 12px; }
+.help-article th { background: var(--surface); font-weight: 700; }
+.help-article img { max-width: 100%; }
+.help-article mark { background: var(--accent-soft); color: var(--ink); border-radius: 2px; }
+
+/* Ctrl+F検索バー。既存の.search-panel(本体エディタのCtrl+F)と同じ見た目の作法に揃える。
+   本文の上に常設で被さるのではなく、開いている間だけ右上に浮かせる。 */
+.help-search-bar { position: absolute; top: 10px; right: 16px; z-index: 30; display: flex; align-items: center; gap: 6px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow-pop); padding: 6px 8px; color: var(--ink-sub); }
+.help-search-bar[hidden] { display: none; }
+.help-search-bar input { border: none; background: transparent; color: var(--ink); font: inherit; font-size: 12.5px; outline: none; width: 200px; }
+.help-search-count { font-size: 11px; color: var(--ink-sub); min-width: 42px; text-align: center; font-family: var(--font-mono); }
+.help-search-nav-btn { border: none; background: transparent; color: var(--ink-sub); font-size: 11px; cursor: pointer; padding: 4px 6px; border-radius: 6px; line-height: 1; }
+.help-search-nav-btn:hover { background: var(--accent-soft); color: var(--accent); }
+mark.help-search-hit { background: var(--accent-soft); color: var(--ink); border-radius: 2px; }
+mark.help-search-hit.current { background: var(--accent); color: var(--paper); }

@@ -69,6 +69,9 @@ internal sealed class MainForm : Form
     /// 「既に開いていれば前面へ、無ければ新規に開く」処理を渡す。呼び出し元ウィンドウ(このMainForm)
     /// を中央配置の基準として渡す必要があるため、requestNewWindowと違い自分自身を渡す形。</summary>
     private readonly Action<MainForm>? _requestOpenSettingsWindow;
+    /// <summary>取扱説明書ウィンドウ(F1)を開く要求。<see cref="_requestOpenSettingsWindow"/>と
+    /// 全く同じ流儀(<see cref="PaneApplicationContext.OpenHelpWindow"/>参照)。</summary>
+    private readonly Action<MainForm>? _requestOpenHelpWindow;
     private readonly System.Windows.Forms.Timer _autoSaveTimer;
     private readonly System.Windows.Forms.Timer _externalChangeDebounceTimer;
     /// <summary>起動時の白フラッシュ対策(新方式)のフォールバックタイマー。<see cref="RevealWebView"/>参照。</summary>
@@ -98,6 +101,16 @@ internal sealed class MainForm : Form
     private FileSystemWatcher? _watcher;
     private bool _suppressWatcher;
     private bool _externalChangePending;
+
+    /// <summary>外部変更ダイアログで「いいえ」を選んだファイルのパス(このウィンドウが自分で
+    /// 保存する、または別のファイルを開くまで、そのファイルについては再度ダイアログを
+    /// 出さないための抑止)。<see cref="_suppressWatcher"/>とは役割が異なる別物なので混同しない
+    /// こと(_suppressWatcherは「自分の保存中だけ」FileSystemWatcher自体を止めるためのフラグで、
+    /// 保存が終われば自動的に解除される。こちらは保存が終わった"後"もユーザーの選択が続く)。
+    /// 解除(null化)は<see cref="StartWatching"/>・<see cref="StopWatching"/>で行う。
+    /// この2つは「監視対象が変わった=保存した or 別のファイルを開いた」タイミングでのみ
+    /// 呼ばれるため、抑止の解除条件とちょうど一致する。</summary>
+    private string? _suppressedExternalChangePath;
 
     private string? _currentPath;
     private FileEncodingKind _currentEncoding = FileEncodingKind.Utf8;
@@ -136,6 +149,17 @@ internal sealed class MainForm : Form
     private TaskCompletionSource<bool>? _saveCompletionSource;
     /// <summary>ConfirmDiscardDirtyAsyncを通過した後、確認を再表示せずにClose()を通すためのフラグ。</summary>
     private bool _forceClose;
+
+    /// <summary>RequestIsDocumentEmptyAsyncが「本文が空か」をJS側へ問い合わせた際の応答待ち
+    /// (ネイティブD&amp;D=OnDragDropが、現在のウィンドウを置き換えてよいかを判断するために使う。
+    /// _saveCompletionSourceと同じ、request/response往復の待機口パターン)。</summary>
+    private TaskCompletionSource<bool>? _isDocumentEmptyCompletionSource;
+
+    /// <summary>上の問い合わせに付ける通し番号。応答(is-document-empty-response)が
+    /// 「どの問い合わせに対するものか」を区別するために使う。これが無いと、
+    /// 「前の問い合わせがタイムアウト→次のドロップ→前の応答が遅れて到着」という順序のとき、
+    /// 遅れて来た古い応答が次の待機を誤って解決してしまう(古い値で上書きされる)。</summary>
+    private int _isDocumentEmptyRequestId;
 
     /// <summary>タイトルバーの配色(案A): JS側("titlebar-color"メッセージ)から届いた実際の描画色。
     /// 未受信の間はnullのままで、その場合<see cref="WindowChrome"/>側の既定色(案B)が使われる。</summary>
@@ -178,6 +202,7 @@ internal sealed class MainForm : Form
         Action<MainForm>? requestSwitchDocument = null,
         Action? requestBroadcastSettings = null,
         Action<MainForm>? requestOpenSettingsWindow = null,
+        Action<MainForm>? requestOpenHelpWindow = null,
         DroppedFileContent? droppedFile = null,
         string? initialFolderPath = null)
     {
@@ -190,6 +215,7 @@ internal sealed class MainForm : Form
         _requestSwitchDocument = requestSwitchDocument;
         _requestBroadcastSettings = requestBroadcastSettings;
         _requestOpenSettingsWindow = requestOpenSettingsWindow;
+        _requestOpenHelpWindow = requestOpenHelpWindow;
         Logger.Write($"MainForm生成: initialPath={initialPath ?? "(なし)"}, recoverFrom={(recoverFrom is null ? "なし" : recoverFrom.OriginalPath ?? "無題")}, droppedFile={droppedFile?.Name ?? "なし"}");
         // カスタムCSSの参考サンプルを既定フォルダへ用意しておく(無ければ作るだけで、
         // 既にあれば何もしない。ThemeFolderService.EnsureSampleCss参照)。
@@ -219,9 +245,15 @@ internal sealed class MainForm : Form
         // OnLoadAsync側でNavigate前にdata-theme属性を注入することで対処する(そちらを参照)。
         ApplyInitialWebViewBackground();
 
-        // ウィンドウのうちWebView2に覆われていない部分(タイトルバー等)へのD&D用。
-        // クライアント領域はWebView2が全面を覆うため、そちらへのドロップは下記のとおり
-        // WebView2(Webページ側のJavaScript)が受け取る。
+        // ウィンドウ全体(タイトルバー等の非クライアント領域だけでなく、WebView2が覆う
+        // クライアント領域も含む)へのD&D用。WebView2のクライアント領域上のドロップは、
+        // 下のOnLoadAsync内でAllowExternalDropをfalseにすることでWebView2自身が横取りしない
+        // ようにしており、その結果このフォーム自身のDragDrop(=OnDragDrop)が一括して受け取る
+        // (不具合修正: 従来はAllowExternalDropが既定のtrueのままだったため、クライアント領域上の
+        // ドロップはWebView2内のJavaScript(main.jsのdragover/dropハンドラ)が横取りしてしまい、
+        // 標準のDOM File APIではフルパスが取れず「無題」の文書としてしか開けなかった。
+        // ブリッジの無いブラウザ単体動作(開発確認用)ではこのOnDragDropが存在しないため、
+        // 従来どおりJavaScript側のハンドラがそのまま使われる)。
         AllowDrop = true;
         DragEnter += OnDragEnter;
         DragOver += OnDragEnter;
@@ -229,11 +261,6 @@ internal sealed class MainForm : Form
         DragLeave += OnDragLeave;
 
         _webView.Dock = DockStyle.Fill;
-        // AllowExternalDropは既定のtrueのままにする(明示的に設定しない)。
-        // falseにすると「外部からのドロップを無効化」する設定となり、WebView2が
-        // ドロップを受け付けない旨をOSへ表明するため、本文エリア上では常に禁止マークが出て、
-        // Webページ側のJavaScript(main.jsのdragover/dropハンドラ)にもイベントが一切届かない。
-        // ファイルのD&DはJavaScript側で受け取り、open-dropped-fileメッセージでC#へ渡す。
         Controls.Add(_webView);
 
         // 起動時の白フラッシュ対策(新方式、実機不具合の再修正): 従来の「背景色を先に塗る
@@ -493,6 +520,24 @@ internal sealed class MainForm : Form
         CoreWebView2Environment env = await EnsureEnvironmentAsync();
         await _webView.EnsureCoreWebView2Async(env);
         Logger.Write($"WebView2初期化完了: バージョン={_webView.CoreWebView2.Environment.BrowserVersionString}");
+
+        // ファイルのD&D(不具合修正): WebView2は既定でウィンドウ外(エクスプローラ等)からの
+        // ドロップを自分で受け取ってしまい(AllowExternalDrop既定=true)、このフォーム自身の
+        // DragDrop(OnDragDrop、コンストラクタで登録済み)には一切イベントが届かなかった。
+        // 標準のDOM File APIはセキュリティ上フルパスを返さないため、JS側(main.js)ではファイル名と
+        // バイト列しか取得できず、拡張子に基づくコードモード判定・保存先の特定ができない「無題」の
+        // 文書としてしか開けなかった。falseにすると、WebView2は外部からのドロップを一切受け付けない
+        // 旨をOSへ表明するようになり、そのドロップは(ウィンドウ内で唯一有効な受け口である)
+        // フォーム自身のDragDropへ回ってくる。C#側ならDataFormats.FileDropからフルパスが
+        // 取得できるため、エクスプローラからファイルを開くのと同じOpenFile(path)経路に乗せられる。
+        // なお、このプロパティが制御するのは「WebView2の外(OS)から入ってくるドロップ」のみで、
+        // ページ内部で完結するドラッグ(本文中のテキスト選択ドラッグや、CodeMirrorの内部D&D、
+        // タブの並べ替えD&D=src/main.js 1859行付近のdragstart起点の操作)には影響しない
+        // (参照: Microsoft Learn、CoreWebView2Controller.AllowExternalDropの解説)。
+        // 型はMicrosoft.Web.WebView2.WinForms.WebView2側が公開するAllowExternalDropプロパティ
+        // (内部でCoreWebView2ControllerのAllowExternalDropへ委譲される)を使う。CoreWebView2
+        // 初期化完了前に設定/取得すると例外になるため、必ずEnsureCoreWebView2Async完了後に行う。
+        _webView.AllowExternalDrop = false;
 
         // ブラウザ既定のアクセラレータキー(Ctrl+U=ソース表示、Ctrl+F=検索、Ctrl+P=印刷、
         // F3=検索、F12=DevTools等)を無効化する。無効化しないとPane独自のショートカット
@@ -1028,6 +1073,20 @@ internal sealed class MainForm : Form
                     WriteAutoSaveSnapshot(autoSaveText);
                 }
                 break;
+            case "is-document-empty-response":
+                // ネイティブD&D(OnDragDrop)がRequestIsDocumentEmptyAsyncで送った
+                // "request-is-document-empty"への応答。本文はJS(CodeMirror)側にしか無いため、
+                // request-text/text-responseと同じ考え方の往復メッセージで取得する。
+                // requestIdが現在待っている問い合わせのものと一致する応答だけを受け付ける
+                // (_isDocumentEmptyRequestIdの説明参照)。番号が無い/食い違う応答は、
+                // タイムアウト後に遅れて届いた古いものなので黙って捨てる。
+                if (TryGetBool(root, "isEmpty", out bool documentIsEmpty)
+                    && TryGetInt(root, "requestId", out int respondedRequestId)
+                    && respondedRequestId == _isDocumentEmptyRequestId)
+                {
+                    _isDocumentEmptyCompletionSource?.TrySetResult(documentIsEmpty);
+                }
+                break;
             case "tabs-changed":
                 // タブ形式(仕様書 第2.10節 C-14、隠し設定)。タブの一覧・アクティブタブが
                 // 変わるたびJS側(main.js)から届く。
@@ -1194,6 +1253,12 @@ internal sealed class MainForm : Form
                 // 設定画面を独立ウィンドウとして開く(または既に開いていれば前面へ)。
                 // 実体はPaneApplicationContext.OpenSettingsWindowが持つ(同時に1つしか開かない)。
                 _requestOpenSettingsWindow?.Invoke(this);
+                break;
+            case "open-help-window":
+                // 取扱説明書ウィンドウ(F1、メニューバー右上の「?」ボタン、コマンドパレットの
+                // help.manual)を独立ウィンドウとして開く(または既に開いていれば前面へ)。
+                // 実体はPaneApplicationContext.OpenHelpWindowが持つ(同時に1つしか開かない)。
+                _requestOpenHelpWindow?.Invoke(this);
                 break;
             case "open-menu":
                 // メニューバーの見出しがクリックされた(またはAltキー操作で開かれた)。
@@ -2066,6 +2131,15 @@ internal sealed class MainForm : Form
     /// WebView2の本文エリア(Webページ側)へドラッグ&ドロップされたファイルを開く。
     /// 現在の本文が空(失われる内容が無い)ならこのウィンドウで、何か書かれていれば
     /// 新しいウィンドウで開く(空かどうかの判定はJS側が行い、newWindowで伝えてくる)。
+    ///
+    /// 不具合修正(現状は事実上未使用): 本来の呼び出し元だったsrc/main.jsの"open-dropped-file"
+    /// 送信は、WebView2のAllowExternalDropをfalseにしたこと(Pane/MainForm.cs OnLoadAsync参照)に
+    /// 伴い、ブリッジがある場合(実アプリ)は送られなくなった(ファイルD&DはOnDragDropが
+    /// フルパス付きで受け取るようになったため)。ブラウザ単体動作(ブリッジ無し)ではブリッジ自体が
+    /// 無く元々この経路を使わない。そのため現状呼び出されることは無いが、標準のDOM File APIしか
+    /// 使えない経路(WebView2のAllowExternalDrop設定が何らかの事情で効かない場合の保険)として
+    /// あえて削除せず残してある。DroppedFileContent/_requestNewWindowWithContent/
+    /// OpenDroppedContentも同じ理由で残す。
     /// </summary>
     private void HandleOpenDroppedFile(JsonElement message)
     {
@@ -2200,7 +2274,13 @@ internal sealed class MainForm : Form
         // 削られても「どのファイルか」が先に残るようにするため。
         string dirtyMark = _isDirty ? "(未保存)" : string.Empty;
         string readOnlyMark = _isReadOnly ? "[読み取り専用] " : string.Empty;
-        Text = $"{readOnlyMark}{name}{dirtyMark} - Pane";
+        // (B) 外部変更ダイアログで「いいえ」を選んだ後の抑止中であることをタイトルに示す。
+        // ステータスバーはJS側(src/)の実装であり今回は変更できないため、C#側だけで完結する
+        // 手段としてタイトルバーを使う(readOnlyMarkと同じ手法)。
+        bool suppressed = _suppressedExternalChangePath is not null
+            && string.Equals(_currentPath, _suppressedExternalChangePath, StringComparison.OrdinalIgnoreCase);
+        string suppressMark = suppressed ? "[変更通知オフ] " : string.Empty;
+        Text = $"{readOnlyMark}{suppressMark}{name}{dirtyMark} - Pane";
     }
 
     private void PostToWeb(object message)
@@ -2247,22 +2327,120 @@ internal sealed class MainForm : Form
     {
         _lastDragLogKey = null; // 次のドラッグ操作でまた最初の状態からログを記録できるようにする
         Logger.Write($"OnDragDrop (sender={sender?.GetType().Name}): dataPresent={e.Data?.GetDataPresent(DataFormats.FileDrop)}");
-        if (e.Data?.GetData(DataFormats.FileDrop) is string[] { Length: > 0 } paths)
+        if (e.Data?.GetData(DataFormats.FileDrop) is not string[] { Length: > 0 } paths) return;
+
+        // このウィンドウ・この操作で扱うのは先頭の1件のみ(src/main.jsの旧JS側実装
+        // =files[0]のみを見る、と同じ判断を踏襲)。複数ファイルを一度に別ウィンドウ・別タブへ
+        // カスケード展開する機能は現時点では未実装(将来のPhase 3相当の拡張候補として送り、
+        // 今回は「複数選択時は先頭のみ開き、残りは無視する」という既存の挙動を変えない)。
+        string path = paths[0];
+        Logger.Write(paths.Length > 1
+            ? $"OnDragDrop: paths=[{string.Join(",", paths)}] (複数{paths.Length}件がドロップされたが先頭のみ開く)"
+            : $"OnDragDrop: paths=[{string.Join(",", paths)}]");
+
+        // 画像ファイルのドロップは「このファイルを開く」ではなく「本文へ画像を挿入する」として
+        // 扱う(仕様書 docs/設定項目一覧.md「画像」節。src/main.jsのisImageFile/insertImageFileと
+        // 同じ判定・同じ考え方)。タブ形式かどうか・本文が空かどうかに関わらず常にこちらを優先する
+        // (JS側の旧実装も、開く/新規ウィンドウの判定より前に画像判定を行っていた)。
+        // Directory.Existsを先に見ているのは、拡張子に見える名前のフォルダ(稀だが例:
+        // "screenshot.png"という名前のフォルダ)を誤って画像として扱わないための保険。
+        if (!Directory.Exists(path) && IsImageFileForDrop(path))
         {
-            Logger.Write($"OnDragDrop: paths=[{string.Join(",", paths)}]");
-            // タブ形式(仕様書 第2.10節 C-14、隠し設定)のときは、現在の文書を保存確認なしに
-            // 置き換えず、新しいタブとして開く。
-            if (SettingsService.Load().DisplayMode == "tab")
-            {
-                OpenInNewTab(paths[0]);
-                return;
-            }
-            if (!await ConfirmDiscardDirtyAsync()) return;
-            // このウィンドウには先頭の1件を開く。複数ファイルは呼び出し元(D&D)が
-            // 別ウィンドウとして開くかどうかを判断する(Phase 3のカスケード配置)。
-            OpenFile(paths[0]);
+            InsertLocalImageAndNotify(path, null, Path.GetFileName(path));
+            return;
         }
+
+        // タブ形式(仕様書 第2.10節 C-14、隠し設定)のときは、現在の文書を保存確認なしに
+        // 置き換えず、新しいタブとして開く。
+        if (SettingsService.Load().DisplayMode == "tab")
+        {
+            OpenInNewTab(path);
+            return;
+        }
+
+        // 本文が空(新規文書等、失われる内容が無い)ならこのウィンドウで開き、何か書かれていれば
+        // 新しいウィンドウで開く(src/main.jsのisEmptyDocument判定と同じ基準に揃える。
+        // エクスプローラからの二重クリックでは常に新規ウィンドウだが、D&Dはウィンドウ形式でも
+        // 「空の無題文書へドロップしたときだけは現在のウィンドウを使う」という従来からの
+        // JS側の挙動を保つ)。本文はJS(CodeMirror)側にしか無いため、request-textと同じ考え方の
+        // 往復メッセージで問い合わせる。どちらの分岐でも現在の文書を壊さない(空なら失うものが無く、
+        // 空でなければ現在のウィンドウには一切触れない)ため、ConfirmDiscardDirtyAsyncによる
+        // 保存確認は不要(旧実装はここで確認ダイアログを出したうえで常に置き換えていたが、
+        // それだとJS側=WebView2内ブラウザD&Dの挙動と食い違っていたため、この往復方式に揃えた)。
+        bool isEmpty = await RequestIsDocumentEmptyAsync();
+        if (!isEmpty)
+        {
+            // 現在のウィンドウには触れず、新しいウィンドウで開く。pathがフォルダなら
+            // PaneApplicationContext.OpenWindowがDirectory.Existsで自動判定し、フォルダとして開く。
+            _requestNewWindow?.Invoke(path);
+            return;
+        }
+        if (Directory.Exists(path))
+        {
+            // フォルダをドロップした場合はフォルダとして開く。本文が空(=失うものが無い)ため、
+            // File>フォルダを開く(newWindow=false)と同じ経路でこのウィンドウのサイドバーへ読み込む。
+            _ = LoadFolderAsync(path);
+            return;
+        }
+        OpenFile(path);
     }
+
+    /// <summary>本文が空かどうかをJS側(main.js)へ問い合わせる(request-text/text-responseと
+    /// 同じ考え方の往復メッセージ)。JS側main.jsのisEmptyDocument判定
+    /// (editor.getValue().trim() === "")と同じ基準の値が返る。</summary>
+    private async Task<bool> RequestIsDocumentEmptyAsync()
+    {
+        // UIスレッドでTrySetResultを呼ぶため(is-document-empty-responseハンドラ参照)、
+        // 継続処理を同期的に走らせるとUIスレッドを塞ぎうる。RunContinuationsAsynchronously
+        // で継続をスレッドプールへ逃がす。
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        // 通し番号を進めてから待機口を差し替える。応答側はこの番号が一致するときだけ
+        // TrySetResultするので、遅れて届いた古い応答が次の待機を解決することはない。
+        int requestId = ++_isDocumentEmptyRequestId;
+        _isDocumentEmptyCompletionSource = tcs;
+        PostToWeb(new { type = "request-is-document-empty", requestId });
+
+        // JS側はeditor.getValue()を読んで返すだけの処理のため本来は一瞬(数ms~数十ms)で
+        // 返るはずだが、(1)WebView2の初期化が終わる前にドロップされた、(2)JS側で未処理例外が
+        // 起きてメッセージループが止まっている、(3)ウィンドウを閉じる操作と重なった、等の場合は
+        // 応答が永久に返らないことがある。無期限にawaitし続けると「ドロップしたのに何も起きない」
+        // まま操作不能になるため、上限を設けて安全側の既定値で先へ進める。
+        // 1000msは、通常あり得る応答時間(数十ms)に十分な余裕を持たせつつ、異常時にユーザーを
+        // 待たせすぎない長さとして選んだ目安値。
+        const int TimeoutMs = 1000;
+        Task winner = await Task.WhenAny(tcs.Task, Task.Delay(TimeoutMs));
+        if (winner != tcs.Task)
+        {
+            // タイムアウト。安全側の既定値(false="本文は空ではない")で進める。呼び出し元は
+            // false側で「現在の文書には触れず新しいウィンドウで開く」経路を通るため、応答が
+            // 来なかっただけでユーザーの書きかけを失うことがない(true側は現在のウィンドウの
+            // 内容を置き換えてしまうため、応答不明時の既定値にはできない)。
+            Logger.Write("RequestIsDocumentEmptyAsync: JS側からの応答がタイムアウトしたため既定値(false)で続行");
+            // 後から本来の応答が遅れて届いてもTrySetResultは二重設定を無視するだけなので安全。
+            tcs.TrySetResult(false);
+        }
+
+        bool result = await tcs.Task;
+
+        // 使い終わったら必ずnullへ戻す。ReferenceEqualsで確認しているのは、連続で素早く
+        // ドロップされて次のRequestIsDocumentEmptyAsync呼び出しが既に新しいTaskCompletionSource
+        // をセットし直している場合に、それを誤って消してしまわないため。
+        // (「直前の問い合わせがタイムアウトした直後に次のドロップが発生し、直前の応答が遅れて
+        // 届く」ケースは、requestId(_isDocumentEmptyRequestId)の一致判定で弾いているため、
+        // 古い応答が次の待機を解決してしまうことはない。)
+        if (ReferenceEquals(_isDocumentEmptyCompletionSource, tcs))
+        {
+            _isDocumentEmptyCompletionSource = null;
+        }
+        return result;
+    }
+
+    /// <summary>src/main.jsのisImageFile(拡張子: png/jpg/jpeg/gif/svg/webp/bmp)と同じ判定を
+    /// C#側で行う(ネイティブD&amp;Dはブラウザのdrop eventを経由しないため、JS側のisImageFileを
+    /// 呼べない)。2箇所の判定が食い違わないよう、対応関係をこのコメントで明記しておく。</summary>
+    private static readonly string[] ImageDropExtensions = { ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp" };
+    private static bool IsImageFileForDrop(string path) =>
+        ImageDropExtensions.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase);
 
     // ---- 自動保存(仕様書 N-06) ----
 
@@ -2355,8 +2533,32 @@ internal sealed class MainForm : Form
         StopWatching();
         try
         {
-            string? dir = Path.GetDirectoryName(Path.GetFullPath(path));
+            string fullPath = Path.GetFullPath(path);
+            string? dir = Path.GetDirectoryName(fullPath);
             if (dir is null) return;
+
+            // (A) 自分自身のログファイル(%LOCALAPPDATA%\Pane\logs\pane-yyyyMMdd.log)を開くと、
+            // Paneが動作中ずっとそこへ書き込み続けるため、外部変更検知が絶えず発火し、
+            // ダイアログの表示・非表示自体がForm.Activated経由でさらにログへ書き込まれる
+            // 自己駆動ループに陥る不具合があった。これを断つため、開こうとしているファイルが
+            // 自分のログディレクトリ配下であれば、そもそも監視を張らない。
+            // 判定は単純な文字列の前方一致ではなく、Path.GetFullPathで正規化してから行う
+            // (相対パス中の".."や大文字小文字の違いで判定をすり抜けないようにするため)。
+            // Windowsのパスは大文字小文字を区別しないためOrdinalIgnoreCaseで比較する。
+            // なお、シンボリックリンク/ジャンクション経由で結果的に同じ場所を指す場合までは
+            // ここでは検出できない(実体パスの解決までは行っていない)。そこは完全には防げない
+            // 前提とし、その保険として_suppressedExternalChangePath(「いいえ」選択後の抑止)を
+            // 別途用意している。
+            string logDirFull = Path.GetFullPath(Logger.DirectoryPath);
+            string logDirPrefix = logDirFull.EndsWith(Path.DirectorySeparatorChar)
+                ? logDirFull
+                : logDirFull + Path.DirectorySeparatorChar;
+            if (fullPath.StartsWith(logDirPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                // なぜ監視されていないのかを後から追えるように1行残す。
+                Logger.Write($"StartWatching: ログディレクトリ配下のため外部変更監視を張らない ({fullPath})");
+                return;
+            }
 
             _watcher = new FileSystemWatcher(dir, Path.GetFileName(path))
             {
@@ -2370,12 +2572,30 @@ internal sealed class MainForm : Form
             // 監視できなくても編集自体は継続できるようにする(ベストエフォート)。
             _watcher = null;
         }
+        finally
+        {
+            // StartWatchingは「監視対象が変わった(=このファイルを保存した、または別のファイルを
+            // 開いた)」ときにのみ呼ばれるため、(B)の抑止(_suppressedExternalChangePath)を
+            // 解除するタイミングとちょうど一致する。監視を張れたかどうかに関わらず解除する。
+            ClearSuppressedExternalChangePath();
+        }
     }
 
     private void StopWatching()
     {
         _watcher?.Dispose();
         _watcher = null;
+        // StartWatchingと同じ理由で、監視を止める(=文書がなくなった等)タイミングでも解除する。
+        ClearSuppressedExternalChangePath();
+    }
+
+    /// <summary>(B) 外部変更ダイアログの「いいえ」による抑止を解除する。値が変わる場合のみ
+    /// タイトルを更新する(無駄な再描画を避ける)。</summary>
+    private void ClearSuppressedExternalChangePath()
+    {
+        if (_suppressedExternalChangePath is null) return;
+        _suppressedExternalChangePath = null;
+        UpdateTitle();
     }
 
     private void SuppressWatcherDuring(Action action)
@@ -2420,6 +2640,17 @@ internal sealed class MainForm : Form
         if (!_externalChangePending || _currentPath is null) return;
         _externalChangePending = false;
 
+        // (B) 前回このファイルで「いいえ」を選んでいれば、次に自分が保存する/別のファイルを
+        // 開くまで(_suppressedExternalChangePathの解除はStartWatching/StopWatching参照)、
+        // 再度ダイアログを出さない。(A)(StartWatchingでのログディレクトリ除外)をすり抜ける
+        // 経路(別の場所へコピーしたログ、他アプリが高頻度で書き換えるファイル一般)への保険。
+        if (_suppressedExternalChangePath is not null
+            && string.Equals(_currentPath, _suppressedExternalChangePath, StringComparison.OrdinalIgnoreCase))
+        {
+            Logger.Write($"OnExternalChangeDebounceElapsed: 前回「いいえ」を選択済みのため再表示を抑止 ({_currentPath})");
+            return;
+        }
+
         string unsavedWarning = _isDirty
             ? "\n(このウィンドウには未保存の変更があります。再読み込みすると失われます。)"
             : string.Empty;
@@ -2437,10 +2668,17 @@ internal sealed class MainForm : Form
 
         if (choice == DialogResult.Yes)
         {
+            // 読み込み直した後の変更は改めて知らせるべきなので、抑止はしない
+            // (以前「いいえ」で抑止していた場合でもOpenFile→StartWatchingで解除される)。
             OpenFile(_currentPath);
         }
-        // いいえの場合は現在の編集内容を保持したまま、次の変更検知まで何もしない
-        // (仕様書どおり、無断で上書き・自動再読み込みはしない)。
+        else
+        {
+            // (B) このファイルについては、次に自分が保存する/別のファイルを開くまで
+            // 再度ダイアログを出さない(仕様書どおり、無断で上書き・自動再読み込みはしない)。
+            _suppressedExternalChangePath = _currentPath;
+            UpdateTitle();
+        }
     }
 
     // ---- 設定(仕様書 N-07・N-09、Phase 3時点は最小ダイアログ) ----
@@ -3174,8 +3412,9 @@ internal sealed class MainForm : Form
     }
 
     // ---- 画像挿入(仕様書 docs/設定項目一覧.md「画像」節)。実体はImageInsertServiceに委譲する。
-    // メニューの「画像を挿入」(ファイルダイアログ、実パスあり)と、本文へのドラッグ&ドロップ・
-    // クリップボードからの貼り付け(JS側でバイト列化されたもの、実パス無し)の2経路がある。 ----
+    // メニューの「画像を挿入」(ファイルダイアログ、実パスあり)・本文へのドラッグ&ドロップ
+    // (OnDragDrop、不具合修正後は実パスあり)・クリップボードからの貼り付け(JS側で
+    // バイト列化されたもの、実パス無し)の3経路がある。 ----
     private void HandleInsertImageRequest(JsonElement message)
     {
         string? sourcePath = null;
@@ -3184,7 +3423,8 @@ internal sealed class MainForm : Form
 
         if (message.TryGetProperty("dataBase64", out JsonElement dataProp) && dataProp.ValueKind == JsonValueKind.String)
         {
-            // ドラッグ&ドロップ・クリップボード貼り付け(src/main.jsのinsertImageFile経由)。
+            // クリップボード貼り付け(src/main.jsのinsertImageFile経由)。ブリッジの無い
+            // ブラウザ単体動作時のD&D(main.jsのdropハンドラ、フォールバック経路)もここを通る。
             // WebView2の標準DOM File APIでは実パスが取れないため、常にバイト列で届く。
             // dataBase64はJS側からの外部入力であり、壊れたBase64だとFormatExceptionが飛ぶ。
             // 従来はこの呼び出しが下のtryブロックの外にあり、例外がOnWebMessageReceivedの
@@ -3217,6 +3457,18 @@ internal sealed class MainForm : Form
             suggestedName = Path.GetFileName(sourcePath);
         }
 
+        InsertLocalImageAndNotify(sourcePath, bytes, suggestedName);
+    }
+
+    /// <summary>
+    /// 画像挿入の実処理(ImageInsertService呼び出し・成否のJS側への通知)を、呼び出し元3経路
+    /// (メニューのファイル選択ダイアログ・クリップボード貼り付け・OnDragDropのD&amp;D)で共有する。
+    /// sourcePath(実パス、D&amp;D・ファイルダイアログ経由)とbytes(バイト列、クリップボード・
+    /// ブラウザ単体動作のD&amp;D経由)はどちらか一方だけが非nullになる想定
+    /// (ImageInsertService.InsertLocalImage参照)。
+    /// </summary>
+    private void InsertLocalImageAndNotify(string? sourcePath, byte[]? bytes, string suggestedName)
+    {
         AppSettings settings = SettingsService.Load();
         try
         {

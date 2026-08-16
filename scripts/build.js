@@ -9,13 +9,38 @@ const esbuild = require("esbuild");
 const serve = process.argv.includes("--serve");
 const watch = process.argv.includes("--watch") || serve;
 
-const staticFiles = ["index.html", "settings-window.html", "style.css", "themes.css", "icon.svg"];
+const staticFiles = ["index.html", "settings-window.html", "help-window.html", "style.css", "themes.css", "icon.svg"];
 
 function copyStaticFiles() {
   fs.mkdirSync("dist", { recursive: true });
   for (const f of staticFiles) {
     fs.copyFileSync(path.join("src", f), path.join("dist", f));
   }
+}
+
+// 取扱説明書(docs/取扱説明書.md)をdist/manual.mdへコピーする(F1ヘルプ画面用)。
+// dist/に置くのは次の理由から:
+//   ・Pane.csproj CopyDistToPublishDirがdist/以下を丸ごとpublish出力へコピーするため、
+//     追加のcsproj変更なしにZip配布物(scripts/release.ps1)へ確実に含まれる。
+//   ・開発中(npm run buildしてdist/を静的サーバで配信する形)でも、他のstaticFilesと
+//     同じ経路でそのまま読める(fetch("manual.md")で取得できる)。
+//   ・WebView2のSetVirtualHostNameToFolderMapping(Pane/MainForm.cs等)は既にdist/を
+//     pane.localへマッピング済みのため、ここに置くだけでhelp-entry.jsから
+//     追加のマッピング設定なしに読み込める。
+// ファイル名をmanual.mdへ変える(日本語ファイル名のままコピーしない)のは、fetch呼び出し側の
+// URLエンコード・大文字小文字を気にせず済ませるため。
+// 別エージェントが同時に執筆中でdocs/取扱説明書.mdがまだ存在しない場合もビルドを失敗させず、
+// 警告を出すだけにする(存在しなければコピーをスキップし、次回のcopyManualMarkdown呼び出しで
+// 改めて拾う。watchモード中に後から作成された場合は下のfs.watchFileが検知する)。
+const MANUAL_SOURCE = path.join("docs", "取扱説明書.md");
+const MANUAL_DEST = path.join("dist", "manual.md");
+function copyManualMarkdown() {
+  fs.mkdirSync("dist", { recursive: true });
+  if (!fs.existsSync(MANUAL_SOURCE)) {
+    console.warn(`警告: ${MANUAL_SOURCE} が見つかりません(ヘルプ画面は表示できません)`);
+    return;
+  }
+  fs.copyFileSync(MANUAL_SOURCE, MANUAL_DEST);
 }
 
 // mathjax-full の components/version.js は、バンドル時に PACKAGE_VERSION が定義されて
@@ -188,9 +213,13 @@ const patchLezerMarkdownTable = {
 
 const buildOptions = {
   // main.js: 本体ウィンドウ(index.html)。settings-entry.js: 設定専用ウィンドウ
-  // (settings-window.html、Pane/SettingsWindow.cs)。splitting: trueのため、
-  // settings.js/commands.js/file-types.js等の共通コードはチャンクとして自動的に共有される。
-  entryPoints: ["src/main.js", "src/settings-entry.js"],
+  // (settings-window.html、Pane/SettingsWindow.cs)。help-entry.js: 取扱説明書専用ウィンドウ
+  // (help-window.html、Pane/HelpWindow.cs)。splitting: trueのため、
+  // settings.js/commands.js/file-types.js/md-to-html.js等の共通コードはチャンクとして自動的に共有される
+  // (help-entry.jsはCodeMirrorのエディタ本体(@codemirror/view)は一切importしないため、
+  // Markdown→HTML変換に必要な@codemirror/state・@codemirror/language・@codemirror/lang-markdown・
+  // @lezer/markdownだけがバンドルに含まれる)。
+  entryPoints: ["src/main.js", "src/settings-entry.js", "src/help-entry.js"],
   bundle: true,
   format: "esm",
   splitting: true,
@@ -201,6 +230,7 @@ const buildOptions = {
 
 async function run() {
   copyStaticFiles();
+  copyManualMarkdown();
   generateFileTypesCs();
 
   if (watch) {
@@ -209,6 +239,7 @@ async function run() {
     for (const f of staticFiles) {
       fs.watchFile(path.join("src", f), () => copyStaticFiles());
     }
+    fs.watchFile(MANUAL_SOURCE, () => copyManualMarkdown());
     fs.watchFile(FILE_TYPES_SOURCE, () => generateFileTypesCs());
     if (serve) {
       const { host, port } = await ctx.serve({ servedir: "dist", port: 8000 });

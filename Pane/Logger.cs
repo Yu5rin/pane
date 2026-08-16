@@ -8,12 +8,19 @@ namespace Pane;
 internal static class Logger
 {
     private static readonly object Gate = new();
-    private static readonly string LogFilePath = ResolveLogFilePath();
+    private static readonly string LogDirectoryPath = ResolveLogDirectoryPath();
+    private static readonly string LogFilePath = ResolveLogFilePath(LogDirectoryPath);
 
     /// <summary>ログファイルの場所。設定画面等から案内する用途にも使う。</summary>
     public static string FilePath => LogFilePath;
 
-    private static string ResolveLogFilePath()
+    /// <summary>ログファイルを格納するディレクトリ(%LOCALAPPDATA%\Pane\logs)。Paneはこの配下の
+    /// ファイルへ動作中ずっと書き込み続けるため、MainForm.StartWatching側で「外部変更検知の
+    /// 監視を張るかどうか」の判定に使う(自分自身のログを開いたときに無限ダイアログが
+    /// 出てしまう不具合の対策)。</summary>
+    public static string DirectoryPath => LogDirectoryPath;
+
+    private static string ResolveLogDirectoryPath()
     {
         try
         {
@@ -21,11 +28,23 @@ internal static class Logger
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "Pane", "logs");
             Directory.CreateDirectory(dir);
-            return System.IO.Path.Combine(dir, $"pane-{DateTime.Now:yyyyMMdd}.log");
+            return dir;
         }
         catch
         {
             // 万一ログフォルダを作れなくても起動は継続する。以後のWrite()は例外を握りつぶして無視される。
+            return System.IO.Path.GetTempPath();
+        }
+    }
+
+    private static string ResolveLogFilePath(string dir)
+    {
+        try
+        {
+            return System.IO.Path.Combine(dir, $"pane-{DateTime.Now:yyyyMMdd}.log");
+        }
+        catch
+        {
             return System.IO.Path.Combine(System.IO.Path.GetTempPath(), "pane-fallback.log");
         }
     }

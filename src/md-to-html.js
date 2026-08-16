@@ -1,11 +1,18 @@
 // MarkdownをHTMLへ変換する。仕様書 E-05(HTMLとしてコピー)・X-02/X-03(HTMLエクスポート)で
 // 共用する。ライブプレビューと同じ構文木(@lezer/markdown)を辿るため、見た目の解釈は一致する。
-import { syntaxTree } from "@codemirror/language";
+import { ensureSyntaxTree, syntaxTree } from "@codemirror/language";
 import { EMOJI_SHORTCODES, extractHeadings } from "./markdown-extras.js";
 import { renderMathToHtml } from "./math.js";
 // 生HTML(html-sanitize.js)と同じ基準でURLの安全性を検証する。Markdown記法の
 // リンク・画像だけ検証対象外というのは一貫性を欠くため、判定ロジックを共用する。
 import { isSafeUrl } from "./html-sanitize.js";
+
+// renderMarkdownToHtmlが構文木を最後まで伸ばすのに使う上限時間(ミリ秒、ensureSyntaxTree参照)。
+// エクスポートも取扱説明書の表示もユーザーの明示操作に対する一度きりの処理で、
+// 入力のたびに走る類のものではないため、長めに取って確実に最後まで出すことを優先する
+// (10万行クラスの文書でも構文木のパース自体は1秒前後で終わる。ここに達するのは
+// 異常なほど巨大な文書だけで、その場合も途中までのHTMLは出力される)。
+const ENSURE_PARSE_TIMEOUT_MS = 10000;
 
 function escText(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -380,7 +387,17 @@ function findMathBlockRanges(doc) {
 // プレースホルダへ差し替え、texをopts.mathPlaceholdersへ積む(renderStandaloneHtml参照)。
 export function renderMarkdownToHtml(state, { from = 0, to = state.doc.length } = {}, opts) {
   const doc = state.doc;
-  const tree = syntaxTree(state);
+  // 不具合修正: syntaxTree(state)はCodeMirrorの遅延パースの結果をそのまま返すため、
+  // 文書全体の構文木になっているとは限らない(既にパースが済んだ範囲までしか木が伸びていない)。
+  // ここは「文書のこの範囲をまるごとHTMLにする」処理なので、途中で木が切れると、そこから
+  // 後ろの見出し・段落・表がまるごと出力から欠落する。
+  //   ・取扱説明書ウィンドウ(src/help-entry.js)ではEditorViewを作らずEditorState.create()した
+  //     直後に呼ぶため、ほとんど何もパースされておらず、実測で本文が4章の途中で切れていた。
+  //   ・HTML/PDFエクスポート(src/editor.js)でも、長い文書を一度も下までスクロールせずに
+  //     実行すると同じ理由で途中までしか書き出されない。
+  // ensureSyntaxTreeでto位置まで確実にパースしてから使う。上限時間内に終わらなかった場合だけ
+  // nullが返るので、その時は従来どおり(途中まででも出力する)にフォールバックする。
+  const tree = ensureSyntaxTree(state, to, ENSURE_PARSE_TIMEOUT_MS) ?? syntaxTree(state);
   const mathBlocks = opts?.collectMath ? findMathBlockRanges(doc) : [];
   let html = "";
   let node = tree.topNode.firstChild;
@@ -474,7 +491,9 @@ export async function renderStandaloneHtml(state, config = {}) {
     resolveLocalImage = null,
   } = config;
 
-  const headings = extractHeadings(state, 6);
+  // エクスポートは一度きりの処理なので、文書の末尾まで確実に解析してから見出しを集める
+  // (遅延解析のままだと長い文書で後半の見出しにidが振られない。extractHeadings参照)。
+  const headings = extractHeadings(state, 6, { ensureFullParse: true });
   const headingIds = new Map(headings.map((h) => [h.from, h.slug]));
   const pageBreakFroms = new Set();
   if (pageBreakBetweenTopHeadings) {

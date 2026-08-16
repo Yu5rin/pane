@@ -69,6 +69,11 @@ export function buildCommands(ctx) {
     { id: "file.settings", menu: "File", label: "設定", shortcut: `${MOD}+,`, run: app((c) => c.actions.openSettings()), separatorAfter: true },
     { id: "file.close", menu: "File", label: "閉じる", shortcut: `${MOD}+W`, run: app((c) => c.actions.closeWindow()) },
 
+    // ---- ヘルプ(メニューバーには出さない。F1・メニューバー右上の「?」ボタン・コマンドパレットから
+    // 開く。OSの慣習どおりF1はヘルプを開く唯一の目的のキーで、本文編集中の他のショートカットとは
+    // 衝突しない値のため無条件に割り当てる) ----
+    { id: "help.manual", label: "取扱説明書を開く", shortcut: "F1", run: app((c) => c.actions.openHelp()) },
+
     // ---- Edit(第2.2節) ----
     { id: "edit.copyMarkdown", menu: "Edit", label: "マークダウンとしてコピー", shortcut: `${MOD}+Shift+C`, run: app((c) => c.actions.copyAsMarkdown()) },
     { id: "edit.copyHtml", menu: "Edit", label: "HTMLとしてコピー", run: app((c) => c.actions.copyAsHtml()) },
@@ -608,18 +613,10 @@ export function initMenuBar(container, commands, ctx) {
   }
   const helpBtn = container.querySelector("#btn-menu-help");
   if (helpBtn) {
-    // ヘルプ本体(F1相当の説明画面)はまだ無いため、暫定的に設定画面の
-    // 「バージョン情報」カテゴリを開く。ブリッジがある場合は専用ウィンドウ(SettingsWindow)を
-    // 開かせるため、通常のopenSettings()と同じくopen-settings-windowを送る
-    // (カテゴリ指定を追加で載せておくが、現状SettingsWindow側は未対応でも実害はない)。
-    // ブリッジが無いブラウザ単体動作ではctx.actions.openSettings(category)がその場で
-    // モーダルを開き、バージョン情報カテゴリが選択された状態で表示される。
+    // 取扱説明書ウィンドウ(F1)を開く。「help.manualコマンドと同じ動作」にする(file.settingsボタンと
+    // 同じ流儀。メニュー/コマンドパレット/F1のいずれからでも完全に同じ経路を通す)。
     helpBtn.addEventListener("click", () => {
-      if (ctx.bridge) {
-        ctx.bridge.postMessage({ type: "open-settings-window", category: "versionInfo" });
-      } else {
-        ctx.actions?.openSettings?.("versionInfo");
-      }
+      commands.find((c) => c.id === "help.manual")?.run();
     });
   }
 
