@@ -245,15 +245,21 @@ internal sealed class MainForm : Form
         // OnLoadAsync側でNavigate前にdata-theme属性を注入することで対処する(そちらを参照)。
         ApplyInitialWebViewBackground();
 
-        // ウィンドウ全体(タイトルバー等の非クライアント領域だけでなく、WebView2が覆う
-        // クライアント領域も含む)へのD&D用。WebView2のクライアント領域上のドロップは、
-        // 下のOnLoadAsync内でAllowExternalDropをfalseにすることでWebView2自身が横取りしない
-        // ようにしており、その結果このフォーム自身のDragDrop(=OnDragDrop)が一括して受け取る
-        // (不具合修正: 従来はAllowExternalDropが既定のtrueのままだったため、クライアント領域上の
-        // ドロップはWebView2内のJavaScript(main.jsのdragover/dropハンドラ)が横取りしてしまい、
-        // 標準のDOM File APIではフルパスが取れず「無題」の文書としてしか開けなかった。
-        // ブリッジの無いブラウザ単体動作(開発確認用)ではこのOnDragDropが存在しないため、
-        // 従来どおりJavaScript側のハンドラがそのまま使われる)。
+        // ウィンドウ全体(タイトルバー等の非クライアント領域)へのD&D用。
+        // 不具合修正の経緯: 一度は「WebView2のAllowExternalDropをfalseにして、クライアント領域上の
+        // ドロップもすべてこのフォーム自身のDragDrop(OnDragDrop)で受け切る」方式を試みた。
+        // これならDataFormats.FileDropからフルパスが取得できるが、副作用として本文エリア上に
+        // ドラッグしている間ずっとカーソルが禁止マーク(🚫)になってしまい(WebView2が
+        // 「外部ドロップを受け付けない」旨をOSへ表明する結果、OS側のドラッグカーソルが
+        // 拒否扱いになる)、実機で確認されたため撤回した。
+        // 現在の方式: AllowExternalDropは既定のtrue(=WebView2が本文エリア上のドロップを
+        // 自分で受け取る)のまま保つ。その代わり、ドラッグがウィンドウに入った時点で発火する
+        // OnDragEnter(WebView2の領域内であっても、まずこのフォーム自身のDragEnterが先に届く)で
+        // DataFormats.FileDropからフルパスを先に読み取り、フィールド(_pendingDragFiles)へ
+        // 覚えておく。実際のドロップ自体はWebView2内のJS(src/main.js)が受け取るが、JSは
+        // ファイル名(+サイズ)だけをC#へ送り返してくるので、ここで覚えておいたパス一覧と
+        // 名前・サイズで照合すればフルパスが分かる(詳細はOnDragEnter/HandleOpenDroppedFileByName
+        // 参照)。
         AllowDrop = true;
         DragEnter += OnDragEnter;
         DragOver += OnDragEnter;
@@ -521,23 +527,32 @@ internal sealed class MainForm : Form
         await _webView.EnsureCoreWebView2Async(env);
         Logger.Write($"WebView2初期化完了: バージョン={_webView.CoreWebView2.Environment.BrowserVersionString}");
 
-        // ファイルのD&D(不具合修正): WebView2は既定でウィンドウ外(エクスプローラ等)からの
-        // ドロップを自分で受け取ってしまい(AllowExternalDrop既定=true)、このフォーム自身の
-        // DragDrop(OnDragDrop、コンストラクタで登録済み)には一切イベントが届かなかった。
-        // 標準のDOM File APIはセキュリティ上フルパスを返さないため、JS側(main.js)ではファイル名と
-        // バイト列しか取得できず、拡張子に基づくコードモード判定・保存先の特定ができない「無題」の
-        // 文書としてしか開けなかった。falseにすると、WebView2は外部からのドロップを一切受け付けない
-        // 旨をOSへ表明するようになり、そのドロップは(ウィンドウ内で唯一有効な受け口である)
-        // フォーム自身のDragDropへ回ってくる。C#側ならDataFormats.FileDropからフルパスが
-        // 取得できるため、エクスプローラからファイルを開くのと同じOpenFile(path)経路に乗せられる。
-        // なお、このプロパティが制御するのは「WebView2の外(OS)から入ってくるドロップ」のみで、
-        // ページ内部で完結するドラッグ(本文中のテキスト選択ドラッグや、CodeMirrorの内部D&D、
-        // タブの並べ替えD&D=src/main.js 1859行付近のdragstart起点の操作)には影響しない
-        // (参照: Microsoft Learn、CoreWebView2Controller.AllowExternalDropの解説)。
-        // 型はMicrosoft.Web.WebView2.WinForms.WebView2側が公開するAllowExternalDropプロパティ
-        // (内部でCoreWebView2ControllerのAllowExternalDropへ委譲される)を使う。CoreWebView2
-        // 初期化完了前に設定/取得すると例外になるため、必ずEnsureCoreWebView2Async完了後に行う。
-        _webView.AllowExternalDrop = false;
+        // ファイルのD&D: AllowExternalDropは既定のtrueのまま変更しない(下記参照)。
+        //
+        // 経緯(不具合修正→さらにその副作用の修正):
+        // 最初の修正では、AllowExternalDropをfalseにしてWebView2に外部ドロップを一切
+        // 受け取らせず、代わりにこのフォーム自身のDragDrop(OnDragDrop)で一括して受け切る方式に
+        // していた。DataFormats.FileDropからフルパスが取れるため、拡張子に基づくコードモード
+        // 判定・保存先の特定ができる正しい経路(OpenFile(path))に乗せられる利点はあったが、
+        // 副作用として、本文エリア上へファイルをドラッグしている間ずっとカーソルが禁止マーク
+        // (🚫)になることが実機で確認された(falseにすると、WebView2は「外部からのドロップを
+        // 一切受け付けない」旨をOSへ表明するため、OS側のドラッグカーソルが常に拒否扱いになる。
+        // 参照: Microsoft Learn、CoreWebView2Controller.AllowExternalDropの解説)。これはUXとして
+        // 受け入れられないため撤回した(実際、過去に一度この方式が検討され、同じ理由で
+        // 見送られていた形跡が削除済みのコメントに残っている)。
+        //
+        // 現在の方式: AllowExternalDropはtrueのままにして禁止マークを出さない。その代わり、
+        // ドラッグがウィンドウに入った時点(WebView2の領域に入るより前)で発火するこのフォーム
+        // 自身のOnDragEnterで、DataFormats.FileDropからフルパスを先に読み取ってフィールド
+        // (_pendingDragFiles)へ覚えておく。実際のドロップ自体は(AllowExternalDrop=trueにより)
+        // WebView2内のJS(src/main.js)が受け取るが、標準のDOM File APIはセキュリティ上フルパスを
+        // 返さないため、JSはファイル名(+サイズ)だけをpostMessageでC#へ送り返してくる
+        // ("open-dropped-file-by-name")。C#側はそれと_pendingDragFilesを名前・サイズで照合し、
+        // 一致すればフルパス経由でOpenFile相当の処理(OpenDroppedPathAsync)に乗せる。
+        // 照合に失敗した場合(DragEnterを経由しなかった等の想定外経路への保険)は、JSへ
+        // バイト列を要求し、名前+中身だけの「無題」文書として開く従来経路
+        // (HandleOpenDroppedFile)へフォールバックする。詳細はOnDragEnter/
+        // HandleOpenDroppedFileByName/HandleOpenDroppedFileの各コメントを参照。
 
         // ブラウザ既定のアクセラレータキー(Ctrl+U=ソース表示、Ctrl+F=検索、Ctrl+P=印刷、
         // F3=検索、F12=DevTools等)を無効化する。無効化しないとPane独自のショートカット
@@ -1137,7 +1152,14 @@ internal sealed class MainForm : Form
                 // pane-file.localホストが存在しない環境で単体のファイルとして開かれるため)。
                 HandleReadLocalImageRequest(root);
                 break;
+            case "open-dropped-file-by-name":
+                // 実アプリでのD&Dの主経路(AllowExternalDrop=trueのまま、名前+サイズの照合で
+                // フルパスを復元する。詳細はHandleOpenDroppedFileByNameのコメント参照)。
+                HandleOpenDroppedFileByName(root);
+                break;
             case "open-dropped-file":
+                // 上記の照合に失敗した場合のフォールバック経路。JS側がrequest-dropped-file-fallback
+                // を受けて、名前+バイト列を添えてこちらへ送り直してくる。
                 HandleOpenDroppedFile(root);
                 break;
             case "log":
@@ -2128,18 +2150,22 @@ internal sealed class MainForm : Form
     }
 
     /// <summary>
-    /// WebView2の本文エリア(Webページ側)へドラッグ&ドロップされたファイルを開く。
+    /// WebView2の本文エリア(Webページ側)へドラッグ&ドロップされたファイルを開く
+    /// (名前+バイト列のみによる「無題」文書としての開き方。フルパスは分からない)。
     /// 現在の本文が空(失われる内容が無い)ならこのウィンドウで、何か書かれていれば
     /// 新しいウィンドウで開く(空かどうかの判定はJS側が行い、newWindowで伝えてくる)。
     ///
-    /// 不具合修正(現状は事実上未使用): 本来の呼び出し元だったsrc/main.jsの"open-dropped-file"
-    /// 送信は、WebView2のAllowExternalDropをfalseにしたこと(Pane/MainForm.cs OnLoadAsync参照)に
-    /// 伴い、ブリッジがある場合(実アプリ)は送られなくなった(ファイルD&DはOnDragDropが
-    /// フルパス付きで受け取るようになったため)。ブラウザ単体動作(ブリッジ無し)ではブリッジ自体が
-    /// 無く元々この経路を使わない。そのため現状呼び出されることは無いが、標準のDOM File APIしか
-    /// 使えない経路(WebView2のAllowExternalDrop設定が何らかの事情で効かない場合の保険)として
-    /// あえて削除せず残してある。DroppedFileContent/_requestNewWindowWithContent/
-    /// OpenDroppedContentも同じ理由で残す。
+    /// 呼び出されるタイミング: AllowExternalDropは既定のtrueのままにしているため、
+    /// 実際のドロップはWebView2内のJSが受け取り、通常はまずファイル名+サイズだけを
+    /// "open-dropped-file-by-name"としてC#へ送ってくる(HandleOpenDroppedFileByName参照)。
+    /// そこでDragEnterで先に得ていたフルパス一覧と照合できれば、そちらの正規の経路
+    /// (OpenDroppedPathAsync、拡張子に基づくコードモード判定等が効く)で開かれ、この
+    /// メソッドは使われない。このメソッドが実際に呼ばれるのは、その照合に失敗した場合
+    /// (DragEnterを経由しなかった、WebView2のバージョン差等の想定外経路)にJS側が
+    /// "request-dropped-file-fallback"を受けて送り直してくる"open-dropped-file"のみ。
+    /// 「照合できなければ何も起きない」を避けるための最後の砦であり、標準のDOM File API
+    /// しか使えない経路として、あえて削除せず残してある。DroppedFileContent/
+    /// _requestNewWindowWithContent/OpenDroppedContentも同じ理由で残す。
     /// </summary>
     private void HandleOpenDroppedFile(JsonElement message)
     {
@@ -2296,6 +2322,30 @@ internal sealed class MainForm : Form
 
     private string? _lastDragLogKey;
 
+    /// <summary>DragEnterで得た、直近1回のドラッグ操作ぶんのファイルパス一覧と、
+    /// それを取得した時刻。JS側(src/main.js)から届く"open-dropped-file-by-name"
+    /// (ファイル名+サイズのみ、標準のDOM File APIはフルパスを返さないため)と名前・サイズで
+    /// 照合し、一致すればここからフルパスを取り出す(<see cref="TryResolveDraggedPath"/>)。
+    ///
+    /// 「直近1回ぶんだけ」保持する(配列を丸ごと上書きする)ことで、別フォルダにある同名ファイルを
+    /// 続けてドラッグした場合の取り違えを防ぐ(常に直前のDragEnterで得た一覧だけが候補になり、
+    /// さらに古い一覧とは絶対に混ざらない)。加えてファイルサイズも照合条件に含めており、
+    /// 万一同一ドラッグ操作の複数ファイル中に同名ファイルがあっても、サイズが違えば別物として
+    /// 区別できる(名前だけの照合よりも取り違えの確率を下げる)。
+    ///
+    /// 寿命(<see cref="PendingDragFilesLifetime"/>)を設けているのは、ドラッグを最後まで
+    /// 完了させずに中断した場合(Escキー、ウィンドウ外でドロップ)にパスが残り続け、
+    /// 後で無関係な操作(例えばブラウザ単体動作や別の経路からのopen-dropped-file-by-name)と
+    /// 誤って照合されることを防ぐため。</summary>
+    private (string[] Paths, DateTime CapturedAtUtc)? _pendingDragFiles;
+
+    /// <summary><see cref="_pendingDragFiles"/>の有効期間。実機ログ上、DragEnterから実際の
+    /// dropまでは1秒に満たない(コンマ数秒)ため、通常のドラッグ操作を妨げない範囲で
+    /// 十分に短い値として5秒を選んだ(「短すぎて通常操作でも稀に無効化される」ことと
+    /// 「長すぎて中断後の古いパスがいつまでも残る」ことの中間を狙った目安値。
+    /// 数秒程度、というだけの根拠でありシビアな計測値ではない)。</summary>
+    private static readonly TimeSpan PendingDragFilesLifetime = TimeSpan.FromSeconds(5);
+
     private void OnDragEnter(object? sender, DragEventArgs e)
     {
         // DragEnter/DragOverの両方に登録しているため、ドラッグ中は同じ内容で大量に呼ばれる。
@@ -2315,14 +2365,36 @@ internal sealed class MainForm : Form
                 $"formBounds={Bounds}, webViewBounds={_webView.Bounds}");
         }
         e.Effect = hasFileDrop ? DragDropEffects.Copy : DragDropEffects.None;
+
+        // AllowExternalDropを既定(true)のままにしたことで、ドラッグはこの後WebView2の領域へ
+        // 入りDragLeaveが飛ぶが、それより前にここでフルパスを取れているうちに保持しておく
+        // (実機ログで、AllowExternalDropが既定のときもOnDragEnter自体は確実に発火し、
+        // DataFormats.FileDropが取得できることを確認済み)。DragEnter/DragOver両方から呼ばれる
+        // ため毎回上書きになるが、内容は同じドラッグ操作の同じパス一覧のはずなので問題ない。
+        if (hasFileDrop && e.Data?.GetData(DataFormats.FileDrop) is string[] { Length: > 0 } enterPaths)
+        {
+            _pendingDragFiles = (enterPaths, DateTime.UtcNow);
+        }
     }
 
     private void OnDragLeave(object? sender, EventArgs e)
     {
         Logger.Write($"OnDragLeave (sender={sender?.GetType().Name})");
         _lastDragLogKey = null;
+        // 注意: ここで_pendingDragFilesをクリアしてはいけない。実機ログで確認済みのとおり、
+        // ドラッグがWebView2の領域(=本文エリア)へ入った時点でこのDragLeaveが飛ぶが、
+        // 実際のドロップはその後WebView2内のJSが受け取る。ここでクリアすると、
+        // 肝心のフルパスがドロップより前に消えてしまい、常にフォールバック経路
+        // (バイト列による「無題」開き)行きになってしまう。クリアするのは
+        // 「ドロップを処理し終えたとき」(HandleOpenDroppedFileByName)と
+        // 「一定時間が過ぎたとき」(PendingDragFilesLifetime、TryResolveDraggedPath)のみ。
     }
 
+    /// <summary>ネイティブD&amp;D(WinFormsのDragDrop)経路。現在はAllowExternalDropが既定のtrueの
+    /// ため通常ここには来ず、実際のドロップはWebView2内のJS経由(open-dropped-file-by-name→
+    /// <see cref="HandleOpenDroppedFileByName"/>)で処理される。それでも、WebView2のバージョン差や
+    /// 何らかの事情でAllowExternalDropが効かない/OSからこのフォームへ直接ドロップが来た場合の
+    /// 保険としてハンドラ自体は残してある(あえて削除しない)。</summary>
     private async void OnDragDrop(object? sender, DragEventArgs e)
     {
         _lastDragLogKey = null; // 次のドラッグ操作でまた最初の状態からログを記録できるようにする
@@ -2337,7 +2409,16 @@ internal sealed class MainForm : Form
         Logger.Write(paths.Length > 1
             ? $"OnDragDrop: paths=[{string.Join(",", paths)}] (複数{paths.Length}件がドロップされたが先頭のみ開く)"
             : $"OnDragDrop: paths=[{string.Join(",", paths)}]");
+        await OpenDroppedPathAsync(path);
+    }
 
+    /// <summary>フルパスが分かっているドロップ済みファイルを開く本体。ネイティブD&amp;D
+    /// (<see cref="OnDragDrop"/>)と、JSからのファイル名照合が成功した経路
+    /// (<see cref="HandleOpenDroppedFileByName"/>)の両方から呼ばれる、パスの入手経路に
+    /// 依存しない共通処理。エクスプローラからファイルを開くのと同じOpenFile(path)系の経路に
+    /// 乗せるため、拡張子に応じたコードモード判定・保存先の特定が正しく行われる。</summary>
+    private async Task OpenDroppedPathAsync(string path)
+    {
         // 画像ファイルのドロップは「このファイルを開く」ではなく「本文へ画像を挿入する」として
         // 扱う(仕様書 docs/設定項目一覧.md「画像」節。src/main.jsのisImageFile/insertImageFileと
         // 同じ判定・同じ考え方)。タブ形式かどうか・本文が空かどうかに関わらず常にこちらを優先する
@@ -2383,6 +2464,67 @@ internal sealed class MainForm : Form
             return;
         }
         OpenFile(path);
+    }
+
+    /// <summary>JS側(src/main.js)から届く"open-dropped-file-by-name"の受け口。標準のDOM File
+    /// APIはセキュリティ上フルパスを返さないため、JSはファイル名(+サイズ)しか送ってこない。
+    /// <see cref="_pendingDragFiles"/>(DragEnterで先に取得済みのフルパス一覧)と名前・サイズで
+    /// 照合し、一致すればフルパス経由の正規の経路(<see cref="OpenDroppedPathAsync"/>)へ、
+    /// 一致しなければJSへバイト列を要求し、名前+中身だけの「無題」文書として開く従来経路
+    /// (<see cref="HandleOpenDroppedFile"/>)へフォールバックする(照合に失敗する経路は
+    /// 通常あり得ないはずだが、そこで何も起きないのは最悪のため必ずどちらかへ倒す)。</summary>
+    private void HandleOpenDroppedFileByName(JsonElement message)
+    {
+        string name = TryGetString(message, "name", out string nameValue) ? nameValue : "";
+        // サイズは32bit精度を超えることがありうる(数GB相当のファイル)ため、TryGetIntではなく
+        // TryGetDoubleで受け取る(doubleは2^53までの整数を正確に表現できるため、
+        // 現実的なファイルサイズの照合には十分)。
+        long size = TryGetDouble(message, "size", out double sizeValue) ? (long)sizeValue : -1;
+        Logger.Write($"open-dropped-file-by-name受信: name={name}, size={size}");
+
+        string? matchedPath = TryResolveDraggedPath(name, size);
+        if (matchedPath is not null)
+        {
+            Logger.Write($"open-dropped-file-by-name: DragEnterで保持済みのパスと照合成功 -> {matchedPath}");
+            _pendingDragFiles = null; // 使い終わったのでクリア(次回以降の誤照合を防ぐ)
+            _ = OpenDroppedPathAsync(matchedPath);
+            return;
+        }
+
+        Logger.Write("open-dropped-file-by-name: フルパスの照合に失敗したため、バイト列によるフォールバックを要求する");
+        PostToWeb(new { type = "request-dropped-file-fallback" });
+    }
+
+    /// <summary><see cref="_pendingDragFiles"/>から、名前(と分かればサイズ)が一致するフルパスを
+    /// 探す。見つからない場合(保持していない・期限切れ・一致するものが無い)はnull。</summary>
+    private string? TryResolveDraggedPath(string name, long size)
+    {
+        if (_pendingDragFiles is not { } pending) return null;
+        TimeSpan age = DateTime.UtcNow - pending.CapturedAtUtc;
+        if (age > PendingDragFilesLifetime)
+        {
+            Logger.Write($"TryResolveDraggedPath: 保持していたパスが{age.TotalSeconds:F1}秒経過し" +
+                $"期限({PendingDragFilesLifetime.TotalSeconds}秒)を超えているため無効化する" +
+                "(ドラッグを中断した後の無関係なドロップとの誤照合を防ぐ)");
+            _pendingDragFiles = null;
+            return null;
+        }
+
+        foreach (string path in pending.Paths)
+        {
+            if (!string.Equals(Path.GetFileName(path), name, StringComparison.Ordinal)) continue;
+            if (size < 0) return path; // サイズが分からない場合は名前一致のみで採用
+            try
+            {
+                if (new FileInfo(path).Length == size) return path;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // ファイル情報を読めない場合は不一致扱いにして次の候補を見る
+                Logger.WriteException($"TryResolveDraggedPath: {path} のサイズ取得に失敗", ex);
+            }
+        }
+        return null;
     }
 
     /// <summary>本文が空かどうかをJS側(main.js)へ問い合わせる(request-text/text-responseと
