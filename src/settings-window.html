@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pane の設定</title>
+<link rel="icon" type="image/svg+xml" href="icon.svg">
+<script>
+  // index.htmlと同じ起動時スクリプト(起動時の白フラッシュ対策、実機不具合の修正):
+  // C#側(Pane/SettingsWindow.cs OnLoadAsync)がAddScriptToExecuteOnDocumentCreatedAsyncで、
+  // 保存されているテーマ設定に基づくdata-theme属性をこのスクリプトより先に設定している
+  // (ブリッジ経由でPaneアプリとして動いている場合)。それが既に付いていればOS設定より
+  // 優先して尊重し、無い場合(ブラウザ単体検証時など)だけOS設定(prefers-color-scheme)へ
+  // フォールバックする。実際のテーマ(手動選択・プリセット)はsettings-entry.jsが
+  // ブリッジからの応答を受けて上書きする。
+  try {
+    if (!document.documentElement.dataset.theme) {
+      var dark = matchMedia("(prefers-color-scheme: dark)").matches;
+      document.documentElement.dataset.theme = dark ? "dark" : "light";
+    }
+  } catch (e) {}
+</script>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="themes.css">
+<style>
+  /* 設定画面専用ウィンドウ: 本文エディタ・メニューバー・ステータスバーは持たず、
+     ウィンドウの中身はsettings-entry.jsが描画する設定画面(pageモード)だけで占める。 */
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--paper); color: var(--ink); font-family: var(--font-body); overflow: hidden; }
+</style>
+</head>
+<body>
+  <script type="module" src="settings-entry.js"></script>
+</body>
+</html>

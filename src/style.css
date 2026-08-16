@@ -1,0 +1,1584 @@
+:root {
+  --bar-h: 48px;
+  --paper: #EEF1F0;
+  --surface: #FFFFFF;
+  --ink: #1F2428;
+  --ink-sub: #66707A;
+  --line: #DCE2E0;
+  --accent: #0F6E69;
+  --accent-hover: #0A5A56;
+  --accent-soft: #E1EFED;
+  --topbar: #0F6E69;
+  --topbar-ink: #EAF4F3;
+  --input-bg: #FAFBFB;
+  /* コードブロック背景(ライト既定): 真っ黒にすると白系の紙面から浮く(GitHub/Typora/
+     VS Codeもライトのコードブロックは黒ではなく、本文よりわずかに沈んだニュートラルな
+     グレーを使う—GitHub Light: canvas.subtle #F6F8FA、Typora既定(Github風)テーマ、
+     VS Code Light+のウィジェット背景も同系統)。それに倣い、彩度の低いグレーを採用
+     (旧値#E7ECEAはやや緑寄りだったため、色味を抜いてニュートラルにした)。 */
+  --code-bg: #EEF1F3;
+  --pre-bg: #262C31;
+  --pre-ink: #E8EAED;
+  --danger-soft: #F9ECEA;
+  --pending: #B7791F;
+  --danger: #B03A2E;
+  --status-ok: #8FDAD2;
+  --status-off: #AFC4C0;
+  --status-pend: #F2C368;
+  --radius: 10px;
+  --shadow-card: 0 1px 2px rgba(16,24,32,.05), 0 10px 30px rgba(16,24,32,.08);
+  --shadow-pop: 0 6px 24px rgba(16,24,32,.14);
+  --font-body: "IBM Plex Sans JP", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+html[data-theme="dark"] {
+  --paper: #14181B;
+  --surface: #1C2226;
+  --ink: #E2E7EA;
+  --ink-sub: #93A0A8;
+  --line: #2C343A;
+  --accent: #35B3AA;
+  --accent-hover: #4CC5BC;
+  --accent-soft: #17332F;
+  --topbar: #0C2A27;
+  --topbar-ink: #D9EAE7;
+  --input-bg: #171C20;
+  /* コードブロック背景(ダーク既定): 修正前は#262E33で、本文(最終的な--paper #14171A)より
+     明るい青緑寄りの色になっており、「コードブロックが黒っぽく見えない」という指摘の
+     原因の一つだった。本文よりはっきり暗く、かつ青緑に寄せないニュートラルな黒系に
+     変更する。 */
+  --code-bg: #0B0D0F;
+  --pre-bg: #10151A;
+  --pre-ink: #DDE3E7;
+  --danger-soft: #3A2320;
+  --pending: #D9A24A;
+  --danger: #E07B6E;
+  --shadow-card: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.35);
+  --shadow-pop: 0 6px 24px rgba(0,0,0,.5);
+}
+
+/* ===== Pane デザイントークン（仕様書 第10.2節・第10.3節） =====
+   --paper / --ink / --accent / --accent-soft は上の値を仕様書の値で上書きし、
+   --ink-mute / --rule / --font-heading は新規追加。
+   実際のセレクタへの適用（配色・行送り1.95・本文幅42em等）は後フェーズで行う。 */
+:root {
+  --paper: #FBFBFA;
+  --ink: #1F2428;
+  --ink-mute: #6B7378;
+  --rule: #E4E7E6;
+  --accent: #2F6F68;
+  --accent-soft: #E1EFED;
+  /* 依頼⑤: 折りたたみマーカーにマウスを乗せたとき、対応するインデントガイド(縦線)を
+     強調する色。ここ(style.cssの:root、テーマプリセット未適用の既定ライト/ダーク)では
+     従来どおりvar(--accent)への追従のままにしておく(既定値として残す)。
+     9テーマのプリセット(themes.css)側は、テーマごとの背景に対して最も見やすい色を
+     個別に実測・明示指定しており、ここのvar(--accent)には追従しない(themes.css側の
+     コメント・今回の対応報告の実測表を参照)。 */
+  --fold-guide-hover: var(--accent);
+
+  /* ===== 画面の各部で色を分けるためのトークン(ユーザー要望: Typora Nightのように
+     本文・サイドバー・メニューバー/ステータスバー・タイトルバーそれぞれに違う色を
+     持たせたい)。テーマプリセット(themes.css)側がこれらを個別に上書きできるようにする
+     ための土台がこの4変数で、未指定のプリセット(将来追加されるものを含む)は
+     以下へ自動的に倒れ、既存の見た目を変えない:
+       --chrome-bg  … 専用の指定が無ければ#menubar/#statusbarはbodyの--paperが
+                      そのまま透けて見える、というのが元々の既定の見た目だったため。
+       --sidebar-bg … #sidebarは元々 background: var(--surface) だったため、
+                      その見た目のまま--surfaceへ倒す。
+     --titlebar-fg はここでは定義しない(未指定のままにする)。main.jsの
+     syncTitleBarColor()が--titlebar-bg/--titlebar-fgを最優先で読みにいき、
+     定義されていない方だけ本文エリアの実描画色にフォールバックする。
+
+     既定(プリセット無し)のライト/ダークについて: 当初は上記のとおり
+     --chrome-bg: var(--paper)(本文と同色)のままにしていたが、「他のカラーモードも
+     本文・サイドバー・メニューバー+タイトルバーで色を変えてほしい」という要望は
+     既定も対象に含むと明確化されたため、既定にも独自の--chrome-bg/--titlebar-bgを
+     与えた。
+     【メニュー/タイトルバーの濃淡の原則、方針転換あり】当初はライト・ダークとも
+     「本文よりわずかに主張する程度の差」だけを付けており、ダークは「本文より
+     わずかに明るい」方向にしていた。しかし後日、ユーザーが実機のTypora(ダーク)と
+     Paneを見比べ「Typoraのタイトルバー+メニューバーはサイドバーより濃い(暗い)。
+     Paneも同じにしたい」と明示したため、方針を転換した。
+     現在の原則(ライト・ダーク共通): メニューバー・タイトルバーは、本文・
+     サイドバーのどちらよりも濃い(暗い)色にする。ライトは既に守れていた
+     (--chrome-bg #EFF1F0 は --paper #FBFBFA より暗い)ため変更していないが、
+     ダークは「本文より明るい」という逆方向だったため値を変更した(下の
+     html[data-theme="dark"]ブロックのコメント参照)。この原則は
+     themes.css側の各テーマプリセットにも同様に適用している。
+     これに伴い、titlebar-colorの送信先(.verify-titlebar-paste.mjs)も
+     「本文エリアの実描画色と一致」ではなく「--titlebar-bgの実効値(=タイトルバーの
+     実描画色)と一致」を検証するよう更新している(カスタムCSSで本文の色を変えたときに
+     追従する、というテストの主旨自体は変えていない)。
+     【実バグ2の修正で追加】--titlebar-fgは長らく未定義のままで、main.js
+     syncTitleBarColor()が本文エリアの実描画色(getComputedStyle(...).color)を
+     読んで代用していた。しかしbody要素にはbackground/colorのトランジション
+     (下記body{transition: background .2s, color .2s;})が掛かっており、
+     WebView2が非表示(Visible=false)の間はブラウザの描画パイプラインが
+     止まっているためこのトランジションが実時間どおり進行しない。結果、
+     初回のtitlebar-color送信でforegroundだけ「一つ前のテーマ(既定ライト)の
+     色のまま」止まって送られてしまう実機不具合があった(background側は
+     CSS変数の直接参照でトランジションの影響を受けないため正しく送れていた)。
+     --titlebar-fgをここで明示すれば、main.js側はCSS変数を直接読むだけで済み
+     (readTitleBarOverride()がgetPropertyValueで読む、こちらはトランジション非対象)、
+     この問題自体が起きなくなる。値は--ink(コントラスト比は実測13.8:1、
+     十分に読める)をそのまま使う。 */
+  --chrome-bg: #EFF1F0;
+  --sidebar-bg: var(--surface);
+  --titlebar-bg: #EFF1F0;
+  --titlebar-fg: var(--ink);
+  /* 実バグ3の修正: メニューのホバー/選択時の文字色(背景はvar(--accent-soft))。
+     実測コントラスト比4.94:1でvar(--accent)のまま問題ない。 */
+  --menu-hover-fg: var(--accent);
+
+  --font-heading: "Source Serif 4", "Noto Serif JP", serif;
+  --font-body: "Inter", "Noto Sans JP", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "BIZ UDゴシック", ui-monospace, monospace;
+}
+html[data-theme="dark"] {
+  --paper: #14171A;
+  --ink: #E4E7E5;
+  --ink-mute: #8A9296;
+  --rule: #242A2E;
+  --accent: #6FB3A8;
+  --accent-soft: #1E2C2B;
+  /* ダーク既定の部位別配色。本文(--paper #14171A)より少し明るい--surface(#1C2226)を
+     サイドバーに割り当てるのはそのまま(変更なし)。
+     【方針転換】メニュー/ステータス/タイトルバーは以前「本文よりさらに明るい色」を
+     割り当てていたが(サイドバーより明るい=3つの中で最も明るい)、実機のTyporaと
+     比較したユーザーから「Typoraのタイトルバー+メニューバーはサイドバーより濃い
+     (暗い)。Paneも同じにしたい」という明示の指摘を受け、方向を反転した。
+     以後は「メニューバー・タイトルバーは本文・サイドバーのどちらよりも濃い
+     (暗い)色にする」がPane全体の原則(このファイル・themes.css共通)。
+     この原則を破って「本文より明るい色」に戻さないこと。
+     本文(--paper #14171A)にも公式の下限が無いため、他のダークテーマ(nord/dracula/
+     solarized-dark/night、詳細はthemes.css参照)と同じ考え方で本文をさらに黒へ
+     寄せた値(#0E1012)を採用した。文字色--ink(#E4E7E5)とのコントラスト比は
+     約15:1で、可読性は本文以上に十分確保できている。 */
+  --chrome-bg: #0E1012;
+  --sidebar-bg: var(--surface);
+  --titlebar-bg: #0E1012;
+  /* 実バグ2の修正で追加(根拠は上の:rootブロックのコメント参照)。コントラスト比は
+     実測約15:1。 */
+  --titlebar-fg: var(--ink);
+  /* 実バグ3の修正。実測コントラスト比5.99:1でvar(--accent)のまま問題ない。 */
+  --menu-hover-fg: var(--accent);
+}
+
+/* ===== コードのハイライト配色(仕様書 第5章・第10.2節) =====
+   【改訂の経緯】当初は--accent/--ink/--ink-muteのcolor-mix()だけで全トークン色を
+   派生させていた(単一の色相を混ぜ分けるだけ)。しかしユーザーからPane(自製)と
+   実在のエディタ(VS Code Dark+系配色)を並べたスクリーンショットで指摘があり、
+   実測(PlaywrightでgetComputedStyle().colorを比較)したところ、
+     - 実装は当たっている(無色ではない)が、変数名(document等)は無色のまま
+       (t.variableNameそのものに対応するルールが無く、function()/definition()で
+       修飾された場合のみ色が付いていた)。
+     - 色が付いている部分(キーワード等)も、accentとink(単一色相)の混色にすぎず
+       彩度・色相の変化が乏しいため、種類の違うトークンが「太字かどうか」でしか
+       区別できず、Dark+のような「見た瞬間に種類がわかる」配色になっていなかった。
+   という2つの問題が判明した。そこで単一色相のcolor-mix()をやめ、役割ごとに
+   別の色相を持つ具体的な色を各テーマで指定する方式に改めた(このためテーマ
+   プリセット側(themes.css)にも同じ変数群の上書きを追加している)。
+   役割は以下の9種(ユーザー指摘のDark+対応表 + 変数名 + プロパティ名/属性名 + 記号):
+     --code-kw   … キーワード全般(const/let/function等の宣言・修飾キーワード)
+     --code-kw2  … 制御構文キーワード(if/for/return等)。Dark+が紫で分けているため
+                   追随できるよう別変数にした。分けない配色のテーマは--code-kwと
+                   同じ値を入れればよい。
+     --code-var  … 変数の参照・宣言(document, sum等)。以前は無色だった主犯。
+     --code-fn   … 関数・メソッド名(getElementById等)
+     --code-str  … 文字列
+     --code-num  … 数値・真偽値
+     --code-cmt  … コメント(斜体、下のfont-style指定と対)
+     --code-type … 型名・クラス名
+     --code-prop … オブジェクト/JSONのキー・HTML/CSS属性名(tags.propertyName)
+     --code-op   … 演算子・括弧・カンマ等の記号
+     --code-regex … 正規表現リテラル(不具合修正3で追加。tags.regexpに対応するルールが
+                   無く無色だった。Dark+は文字列と別の赤系を割り当てているため分離)
+   タグ名(HTML/JSXの<div>等)は専用の変数を持たず、editor.js側でDark+の実際の
+   割り当て(タグ名=キーワードと同じ青)に合わせてvar(--code-kw)を直接参照している。
+   既定(本ブロック)はVS Code "Light+"配色に強くインスパイアされた値(ユーザーが
+   Dark+を「実質の業界標準」と位置づけたため、その明るい版としてLight+の実値を
+   参考にした。ただし完全な丸写しではなく、コメント色等は自テーマのink-muteとの
+   兼ね合いで独自に調整している)。 */
+:root {
+  --code-kw: #0000FF;
+  --code-kw2: #0000FF;
+  --code-var: #001080;
+  --code-fn: #795E26;
+  --code-str: #A31515;
+  --code-num: #098658;
+  --code-cmt: #008000;
+  --code-type: #267F99;
+  --code-prop: #001080;
+  --code-op: var(--ink);
+  --code-regex: #811F3F;
+}
+/* ダーク既定: ユーザーが提示したVS Code "Dark+"の対応表そのまま(既定テーマは
+   「その配色の性格に合わせて決めてよい」対象だが、Dark+はユーザー自身が既定の
+   参照先として明示したため、素直にDark+の実値を採用する)。--code-regexもDark+の
+   表にある正規表現の値(#D16969)をそのまま使う。 */
+html[data-theme="dark"] {
+  --code-kw: #569CD6;
+  --code-kw2: #C586C0;
+  --code-var: #9CDCFE;
+  --code-fn: #DCDCAA;
+  --code-str: #CE9178;
+  --code-num: #B5CEA8;
+  --code-cmt: #6A9955;
+  --code-type: #4EC9B0;
+  --code-prop: #9CDCFE;
+  --code-op: var(--ink);
+  --code-regex: #D16969;
+}
+
+/* ===== マークダウン記法拡張の配色(仕様書 第2.9節・第10.2節) =====
+   Front Matter・Callouts とも、上の6トークンからcolor-mix()で派生させる。
+   --panel-bg: 「本文からわずかに沈んだニュートラルな帯」を表す共通トークン。
+   Front Matter専用に--frontmatter-bgとして個別定義していたが、テーブルの
+   ヘッダー(.cm-table th)・生テキスト表示中の表の行(.cm-line.cm-table-row)にも
+   同種の「主張しすぎない帯色」が要るため(表ヘッダーが従来--accent-soft経由で
+   ティール=緑寄りに見えていた不具合の修正、詳細はstyle.css内 .cm-table th 周辺の
+   コメント参照)、値の実体をここへ集約し--frontmatter-bgはこれを参照するだけにした。 */
+:root {
+  --panel-bg: color-mix(in srgb, var(--ink) 6%, var(--paper));
+  --frontmatter-bg: var(--panel-bg);
+  /* 現在行の強調表示(依頼②、コードモード限定、設定 codeActiveLineHighlight)。
+     --panel-bgと同じ「文字色をわずかに混ぜて本文よりほんの少しだけ沈ませる」考え方だが、
+     こちらはカーソル移動のたびに常時どこかの行へ掛かり続ける(ほぼ常に視界に入る)ため、
+     --panel-bg(6%)よりさらに弱い5%にして目に負担をかけないようにした。--ink/--paperは
+     テーマプリセット(themes.css)側で個別に上書きされるため、この1つの定義のまま9テーマ
+     すべてに異なる実効色として反映される(--panel-bgと同じ仕組み)。実測した結果、
+     本文色との差(コントラスト比)は9テーマとも1.07〜1.19程度(わずかに持ち上がる程度)、
+     文字色との差(コントラスト比)は最も低いsolarized-darkでも5.2程度でAA基準(4.5)を
+     余裕を持って満たす。実測の内訳は今回の対応報告を参照。 */
+  --active-line-bg: color-mix(in srgb, var(--ink) 5%, var(--paper));
+
+  --callout-note: var(--accent);
+  --callout-tip: color-mix(in srgb, var(--accent) 70%, var(--ink-mute) 30%);
+  --callout-important: color-mix(in srgb, var(--accent) 55%, var(--ink) 45%);
+  --callout-warning: color-mix(in srgb, var(--ink-mute) 55%, var(--accent) 45%);
+  --callout-caution: color-mix(in srgb, var(--ink) 55%, var(--ink-mute) 45%);
+  --callout-note-bg: color-mix(in srgb, var(--accent) 8%, var(--paper));
+  --callout-tip-bg: color-mix(in srgb, var(--accent) 6%, var(--paper));
+  --callout-important-bg: color-mix(in srgb, var(--accent) 10%, var(--paper));
+  --callout-warning-bg: color-mix(in srgb, var(--ink-mute) 10%, var(--paper));
+  --callout-caution-bg: color-mix(in srgb, var(--ink-mute) 14%, var(--paper));
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; } /* hidden属性はどのdisplay指定よりも優先する */
+html, body { margin: 0; height: 100%; overflow: hidden; } /* スクロールはサイドバー/エディタ内のみ */
+html { -webkit-text-size-adjust: 100%; }
+body {
+  background: var(--paper); color: var(--ink);
+  font-family: var(--font-body); font-size: 15px; line-height: 1.6;
+  touch-action: manipulation; /* ダブルタップ拡大を無効化 */
+  overscroll-behavior-y: none;
+  transition: background .2s, color .2s;
+}
+.mono { font-family: var(--font-mono); font-size: 12px; }
+button { font-family: inherit; cursor: pointer; }
+input, textarea { font-family: inherit; color: var(--ink); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+::selection { background: var(--accent-soft); }
+/* ===== スクロールバー =====
+   従来はscrollbar-width:thin(Chromium実測で約11px)のみを指定していたが、指摘により
+   1.5倍(約17px)へ太くする。WebView2はChromium系のため::-webkit-scrollbarで幅を
+   直接指定できるが、標準プロパティのscrollbar-widthが「thin」等の具体的なキーワードを
+   持っていると、対応ブラウザ(新しめのChromiumを含む)ではそちらが優先されて
+   ::-webkit-scrollbar側の幅指定が無視されてしまう。そのためscrollbar-widthは
+   既定値と同じ「auto」を明示するだけに留め(「指定なし」との違いは、後方の要素個別の
+   scrollbar-width指定に上書きされないようにするため)、実際の幅は下の
+   ::-webkit-scrollbarブロックに一本化する。
+   色はテーマの罫線色(--line)ではなく、より視認性の高い--ink-mute(本文の副次テキストに
+   使う程度の濃さ)を薄めに使う(*{scrollbar-color: var(--line) ...}だった旧実装は
+   --lineが「本文とのコントラスト比 約1.2〜1.6」しかなく、多くのテーマで背景に
+   ほぼ埋もれていたため)。常時は控えめに、ホバー中ははっきり見えるよう不透明度を上げる。 */
+* { scrollbar-width: auto; scrollbar-color: color-mix(in srgb, var(--ink-mute) 55%, transparent) transparent; }
+*::-webkit-scrollbar { width: 17px; height: 17px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background-color: color-mix(in srgb, var(--ink-mute) 55%, transparent); border-radius: 9px; }
+*::-webkit-scrollbar-thumb:hover { background-color: var(--ink-mute); }
+*::-webkit-scrollbar-corner { background: transparent; }
+kbd { font-family: var(--font-mono); font-size: 11px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 1px 5px; background: var(--surface); }
+
+/* ロゴ */
+.logo-mark { display: inline-block; width: 22px; height: 22px; border-radius: 6px; background: var(--accent); position: relative; vertical-align: -4px; margin-right: 8px; }
+.logo-mark::after { content: ""; position: absolute; left: 5px; right: 5px; top: 7px; height: 2px; background: var(--surface); box-shadow: 0 5px 0 var(--surface); border-radius: 1px; }
+.logo-mark.small { width: 18px; height: 18px; background: #fff; }
+.logo-mark.small::after { top: 5px; background: var(--topbar); box-shadow: 0 5px 0 var(--topbar); }
+
+/* ボタン */
+.btn { border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: var(--radius); padding: 9px 16px; font-size: 14px; font-weight: 500; transition: background .15s, border-color .15s, color .15s; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+html[data-theme="dark"] .btn.primary { color: #0E1513; }
+.btn.danger { color: var(--danger); border-color: var(--line); }
+.btn.tiny { padding: 5px 10px; font-size: 12px; border-radius: 8px; }
+.btn.block { width: 100%; }
+.icon-btn { display: inline-flex; align-items: center; justify-content: center; gap: 4px; }
+.icon-btn svg { display: block; }
+
+/* ヘッダー(濃色・PWAタイトルバーと統一) */
+.topbar { display: flex; justify-content: space-between; align-items: center; padding: 9px 16px; background: var(--topbar); color: var(--topbar-ink); position: sticky; top: 0; z-index: 10; }
+.app-name { font-weight: 600; letter-spacing: .01em; }
+.topbar-left, .topbar-right { display: flex; align-items: center; gap: 10px; }
+.topbar .btn { background: transparent; border-color: rgba(255,255,255,.28); color: var(--topbar-ink); }
+
+/* レイアウト */
+.layout { display: grid; grid-template-columns: var(--list-w, 320px) 6px 1fr; height: calc(var(--vvh, 100dvh) - 45px); }
+.layout.collapsed { grid-template-columns: 0 0 1fr; }
+.layout.collapsed .list-pane, .layout.collapsed .resize-handle { display: none; }
+.list-pane { grid-column: 1; }
+.resize-handle { grid-column: 2; }
+.editor-pane { grid-column: 3; } /* 前2要素が非表示でも必ず3列目に配置する */
+.resize-handle { cursor: col-resize; background: transparent; border-right: 1px solid var(--line); margin-left: -1px; transition: background .15s; }
+.resize-handle:active { background: var(--accent-soft); }
+.list-pane { border-right: 1px solid var(--line); background: var(--surface); display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+
+/* エディタ */
+.editor-pane { overflow: hidden; display: flex; background: var(--paper); }
+.editor-empty { margin: auto; color: var(--ink-sub); font-size: 14px; padding: 24px; text-align: center; }
+.kbd-hints { display: flex; gap: 18px; justify-content: center; margin-top: 14px; color: var(--ink-sub); }
+.editor { flex: 1; display: flex; flex-direction: column; padding: 24px 32px 16px; width: 100%; max-width: 780px; margin: 0 auto; min-height: 0; overflow-y: auto; position: relative; }
+.editor:not(.live) .memo-content { flex: none; overflow: hidden; min-height: 55dvh; }
+.editor-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.editor-head-right { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.save-status { color: var(--ink-sub); }
+.save-status.pending { color: var(--pending); }
+.memo-title { border: none; background: transparent; font-size: 28px; font-weight: 700; letter-spacing: -.01em; padding: 4px 0 8px; width: 100%; line-height: 1.4; flex: none; min-height: calc(1.4em + 12px); text-overflow: ellipsis; }
+.memo-title:focus, .memo-content:focus { outline: none; }
+.memo-content { flex: 1; border: none; background: transparent; resize: none; font-size: 15px; line-height: 1.85; padding: 8px 0; width: 100%; min-height: 0; }
+
+/* ピン留めボタン(SVG星) */
+#btn-pin .star path { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linejoin: round; }
+#btn-pin.btn-pin-on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+#btn-pin.btn-pin-on .star path { fill: var(--accent); stroke: var(--accent); }
+
+/* Markdownツールバー */
+.md-toolbar { display: flex; gap: 2px; align-items: center; border-bottom: 1px solid var(--line); padding: 6px 0; overflow-x: auto; white-space: nowrap; }
+.md-toolbar button { border: 1px solid transparent; background: transparent; border-radius: 6px; min-width: 30px; height: 28px; padding: 0 9px; font-family: var(--font-mono); font-size: 12px; color: var(--ink-sub); flex: none; transition: background .12s, color .12s; }
+.md-toolbar .md-sep { width: 1px; height: 18px; background: var(--line); margin: 0 6px; flex: none; }
+.md-toolbar.disabled button:not(#btn-preview) { opacity: .35; pointer-events: none; }
+.mobile-bar.disabled .mobile-bar-scroll { opacity: .35; pointer-events: none; }
+#btn-preview.on { background: var(--accent); color: #fff; }
+html[data-theme="dark"] #btn-preview.on { color: #0E1513; }
+
+/* ライブプレビュー(編集と同時表示) */
+
+#copy-done { color: var(--accent); display: none; }
+/* テーマ/プレビューのアイコン切替(SVGにhidden属性は効かないためCSSで制御) */
+#theme-sun { display: none; }
+html[data-theme="dark"] #theme-sun { display: inline; }
+html[data-theme="dark"] #theme-moon { display: none; }
+#pv-edit { display: none; }
+#btn-preview.on #pv-read { display: none; }
+#btn-preview.on #pv-edit { display: inline; }
+#btn-copy.copied #copy-icon { display: none; }
+#btn-copy.copied #copy-done { display: inline; }
+#btn-copy { transition: transform .15s; }
+#btn-copy:active { transform: scale(.88); }
+#btn-copy.copied { color: var(--accent); }
+#btn-copy.copied svg { animation: pop-in .3s ease; }
+@keyframes pop-in { 0% { transform: scale(.3); opacity: 0; } 60% { transform: scale(1.15); } 100% { transform: scale(1); opacity: 1; } }
+
+/* Markdownプレビュー(読みやすい行長・明快な階層) */
+/* リスト内の段落は余白を詰める(空行でゆるいリスト化しても項目間隔を一定に保つ) */
+/* 分断されたリスト間・段落との間隔をObsidian風に詰めて一定にする */
+/* チェックリスト: タップ領域を広げ、完了項目は淡色に */
+
+/* コマンドパレット(仕様書 第10.1節: Ctrl+Shift+P) */
+/* ウィンドウが低いときにパレットが下へはみ出さないよう、上余白を縮めて高さも画面内に収める。 */
+.palette-overlay { position: fixed; inset: 0; z-index: 60; background: rgba(10,14,16,.4); display: flex; justify-content: center; align-items: flex-start; padding: min(14dvh, 40px) 16px 16px; }
+.palette { width: min(560px, calc(100% - 32px)); max-height: 100%; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow-pop); overflow: hidden; }
+#palette-input { width: 100%; border: none; border-bottom: 1px solid var(--line); background: transparent; padding: 14px 16px; font-size: 15px; box-sizing: border-box; }
+#palette-input:focus { outline: none; }
+#palette-list { list-style: none; margin: 0; padding: 6px; max-height: 46dvh; overflow-y: auto; }
+#palette-list li { padding: 9px 12px; border-radius: 8px; font-size: 13px; cursor: pointer; display: flex; justify-content: space-between; gap: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#palette-list li.sel { background: var(--accent-soft); color: var(--accent); }
+.palette-shortcut { color: var(--ink-sub); font-family: var(--font-mono); font-size: 11px; flex: none; }
+/* クイックオープン(quick-open.js)がフォルダ未読み込み時に出す案内行。コマンド側には無い状態。 */
+.palette-empty { color: var(--ink-sub); font-size: 12.5px; text-align: center; padding: 16px 12px; cursor: default; }
+#palette-list mark { background: var(--accent-soft); color: var(--accent); border-radius: 2px; }
+
+/* ===== メニューバー(仕様書 第10.1節・第10.4節) ===== */
+/* 既定で表示。高さ28px前後、罫線1本でタイトルバー・本文から区切る。Altキーで表示/非表示切替。 */
+#menubar { display: flex; align-items: center; height: 28px; padding: 0 6px; border-bottom: 1px solid var(--rule); flex: none; font-size: 12.5px; background: var(--chrome-bg); }
+#menubar.hidden { display: none; }
+.menu-top { border: none; background: transparent; color: var(--ink); font: inherit; padding: 3px 10px; border-radius: 6px; cursor: pointer; }
+/* 実バグ3の修正: 文字色はvar(--accent)決め打ちではなくvar(--menu-hover-fg)を使う。
+   --menu-hover-fgは、--accentをそのまま--accent-soft背景の上の文字色に使うと
+   WCAG AA(4.5)を割り込むテーマ(sepia/solarized-light/solarized-dark/dracula、
+   実測はPane/NativeMenu.cs側のコメント・最終報告参照)のために、9テーマすべてで
+   個別に定義した(style.css既定2つ・themes.css7プリセット)。未定義のテーマが
+   将来増えてもvar(--accent)へ自動的にフォールバックする。 */
+.menu-top:hover, .menu-top.open { background: var(--accent-soft); color: var(--menu-hover-fg, var(--accent)); }
+/* Tabキーで選んだときの枠を、ボタンの内側に描く。
+   既定の :focus-visible は outline-offset:2px + 太さ2px = 要素の外側4pxに描くため、
+   高さ28pxのメニューバーに高さ26pxのボタンが入っているこの場所では、実測で
+   -3.5px〜30.5px となり上下ともバーからはみ出していた(実機で「囲みが汚い・はみ出る」
+   という指摘を受けた箇所)。負のoffsetで内側に寄せれば、ボタンの寸法やフォントが
+   変わってもはみ出しようがない。 */
+#menubar .menu-top:focus-visible { outline-offset: -2px; }
+/* max-height / overflow-y は、ウィンドウの高さが足りないときにメニューが画面外へ
+   はみ出して下の方の項目に永久に届かなくなるのを防ぐためのもの。
+   メニューバーの高さと下端の余白を差し引いた高さに収め、超える分はスクロールさせる
+   (「表示」メニューは項目が20個あり、小さいウィンドウでは確実にはみ出す)。 */
+.menu-dropdown { position: fixed; z-index: 70; min-width: 240px; max-height: calc(100vh - 46px); overflow-y: auto; overscroll-behavior: contain; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow-pop); padding: 4px; display: flex; flex-direction: column; }
+.menu-item { display: flex; align-items: center; gap: 8px; border: none; background: transparent; color: var(--ink); font: inherit; font-size: 12.5px; text-align: left; padding: 6px 10px; border-radius: 6px; cursor: pointer; }
+.menu-item:hover:not(.disabled) { background: var(--accent-soft); color: var(--menu-hover-fg, var(--accent)); }
+.menu-item.disabled { color: var(--ink-sub); opacity: .5; cursor: default; }
+.menu-item-check { width: 12px; flex: none; color: var(--accent); }
+.menu-item-label { flex: 1; white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+.menu-item-shortcut { color: var(--ink-sub); font-family: var(--font-mono); font-size: 10.5px; flex: none; }
+.menu-separator { height: 1px; background: var(--rule); margin: 4px 6px; }
+.menu-theme-btn { border: none; background: transparent; color: var(--ink-mute); font: inherit; cursor: pointer; padding: 4px 8px; border-radius: 6px; display: inline-flex; align-items: center; }
+.menu-theme-btn:hover { color: var(--ink); background: var(--accent-soft); }
+
+/* ===== タブバー(仕様書 第2.10節 C-14、隠し設定) =====
+   settings.jsonを直接編集してdisplayMode:"tab"にしたときだけmain.jsがhiddenを外して表示する
+   (設定画面には切替UIを置かない。main.js側のapplyDisplayMode参照)。
+   横に並ぶタブ一覧(#tabbar-list)は項目数が多いときoverflow-xでスクロールさせるが、
+   スクロールバーの太さ・色は上方の*{scrollbar-*}/*::-webkit-scrollbar-*が全体に
+   効いているため専用の指定は不要(以前あったscrollbar-width:thinの個別指定は、
+   全体を1.5倍幅にする際にここだけ取り残さないよう削除した)。 */
+#tabbar { display: flex; align-items: stretch; height: 32px; border-bottom: 1px solid var(--rule); flex: none; font-size: 12.5px; }
+#tabbar[hidden] { display: none; }
+.tabbar-list { flex: 1; min-width: 0; display: flex; align-items: stretch; overflow-x: auto; overflow-y: hidden; }
+.tab-item { display: flex; align-items: center; gap: 6px; min-width: 120px; max-width: 220px; padding: 0 6px 0 12px; border-right: 1px solid var(--rule); background: transparent; color: var(--ink-mute); cursor: pointer; flex: none; user-select: none; }
+.tab-item:hover { background: var(--accent-soft); color: var(--ink); }
+.tab-item.active { background: var(--paper); color: var(--ink); box-shadow: inset 0 -2px 0 var(--accent); }
+.tab-item.drag-over-before { box-shadow: inset 2px 0 0 var(--accent); }
+.tab-item.drag-over-after { box-shadow: inset -2px 0 0 var(--accent); }
+.tab-item.dragging { opacity: .5; }
+.tab-item-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tab-item-dirty { flex: none; width: 8px; text-align: center; color: var(--accent); }
+.tab-item-close { flex: none; border: none; background: transparent; color: inherit; opacity: .6; cursor: pointer; padding: 3px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; }
+.tab-item-close:hover { opacity: 1; background: var(--accent-soft); color: var(--accent); }
+.tabbar-new-btn { flex: none; width: 32px; border: none; border-left: 1px solid var(--rule); background: transparent; color: var(--ink-mute); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+.tabbar-new-btn:hover { color: var(--accent); background: var(--accent-soft); }
+
+/* ===== 文字数カウントの詳細ポップアップ(仕様書 W-02) =====
+   見た目は既存の.menu-dropdown(--surface背景・--line枠・--shadow-pop)と揃える。 */
+.wc-pop { min-width: 260px; padding: 6px 4px; gap: 0; }
+.wc-row { display: flex; align-items: baseline; gap: 14px; padding: 4px 10px; font-size: 12.5px; }
+.wc-row.wc-head { font-weight: 700; color: var(--ink-mute); border-bottom: 1px solid var(--line); margin-bottom: 4px; padding-bottom: 8px; }
+.wc-label { flex: 1; color: var(--ink-mute); white-space: nowrap; }
+.wc-val { min-width: 60px; text-align: right; font-family: var(--font-mono); }
+.wc-val.wc-sel { color: var(--accent); }
+
+/* ===== サイドバー(仕様書 第2.8節・第10.4節) =====
+   #main-area は #sidebar と #cm-host を横並びにする行。開閉は幅0⇔既定幅(240px)の
+   トランジションで表現し、hidden属性ではなく.collapsedクラスで制御する
+   (hidden属性はdisplay:noneになり幅アニメーションができないため)。
+   幅自体はCSS変数--sidebar-wで持つ(ユーザー要望2: ドラッグでのリサイズ)。
+   JS側(sidebar.js)がドラッグ量に応じてこの変数を書き換える。 */
+#status-sidebar { display: inline-flex; align-items: center; }
+#sidebar {
+  width: var(--sidebar-w, 240px); flex: none; display: flex; flex-direction: column; overflow: hidden;
+  background: var(--sidebar-bg); border-right: 1px solid var(--rule);
+  transition: width 160ms ease;
+  position: relative; /* 右端のリサイズハンドル(.sidebar-resize-handle)をここへ絶対配置する */
+}
+#sidebar.collapsed { width: 0; border-right: none; }
+/* ドラッグ中は開閉用のtransitionを切る(160msのtransitionが残っているとカクつくため)。
+   sidebar.js側がドラッグの開始〜終了の間だけこのクラスを付け外しする。 */
+#sidebar.sidebar-resizing { transition: none; }
+/* サイドバー右端のリサイズハンドル(ユーザー要望2)。表の列リサイズ用の既存クラス
+   .resize-handle とは名前を分ける(同じ名前だとgrid-column指定等が衝突するため)。
+   #sidebarはoverflow: hiddenなので(開閉transition中に中身がはみ出さないようにするため)、
+   right: 0(サイドバー内側)に幅6pxで置く。境界の外へはみ出す配置(例: right:-3px)だと
+   overflow: hiddenでクリップされ、当たり判定自体が消えてクリックできなくなるため。 */
+.sidebar-resize-handle {
+  position: absolute; top: 0; right: 0; bottom: 0; width: 6px;
+  cursor: col-resize; background: transparent; z-index: 5; touch-action: none;
+}
+.sidebar-resize-handle:hover, .sidebar-resize-handle:active { background: var(--accent-soft); }
+/* サイドバーが閉じている間はハンドルを掴めないようにする(幅0の状態から広げる操作は
+   「開く」トグルの役目であり、リサイズハンドルの役目ではないため)。 */
+#sidebar.collapsed .sidebar-resize-handle { display: none; }
+.sidebar-tabs { display: flex; align-items: center; gap: 2px; padding: 6px; border-bottom: 1px solid var(--rule); flex: none; }
+.sidebar-tab { border: none; background: transparent; color: var(--ink-sub); border-radius: 6px; width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; transition: background 160ms ease, color 160ms ease; }
+.sidebar-tab:hover { color: var(--ink); }
+.sidebar-tab.active { color: var(--accent); background: var(--accent-soft); }
+.sidebar-body { flex: 1; min-width: 0; overflow-y: auto; }
+
+/* アウトラインパネル(S-01): 見出し階層をクリックでジャンプ */
+.outline-item {
+  display: block; width: 100%; border: none; background: transparent; color: var(--ink);
+  text-align: left; font: inherit; font-size: 12.5px; padding: 6px 14px; cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.outline-item:hover { background: var(--accent-soft); }
+.outline-item.current { color: var(--accent); background: var(--accent-soft); }
+.outline-item[data-level="1"] { padding-left: 14px; font-weight: 600; }
+.outline-item[data-level="2"] { padding-left: 26px; }
+.outline-item[data-level="3"] { padding-left: 38px; }
+.outline-item[data-level="4"] { padding-left: 50px; color: var(--ink-mute); }
+.outline-item[data-level="5"] { padding-left: 62px; color: var(--ink-mute); }
+.outline-item[data-level="6"] { padding-left: 74px; color: var(--ink-mute); }
+
+/* 空状態(見出しなし・フォルダ未読み込み等) */
+.sidebar-empty { color: var(--ink-sub); font-size: 12.5px; text-align: center; padding: 24px 16px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+/* フォルダ未読み込み時の空状態に置く「フォルダを開く」ボタン(単なる文言だけで終わらせず、
+   フォルダ機能への入口をここからも辿れるようにする)。 */
+.sidebar-open-folder-btn { border: 1px solid var(--line); background: var(--surface); color: var(--ink); font: inherit; font-size: 12px; padding: 6px 14px; border-radius: 8px; cursor: pointer; }
+.sidebar-open-folder-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+/* prefers-reduced-motion時のtransition無効化は下方の共通ルール(* { transition: none !important })で
+   全要素まとめて処理されるため、ここでは個別に定義しない。 */
+
+/* truncated(10000件上限で打ち切り)・表示上限500件超過時の注意書き(files/tree共通) */
+.sidebar-notice { color: var(--ink-sub); font-size: 11px; padding: 8px 14px; line-height: 1.5; }
+
+/* ファイルリストパネル(S-02): ファイル名を主・親フォルダ部分を副として1行2段で表示する。
+   行の高さ・hover・現在ファイルのハイライトはアウトライン項目(.outline-item)と揃える。 */
+.file-item {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+  width: 100%; box-sizing: border-box; border: none; background: transparent; color: var(--ink);
+  text-align: left; font: inherit; padding: 6px 14px; cursor: pointer; min-width: 0;
+}
+.file-item:hover { background: var(--accent-soft); }
+.file-item.current { color: var(--accent); background: var(--accent-soft); }
+.file-item-name { font-size: 12.5px; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.file-item-dir { font-size: 10.5px; color: var(--ink-sub); max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.file-item.current .file-item-dir { color: var(--accent); } /* currentの副テキストも視認性を保つ */
+
+/* ファイルツリーパネル(S-03): relativePathの階層をそのままDOMの入れ子(.tree-children)で表現し、
+   折りたたみ(展開されたフォルダの中身だけDOM化)で巨大フォルダでも軽く保つ。
+   インデントは.tree-folder配下の.tree-childrenにだけpadding-leftを付け、入れ子の分だけ
+   自然に積み上がる(深さをJS側で数値管理しなくてよい)。 */
+.tree-root-label { font-size: 11px; font-weight: 600; color: var(--ink-mute); padding: 8px 14px; border-bottom: 1px solid var(--rule); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tree-children { display: flex; flex-direction: column; }
+.tree-folder > .tree-children { padding-left: 14px; }
+.tree-item {
+  display: flex; align-items: center; gap: 6px; width: 100%; box-sizing: border-box;
+  border: none; background: transparent; color: var(--ink); text-align: left; font: inherit;
+  font-size: 12.5px; padding: 6px 14px; cursor: pointer; min-width: 0;
+}
+.tree-item:hover { background: var(--accent-soft); }
+.tree-item.current { color: var(--accent); background: var(--accent-soft); }
+.tree-item-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tree-icon, .tree-spacer { flex: none; color: var(--ink-sub); }
+.tree-spacer { display: inline-block; width: 14px; height: 14px; }
+.tree-chevron { flex: none; color: var(--ink-sub); transition: transform 160ms ease; }
+.tree-item-folder.expanded .tree-chevron { transform: rotate(90deg); }
+
+/* グローバル検索欄(仕様書 S-04): タブ列(.sidebar-tabs)のすぐ下・本体領域(.sidebar-body)の
+   直前に常時表示する。トグル(.search-toggle)は検索・置換パネル(検索・置換パネルの節を参照)と
+   同じ見た目・クラスを再利用する。 */
+.sidebar-search { display: flex; align-items: center; gap: 4px; padding: 6px; border-bottom: 1px solid var(--rule); flex: none; }
+.sidebar-search-input { flex: 1; min-width: 0; box-sizing: border-box; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font: inherit; font-size: 12px; background: var(--paper); color: var(--ink); }
+.sidebar-search-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+/* グローバル検索結果(G-02): ファイルごとにグループ化して表示する。行の高さ・hover・
+   省略表示(text-overflow)はファイル一覧(.file-item)・ツリー(.tree-item)と揃える。
+   ヒット箇所の<mark>強調は下方の共通ルール(mark { ... })がtok-markと同系統の配色を
+   既に与えているため、ここでは追加のスタイルを持たない。 */
+.search-result-group { border-bottom: 1px solid var(--rule); }
+.search-result-group:last-child { border-bottom: none; }
+.search-result-file { display: flex; align-items: baseline; gap: 6px; padding: 8px 14px 2px; }
+.search-result-file-name { font-size: 12.5px; font-weight: 600; color: var(--ink); flex: none; max-width: 60%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.search-result-file-path { flex: 1; min-width: 0; font-size: 10.5px; color: var(--ink-sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.search-result-file-count { flex: none; font-size: 10.5px; color: var(--ink-sub); font-family: var(--font-mono); }
+.search-result-hit {
+  display: flex; align-items: baseline; gap: 8px; width: 100%; box-sizing: border-box;
+  border: none; background: transparent; color: var(--ink); text-align: left; font: inherit;
+  font-size: 12.5px; padding: 4px 14px 4px 22px; cursor: pointer; min-width: 0;
+}
+.search-result-hit:hover { background: var(--accent-soft); }
+.search-result-line { flex: none; min-width: 2em; font-family: var(--font-mono); font-size: 11px; color: var(--ink-sub); text-align: right; }
+.search-result-text { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ===== エクスポート・印刷時のレイアウト(PDF/PNG/印刷でメニューバー等を除外し、
+   CodeMirrorの仮想化(visibleRangesのみDOM描画)を一時的に解除して全文書を描画する) ===== */
+body.export-layout #menubar,
+body.export-layout #statusbar,
+body.export-layout #sidebar,
+body.export-layout .search-panel { display: none !important; }
+body.export-layout, body.export-layout html { height: auto !important; overflow: visible !important; }
+body.export-layout #cm-host { flex: none !important; overflow: visible !important; position: static !important; }
+body.export-layout .cm-editor { height: auto !important; }
+body.export-layout .cm-scroller { overflow: visible !important; }
+@media print {
+  #menubar, #statusbar, #sidebar, .search-panel { display: none !important; }
+  html, body { height: auto !important; overflow: visible !important; }
+  #cm-host { flex: none !important; overflow: visible !important; position: static !important; }
+  .cm-editor { height: auto !important; }
+  .cm-scroller { overflow: visible !important; }
+}
+
+/* ===== 検索・置換パネル(仕様書 E-17〜E-19) ===== */
+.search-panel { position: absolute; top: 8px; right: 16px; z-index: 30; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow-pop); padding: 6px; display: flex; flex-direction: column; gap: 4px; }
+.search-row { display: flex; align-items: center; gap: 4px; }
+.search-row input[type="text"] { border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font: inherit; font-size: 12.5px; background: var(--paper); color: var(--ink); width: 190px; }
+.search-row input[type="text"]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.search-count { font-size: 11px; color: var(--ink-sub); min-width: 52px; text-align: center; font-family: var(--font-mono); }
+.search-row button { border: none; background: transparent; color: var(--ink-sub); font: inherit; font-size: 12px; cursor: pointer; padding: 4px 8px; border-radius: 6px; }
+.search-row button:hover { background: var(--accent-soft); color: var(--accent); }
+.search-toggle { display: inline-flex; align-items: center; gap: 2px; font-size: 11px; color: var(--ink-sub); cursor: pointer; padding: 2px 4px; border-radius: 6px; }
+.search-toggle:has(input:checked) { background: var(--accent-soft); color: var(--accent); }
+#search-panel[hidden] { display: none; }
+
+/* ===== コードモード: 行番号・括弧対応(仕様書 決定済み事項) ===== */
+#cm-host .cm-gutters { background: var(--paper); border-right: 1px solid var(--rule); color: var(--ink-sub); }
+#cm-host .cm-lineNumbers .cm-gutterElement { padding: 0 8px 0 4px; font-family: var(--font-mono); font-size: 12px; }
+#cm-host .cm-matchingBracket { background: var(--accent-soft); color: var(--accent); border-radius: 3px; }
+#cm-host.mode-code .cm-content, #cm-host.mode-code .cm-gutters { font-family: var(--font-mono); }
+/* 現在行の強調表示(依頼②、設定 codeActiveLineHighlight・既定true・コードモード限定)。
+   editor.js側のactiveLineHighlightPlugin/activeLineGutterHighlighterがcm-active-line
+   (本文の行全体)/cm-active-line-gutter(行番号ガターのそのセル)を付け外しする。どちらも
+   選択範囲がある間は付かない(空の選択=カーソルだけの行が対象。理由はeditor.js側の
+   activeLineHighlightPlugin定義部のコメント参照)。色は--active-line-bg(本文色を5%だけ
+   混ぜた極めて淡い帯、定義・実測はstyle.css冒頭の:rootブロック参照)を本文・ガター共通で使う。 */
+#cm-host.mode-code .cm-line.cm-active-line { background: var(--active-line-bg); }
+#cm-host.mode-code .cm-gutterElement.cm-active-line-gutter { background: var(--active-line-bg); }
+
+/* モバイル: キーボード上部ツールバー */
+.mobile-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; height: var(--bar-h, 48px); box-sizing: border-box; display: flex; align-items: center; background: var(--surface); border-top: 1px solid var(--line); box-shadow: 0 -2px 10px rgba(16,24,32,.08); }
+.mobile-bar[hidden] { display: none !important; } /* display:flexがhidden属性に勝たないように */
+/* PCでは下部バーの分だけ本文領域の下に余白を確保し、キーボードを隠すボタンは不要 */
+@media (min-width: 721px) {
+  /* Mdツールバー表示中は本文が潜らないよう下端に余白 */
+  .layout.editing .editor { margin-bottom: var(--bar-h, 48px); padding-bottom: 12px; }
+  /* PCではMdツールバーをエディタ領域のみに重ねる(サイドバー下部のボタンを覆わない) */
+  .mobile-bar { left: calc(var(--list-w, 320px) + 6px); }
+  body:has(.layout.collapsed) .mobile-bar { left: 0; }
+
+  .mobile-bar { padding: 2px 0; }
+  .mobile-bar-kb { display: none; }
+  .layout.editing .editor { margin-bottom: calc(var(--bar-h, 48px) + env(safe-area-inset-bottom)); padding-bottom: 8px; }
+}
+.mobile-bar-scroll { flex: 1; display: flex; gap: 2px; overflow-x: auto; padding: 6px 8px; -webkit-overflow-scrolling: touch; }
+.mobile-bar-scroll button { border: none; background: transparent; border-radius: 8px; min-width: 40px; height: calc(var(--bar-h, 48px) - 12px); padding: 0 10px; font-family: var(--font-mono); font-size: 13px; color: var(--ink); flex: none; }
+.mobile-bar-scroll button:active { background: var(--accent-soft); color: var(--accent); }
+.mobile-bar-kb { border: none; border-left: 1px solid var(--line); background: transparent; color: var(--ink-sub); padding: 0 14px; height: var(--bar-h, 48px); flex: none; }
+.hl-icon { background: #F6E27A; color: #333; border-radius: 3px; padding: 0 3px; }
+html[data-theme="dark"] .hl-icon { background: #8A7A2E; color: #F2EFDF; }
+mark { background: #F6E27A; color: inherit; border-radius: 3px; padding: 0 2px; }
+html[data-theme="dark"] mark { background: #8A7A2E; }
+
+/* モバイル: サイドバードロワー */
+.drawer-scrim { position: fixed; inset: 0; z-index: 44; background: rgba(10,14,16,.45); animation: scrim-in .25s ease; }
+@keyframes scrim-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* ツールバー設定リスト */
+.opt-row { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 12px; }
+.opt-row input, .toolbar-list input { accent-color: var(--accent); width: 16px; height: 16px; }
+.toolbar-list { list-style: none; margin: 0; padding: 0; }
+.toolbar-list li { border-bottom: 1px solid var(--line); }
+.toolbar-list label { display: flex; align-items: center; gap: 10px; padding: 8px 4px; cursor: pointer; }
+.toolbar-icon { min-width: 40px; text-align: center; color: var(--ink-sub); }
+.toolbar-desc { display: block; font-size: 11px; color: var(--ink-sub); font-weight: 400; }
+
+/* 使い方: Markdown書式表 */
+.md-cheat { border-collapse: collapse; font-size: 12px; margin-top: 4px; width: 100%; }
+.md-cheat td { border: 1px solid var(--line); padding: 4px 10px; }
+.md-cheat td:first-child { font-family: var(--font-mono); white-space: nowrap; color: var(--accent); }
+
+/* オプションモーダル */
+.settings-overlay { position: fixed; inset: 0; z-index: 70; background: rgba(10,14,16,.4); display: flex; justify-content: center; align-items: flex-start; padding-top: 10dvh; }
+.settings { width: min(600px, calc(100% - 32px)); max-height: 78dvh; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow-pop); overflow: hidden; }
+.settings-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px 10px; font-weight: 600; }
+.settings-close { background: none; border: none; font-size: 18px; color: var(--ink-sub); padding: 2px 8px; border-radius: 6px; }
+.settings-tabs { display: flex; gap: 4px; padding: 0 18px; border-bottom: 1px solid var(--line); }
+.settings-tabs button { background: none; border: none; border-bottom: 2px solid transparent; padding: 8px 12px; font-size: 13px; color: var(--ink-sub); }
+.settings-tabs button.on { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.settings-body { padding: 14px 18px 18px; overflow-y: auto; }
+.settings-note { font-size: 12px; color: var(--ink-sub); margin: 0 0 12px; }
+.keymap-list { list-style: none; margin: 0 0 14px; padding: 0; }
+.keymap-list li { display: flex; align-items: center; gap: 10px; padding: 7px 4px; border-bottom: 1px solid var(--line); }
+.keymap-scope { font-size: 10px; color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 0 5px; flex: none; }
+.keymap-label { flex: 1; font-size: 13px; }
+.keymap-list kbd { flex: none; }
+.help-text h3 { font-size: 14px; margin: 14px 0 4px; color: var(--accent); }
+.help-text h3:first-child { margin-top: 0; }
+.help-text p { font-size: 13px; margin: 0; color: var(--ink); }
+
+/* 右クリックメニュー */
+.ctx-menu { position: fixed; z-index: 50; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow-pop); padding: 4px; min-width: 170px; }
+.ctx-menu button { display: block; width: 100%; text-align: left; background: none; border: none; padding: 8px 12px; border-radius: 6px; font-size: 13px; color: var(--ink); }
+
+.only-mobile { display: none; }
+
+/* モバイル */
+@media (max-width: 720px) {
+  .layout { grid-template-columns: 1fr; }
+  .list-pane, .editor-pane { grid-column: 1; }
+  .resize-handle, #btn-sidebar { display: none; }
+  .layout.collapsed { grid-template-columns: 1fr; }
+  .layout.collapsed .list-pane { display: flex; }
+  .list-pane { border-right: none; }
+  .layout.editing .list-pane { display: flex; position: fixed; top: 45px; left: 0; bottom: 0; width: min(86vw, 340px); z-index: 45; transform: translateX(-105%); transition: transform .25s ease; background: var(--surface); border-right: 1px solid var(--line); }
+  .layout.editing .list-pane.drawer-open { transform: translateX(0); box-shadow: var(--shadow-pop); }
+  .layout:not(.editing) .editor-pane { display: none; }
+  .only-mobile { display: inline-flex; }
+  .hide-mobile { display: none !important; }
+  .md-toolbar { display: none; } /* モバイルはキーボード上部バーを使う */
+  html, body { overflow: hidden; height: 100%; }
+  body.kb-open .layout { height: calc(var(--vvh, 100dvh) - 45px - 49px); } /* キーボード上ツールバーの分 */
+  .editor-head { position: fixed; top: 51px; left: 10px; right: 10px; height: 36px; z-index: 30; background: transparent; border: none; margin: 0; padding: 0; pointer-events: none; }
+  .editor-head .btn { pointer-events: auto; background: var(--surface); box-shadow: 0 1px 5px rgba(0,0,0,.18); width: 36px; height: 36px; padding: 0; }
+  .editor-head .save-status { display: none; } /* 固定枠内の非表示テキストが1行目に被らないよう明示的に消す */
+  .memo-content { padding-bottom: 16px; }
+
+  .editor { padding: 8px 16px calc(12px + env(safe-area-inset-bottom)); margin-top: 96px; } /* 上marginはJSがツールバー実下端に補正 */
+  .memo-title { font-size: 20px; }
+  .btn { min-height: 34px; }
+  .md-toolbar button { height: 32px; min-width: 34px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}
+
+/* ===== CodeMirror ライブプレビューエディタ ===== */
+#cm-host { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+#cm-host .cm-editor { flex: 1; width: 100%; height: 100%; }
+#cm-host .cm-scroller { padding: 8px 0; overflow-y: auto; }
+/* 縦の余白はCodeMirrorの既定を打ち消す(スクロール側で調整する)。横は下方の
+   「本文の余白・最大幅・行の高さ」の指定で入れるため、ここでは0にしない。 */
+#cm-host .cm-content { padding-top: 0 !important; padding-bottom: 0 !important; }
+#cm-host .cm-line { padding: 0 !important; margin: 0; text-indent: 0; }
+.editor.readonly .cm-cursor, .editor.readonly .cm-cursor-primary { display: none !important; }
+.editor.readonly .cm-content { caret-color: transparent !important; }
+
+/* 装飾トークン */
+.cm-md-hidden { display: none; }
+.tok-bold { font-weight: 700; }
+.tok-italic { font-style: italic; }
+.tok-strike { text-decoration: line-through; text-decoration-color: currentColor; }
+.tok-code { background: var(--code-bg); border-radius: 5px; padding: 1px 6px; font-family: var(--font-mono); font-size: .88em; }
+.tok-mark { background: #F6E27A; border-radius: 3px; padding: 0 2px; color: #333; }
+.tok-h1 { font-size: 1.7em; font-weight: 700; line-height: 1.3; }
+.tok-h2 { font-size: 1.35em; font-weight: 700; line-height: 1.3; }
+.tok-h3 { font-size: 1.15em; font-weight: 700; }
+.tok-h4 { font-size: 1em; font-weight: 700; color: var(--ink-sub); }
+.tok-quote { color: var(--ink-sub); border-left: 3px solid var(--accent); padding-left: 10px; display: inline-block; }
+.tok-link { color: var(--accent); text-decoration: underline; }
+.cm-bullet { color: var(--accent); }
+#cm-host .cm-content { caret-color: var(--ink); }
+#cm-host .cm-cursor, #cm-host .cm-cursor-primary { border-left-color: var(--ink) !important; }
+html[data-theme="dark"] #cm-host .cm-content { caret-color: #E6E6E6; }
+html[data-theme="dark"] #cm-host .cm-cursor, html[data-theme="dark"] #cm-host .cm-cursor-primary { border-left-color: #E6E6E6 !important; }
+.cm-checkbox { accent-color: var(--accent); width: 16px; height: 16px; margin-right: 8px; vertical-align: -2px; cursor: pointer; }
+.tok-done { color: var(--ink-sub); text-decoration: line-through; text-decoration-color: currentColor; }
+.cm-hr { border: none; border-top: 2px solid var(--line); margin: 4px 0; }
+.tok-hr-src { color: var(--ink-sub); }
+.tok-codeblock { font-family: var(--font-mono); font-size: .88em; }
+.cm-line.cm-codeblock-line { background: var(--code-bg); padding-left: 12px !important; padding-right: 12px !important; position: relative; }
+.cm-line.cm-cb-first { border-radius: 8px 8px 0 0; padding-top: 6px !important; padding-right: 40px !important; }
+.cm-line.cm-cb-last { border-radius: 0 0 8px 8px; padding-bottom: 6px !important; }
+html[data-theme="dark"] .cm-line.cm-codeblock-line { background: var(--code-bg); }
+/* 記号(```)を隠している間はフェンス行を薄い余白に圧縮(Obsidian風) */
+.cm-line.cm-cb-fence-hidden { font-size: 0; line-height: 5px; }
+.cm-line.cm-cb-first.cm-cb-fence-hidden { padding-top: 2px !important; }
+.cm-line.cm-cb-last.cm-cb-fence-hidden { padding-bottom: 2px !important; }
+.cm-code-copy { position: absolute; top: 4px; right: 6px; z-index: 2; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; color: var(--ink-sub); cursor: pointer; padding: 0; opacity: 0; pointer-events: none; transition: color .15s, transform .15s, opacity .15s; }
+.cm-code-copy:active { transform: scale(.9); }
+.cm-code-copy.done { color: var(--accent); }
+.cm-code-copy .ic-done { display: none; }
+.cm-code-copy.done .ic-copy { display: none; }
+.cm-code-copy.done .ic-done { display: inline; }
+/* コピーボタンの表示条件(依頼①、判断の経緯はeditor.js側のcodeCopyHoverHandlers定義部の
+   コメント参照): 既定は非表示(opacity:0)にし、
+     - カーソルがこのコードブロックの中にある(cm-cb-live、editor.js側でblockLive判定から付与)
+     - マウスが乗っている(cm-cb-hot、editor.js側のmouseover/mouseleaveハンドラが付け外し)
+     - コピー直後のフィードバック中(.done、マウスが離れた後も結果が見えるように常に表示)
+     - キーボードでボタン自体にフォーカスが当たっている(:focus-visible)
+   のいずれかの間だけ不透明にする。pointer-eventsも連動させ、非表示中は真下にあるコード本文
+   へのクリック・カーソル配置を妨げないようにする(透明でも要素自体はDOM上に存在するため)。 */
+.cm-cb-first.cm-cb-live .cm-code-copy,
+.cm-cb-first.cm-cb-hot .cm-code-copy,
+.cm-code-copy.done,
+.cm-code-copy:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+/* コードブロックの行番号(仕様 codeBlockLineNumbers)。ウィジェットとして行頭に差し込む
+   (CodeLineNumberWidget)ため、行側は番号ぶんの左余白だけ確保する。 */
+.cm-line.cm-cb-numbered { padding-left: 12px !important; }
+.cm-code-linenum { display: inline-block; min-width: 2em; margin-right: .9em; padding-right: .6em; border-right: 1px solid var(--rule); text-align: right; color: var(--ink-mute); font-family: var(--font-mono); font-size: .85em; user-select: none; }
+/* フォーカスモード(仕様書 V-06): カーソルのある段落以外の行を減光する。
+   prefers-reduced-motion時のtransition無効化は下方の共通ルール(* { transition: none !important })
+   が既に効くため、ここでは指定しない。 */
+.cm-line.cm-dimmed { opacity: .35; transition: opacity 160ms; }
+.tok-table-sep { color: var(--ink-sub); font-family: var(--font-mono); }
+/* 生テキスト表示中の表の行(カーソルが乗って記法が見えている間)は、以前はコードと
+   同じ--code-bgを流用していた。--code-bgを「本文よりはっきり暗いニュートラルな黒系」
+   に変更した(上方の--code-bg定義のコメント参照)結果そのまま使うと表がコード風の
+   重い見た目になってしまうため、表には表専用の控えめな帯色--panel-bgを使う
+   (.cm-table th と同じ考え方、詳細は同セレクタのコメント参照)。 */
+.cm-line.cm-table-row { background: var(--panel-bg); font-family: var(--font-mono); font-size: .9em; padding-left: 8px !important; padding-right: 8px !important; }
+.cm-line.cm-table-header { font-weight: 700; border-bottom: 2px solid var(--line); }
+html[data-theme="dark"] .tok-mark { background: #8A7A2E; color: #F2EFDF; }
+
+/* ===== マークダウン記法拡張(仕様書 第2.9節) ===== */
+
+/* YAML Front Matter(M-11): 本文と異なる背景色を充てるだけで、記法の装飾はしない */
+.cm-line.cm-frontmatter { background: var(--frontmatter-bg); font-family: var(--font-mono); font-size: .88em; padding-left: 12px !important; padding-right: 12px !important; }
+.cm-line.cm-fm-first { border-radius: 8px 8px 0 0; padding-top: 4px !important; }
+.cm-line.cm-fm-last { border-radius: 0 0 8px 8px; padding-bottom: 4px !important; }
+
+/* 目次 [toc](M-12) */
+.cm-toc { border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; margin: 4px 0; background: var(--surface); }
+.cm-toc-list { display: flex; flex-direction: column; gap: 4px; }
+.cm-toc-item { color: var(--ink); text-decoration: none; font-size: .92em; padding: 2px 0; border-radius: 4px; }
+.cm-toc-item:hover { color: var(--accent); }
+.cm-toc-h1 { padding-left: 0; font-weight: 700; }
+.cm-toc-h2 { padding-left: 14px; }
+.cm-toc-h3 { padding-left: 28px; }
+.cm-toc-h4 { padding-left: 42px; color: var(--ink-sub); }
+.cm-toc-h5 { padding-left: 56px; color: var(--ink-sub); }
+.cm-toc-h6 { padding-left: 70px; color: var(--ink-sub); }
+.cm-toc-empty { color: var(--ink-sub); font-size: .9em; }
+
+/* 脚注(M-09) */
+.cm-footnote-ref { position: relative; display: inline-block; }
+.cm-footnote-num { color: var(--accent); font-size: .78em; font-weight: 700; padding: 0 2px; cursor: default; border-bottom: 1px dotted var(--accent); }
+.cm-footnote-popup {
+  display: none; position: absolute; bottom: 125%; left: 50%; transform: translateX(-50%);
+  min-width: 160px; max-width: 320px; padding: 8px 10px; border-radius: 6px;
+  background: var(--ink); color: var(--paper); font-size: 12px; line-height: 1.5;
+  white-space: normal; z-index: 20; box-shadow: var(--shadow-pop);
+}
+.cm-footnote-ref:hover .cm-footnote-popup { display: block; }
+.cm-line.cm-footnote-def { background: var(--code-bg); font-size: .92em; padding-left: 10px !important; }
+.cm-line.cm-footnote-def-first { border-radius: 6px 6px 0 0; }
+.cm-footnote-def-label { color: var(--accent); font-weight: 700; font-size: .85em; margin-right: 4px; }
+
+/* Callouts / GitHub式アラート(M-13) */
+.cm-callout { display: block; border-radius: 6px; padding-left: 12px !important; border-left: 3px solid transparent; }
+.cm-callout-note { border-left-color: var(--callout-note); background: var(--callout-note-bg); }
+.cm-callout-tip { border-left-color: var(--callout-tip); background: var(--callout-tip-bg); }
+.cm-callout-important { border-left-color: var(--callout-important); background: var(--callout-important-bg); }
+.cm-callout-warning { border-left-color: var(--callout-warning); background: var(--callout-warning-bg); }
+.cm-callout-caution { border-left-color: var(--callout-caution); background: var(--callout-caution-bg); }
+.cm-callout-marker { display: inline-flex; align-items: center; gap: 6px; font-size: .9em; }
+.cm-callout-marker svg { flex: none; }
+.cm-callout-marker-note svg, .cm-callout-marker-tip svg, .cm-callout-marker-important svg { color: var(--callout-note); }
+.cm-callout-marker-warning svg { color: var(--callout-warning); }
+.cm-callout-marker-caution svg { color: var(--callout-caution); }
+
+/* 上付き・下付き(M-24・M-25) */
+.tok-sup { vertical-align: super; font-size: .78em; }
+.tok-sub { vertical-align: sub; font-size: .78em; }
+
+/* 絵文字ショートコード(M-22) */
+.cm-emoji { font-size: 1.05em; }
+
+/* 数式(MathJax、仕様書 第5章・第2.9.1節) */
+.cm-math-block { display: block; text-align: center; padding: 10px 4px; overflow-x: auto; }
+.cm-math-block svg { max-width: 100%; }
+.cm-math-inline { display: inline-block; vertical-align: middle; }
+.cm-math-inline svg { vertical-align: middle; }
+.cm-math-error { color: var(--danger); font-family: var(--font-mono); font-size: .85em; }
+
+/* ホバー装飾はホバー可能なデバイス限定(iOSはタップ後:hoverが残留し色が戻らないため) */
+@media (hover: hover) {
+.btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.btn.ghost:hover { background: var(--accent-soft); border-color: var(--accent-soft); color: var(--accent); }
+.btn.danger:hover { background: var(--danger-soft); border-color: var(--danger-soft); }
+.topbar .btn:hover { background: rgba(255,255,255,.14); border-color: rgba(255,255,255,.4); color: #fff; }
+.md-toolbar button:hover { background: var(--accent-soft); color: var(--accent); }
+#palette-list li:hover { background: var(--paper); }
+.settings-close:hover { background: var(--paper); color: var(--ink); }
+.ctx-menu button:hover { background: var(--accent-soft); color: var(--accent); }
+.ctx-menu button.danger:hover { background: var(--danger-soft); color: var(--danger); }
+.resize-handle:hover { background: var(--accent-soft); }
+}
+
+/* ドロワー表示中はMdツールバーを重ねない(下部ボタンが隠れる) */
+body:has(.list-pane.drawer-open) .mobile-bar { display: none !important; }
+
+/* 検索ジャンプ */
+.search-row { display: flex; gap: 4px; align-items: stretch; }
+.search-row #search-box { flex: 1; min-width: 0; }
+.search-row .btn.tiny { padding: 0 8px; }
+.cm-search-hit { background: var(--accent-soft); color: var(--accent); border-radius: 2px; }
+.cm-search-hit-active { background: #ffd43b; color: #000; } /* ∧∨で選択中のヒット */
+html[data-theme="dark"] .cm-search-hit-active { background: #ffd43b; color: #000; }
+html[data-theme="dark"] .cm-search-hit { background: rgba(61,193,181,.25); color: inherit; }
+/* ④ リスト折り返しのハンギングインデント(1行目のテキスト開始位置に揃える)
+   不具合修正: セレクタに#cm-hostを足した。移植元のSyncMemoでは上の打ち消し規則が
+   `.cm-host .cm-line`(クラス、詳細度0-2-0)で、この規則(.cm-line.cm-hang、同じく0-2-0)とは
+   同点になり「後に書いたほうが勝つ」で成立していた。Paneへ移す際に打ち消し規則の側だけ
+   `#cm-host .cm-line`(ID、詳細度1-1-0)へ変えたため、idを持たないこの規則が常に負け、
+   padding-leftが0pxのまま=リストの折り返しがぶら下がらない状態になっていた
+   (実測で確認)。コードモード側の.cm-code-hangと同じく#cm-hostを付けて確実に上書きする。 */
+#cm-host .cm-line.cm-hang { padding-left: calc(6px + var(--hang)) !important; text-indent: calc(-1 * var(--hang)); }
+
+/* コードモードの折り返し行ハンギングインデント(依頼: 「折り返し行をインデントに揃える」)。
+   --hangはsrc/editor.jsのcodeHangIndentPluginが行頭空白のタブ展開後の表示列数として
+   "Nch"の形で付与する(タブ幅への対応はcodeHangColumnFor定義部のコメント参照)。
+   上のcm-hang(Markdownのリストのぶら下げ)とは--hangの意味(文字数 vs 表示列数)が違うため
+   クラスを分けている。両クラスはモードが排他(docModeComp/livePreviewComp/
+   codeModeExtrasCompの切り替えによりmarkdownモードとcodeモードは同時に有効化されない)
+   なので同じ行に二重適用されることは無い。
+   6pxの下駄(cm-hang側)はMarkdownの箇条書きマーカーがウィジェット描画のため必要だった
+   微調整だが、コード側は行頭の空白がそのまま実テキストとして描画されるだけなので不要
+   (--hangの列数がそのまま実際の字下げ幅と一致する)。
+
+   【詳細度の注意(実装時に実測して判明したこと)】 720行付近の
+   #cm-host .cm-line { padding: 0 !important; margin: 0; text-indent: 0; } は、
+   IDセレクタ(#cm-host)を含むため詳細度が(1 ID, 1 class)。".cm-line.cm-code-hang"の
+   ようにクラスを2つ重ねただけのセレクタは(0 ID, 2 class)にしかならず、IDを含む詳細度には
+   数の大小に関わらず絶対に勝てない(CSSの詳細度比較はIDの数→クラス数の順で、桁上がり的に
+   比較される)。そのため素朴に「クラス2つ」にしただけでは、上のpadding:0 !important
+   (および!importantの付いていないtext-indent:0の側)に競り負けて、padding-left/
+   text-indentが1pxも反映されない。実際に.verify-hang-code.mjsでgetComputedStyleを
+   実測して初めてこの不具合(古いMarkdown版の.cm-hangも同じ理由で現状padding-leftが
+   常に0pxになっており、ぶら下げが実質効いていないことも合わせて判明した)に気づいた。
+   このため、コード版は#cm-hostを含めて同じIDの土俵に乗せたセレクタにし、詳細度
+   (1 ID, 2 class)で確実に上回るようにする。
+   1行目の文字開始位置を変えないため、padding-leftで全体を右へ押し、text-indentの
+   負値で1行目だけ元の位置へ引き戻す(cm-hangと同じ方式。1行目の見た目は1pxも変わらない)。
+
+   なお上のMarkdown用.cm-hangについては、今回の依頼はコードモードの対応であり、
+   Markdown側の見た目を変えないことが要件のため、この詳細度の不具合はあえて直さず
+   現状のまま残している(実際に直すとMarkdownの折り返し行の見た目が変わってしまう)。
+   詳細は対応報告を参照。 */
+#cm-host .cm-line.cm-code-hang { padding-left: var(--hang) !important; text-indent: calc(-1 * var(--hang)); }
+
+/* ---- テーブル(ライブプレビュー描画) ---- */
+.cm-table { padding: 4px 0; overflow-x: auto; }
+.cm-table table { border-collapse: collapse; font-size: .95em; }
+.cm-table th, .cm-table td { border: 1px solid var(--line); padding: 4px 10px; position: relative; min-width: 3em; }
+/* 空セルだけ極端に薄くならないようにする。セルの中身が空だと行ボックスが1つも
+   生成されず高さが padding 分だけになってしまうため、幅ゼロの文字(U+200B)を
+   常に先頭へ入れて、文字が入っているセルと同じ行ボックスを必ず作る。
+   操作ボタン(.tbl-ctls)は position:absolute なので行ボックスには寄与しない。 */
+.cm-table th::before, .cm-table td::before { content: "\200B"; }
+/* 表のヘッダー背景(不具合修正): 以前はライトが--accent-soft、ダークが
+   rgba(61,193,181,.14)というハードコード値で、いずれもアクセント色(ティール)の
+   薄塗りだったため緑がかって見えていた(ダーク側は現在の--accentの実値(#6FB3A8)
+   にすら連動しない、過去のアクセント値#3DC1B5を直書きした死んだ定数だった)。
+   表は読む場所であり色で主張させたくないため、アクセントではなく上方で定義した
+   ニュートラルな帯色--panel-bg(本文からink 6%だけ混ぜた濃淡)に変更する。
+   これで全テーマ共通のロジックになり、ダーク専用の個別上書きも不要になった。 */
+.cm-table th { background: var(--panel-bg); font-weight: 700; }
+.cm-table { padding: 20px 8px 8px 26px; } /* 上と左に操作ボタンの表示領域を確保 */
+/* 既定は非表示 */
+.cm-table .tbl-ctls { position: absolute; display: none; gap: 2px; z-index: 5; pointer-events: none; }
+.cm-table th > .tbl-ctls { top: -19px; left: 0; right: 0; justify-content: center; flex-direction: row; }
+.cm-table .tbl-row-ctls { top: 0; bottom: 0; left: -24px; flex-direction: column; justify-content: center; }
+/* ホバー中のセル/行に関係するボタンだけ表示 */
+.cm-table th:hover > .tbl-ctls,
+.cm-table tr:hover > td:first-child > .tbl-row-ctls,
+.cm-table .tbl-ctls:hover { display: flex; pointer-events: auto; }
+.cm-table .tbl-ctl { border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 4px; font-size: 12px; line-height: 1; width: 20px; height: 20px; padding: 0; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,.18); }
+.cm-table .tbl-ctl:hover { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+/* 補完ポップアップをテーマに合わせる */
+.cm-tooltip.cm-tooltip-autocomplete { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.cm-tooltip-autocomplete ul li[aria-selected] { background: var(--accent-soft); color: var(--accent); }
+
+/* 列ボタンとヘッダーの間の隙間でホバーが切れないよう透明ブリッジを敷く */
+/* 透明ブリッジは表示中のボタン群にのみ付与(非表示ボタンのブリッジが隣接セルに干渉するのを防ぐ) */
+.cm-table th:hover > .tbl-ctls::before { content: ""; position: absolute; left: -6px; right: -6px; top: -4px; bottom: -6px; z-index: -1; }
+.cm-table tr:hover > td:first-child > .tbl-row-ctls::before { content: ""; position: absolute; top: -6px; bottom: -6px; left: -4px; right: -8px; z-index: -1; }
+
+/* アーカイブ閲覧モード: 編集UIを隠して読み取り専用を明示 */
+.layout.readonly .memo-title { pointer-events: none; }
+.layout.readonly #btn-delete, .layout.readonly #btn-save-template, .layout.readonly .mobile-bar { display: none !important; }
+.layout.readonly .editor::before { content: "アーカイブ（閲覧のみ）"; display: block; font-size: 12px; color: var(--ink-sub); background: var(--accent-soft); border-radius: 6px; padding: 4px 10px; margin-bottom: 10px; align-self: flex-start; }
+
+/* ===== 設定画面(仕様書 第2.10節 C-01〜C-14、src/settings.js) =====
+   製品相当のサイドバー形式(左: カテゴリ一覧、右: 設定項目)のモーダル。
+   全画面オーバーレイの中央に大きめのパネル(900px前後・80vh)を出す。既存のオーバーレイ
+   (.palette-overlay)・ドロップダウン(.menu-dropdown)と同じ質感(--surface背景・--line枠・
+   --shadow-pop影)で揃え、配色はすべて既存のCSSカスタムプロパティのみを使う。 */
+/* 余白は画面サイズに応じて縮める。ウィンドウが小さいと24px固定では本体の表示領域が
+   潰れてしまい、設定画面が使えなくなるため。 */
+.settings-modal-overlay { position: fixed; inset: 0; z-index: 80; background: rgba(10,14,16,.4); display: flex; justify-content: center; align-items: center; padding: min(24px, 2vh) min(24px, 2vw); }
+.settings-modal { width: min(900px, 100%); height: min(80vh, 720px); max-height: 100%; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow-pop); overflow: hidden; }
+
+/* pageモード(設定専用ウィンドウ、settings-entry.js): 本体ウィンドウのオーバーレイモーダルと
+   同じDOM・スタイルを流用しつつ、黒背景・余白・角丸・影だけを外してウィンドウ全体に広げる。 */
+.settings-modal-overlay-page { position: static; inset: auto; background: transparent; padding: 0; width: 100%; height: 100%; }
+.settings-modal-page { width: 100%; height: 100%; max-height: none; border: none; border-radius: 0; box-shadow: none; }
+.settings-modal-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--rule); flex: none; }
+.settings-modal-title { font-size: 15px; font-weight: 700; }
+.settings-modal-close { border: none; background: transparent; color: var(--ink-sub); padding: 5px; border-radius: 6px; display: inline-flex; }
+.settings-modal-close svg { display: block; }
+.settings-modal-body { flex: 1; min-height: 0; display: flex; }
+
+/* 左: カテゴリ一覧 */
+.settings-nav { width: 200px; flex: none; border-right: 1px solid var(--rule); background: var(--paper); padding: 10px; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; }
+.settings-nav-item { display: flex; align-items: center; gap: 10px; border: none; background: transparent; color: var(--ink-sub); font: inherit; font-size: 13px; text-align: left; padding: 9px 10px; border-radius: 8px; cursor: pointer; }
+.settings-nav-item svg { flex: none; }
+.settings-nav-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+
+/* 右: 設定項目(カテゴリ共通) */
+.settings-content { flex: 1; min-width: 0; overflow-y: auto; padding: 20px 24px; display: flex; flex-direction: column; gap: 18px; }
+.settings-loading { color: var(--ink-sub); font-size: 13px; padding: 40px 0; text-align: center; }
+.settings-intro { margin: 0; font-size: 12.5px; color: var(--ink-sub); line-height: 1.6; }
+.settings-group { display: flex; flex-direction: column; gap: 10px; }
+.settings-group-title { font-size: 12px; font-weight: 700; color: var(--ink-sub); }
+.settings-radio, .settings-checkbox-row { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; cursor: pointer; }
+.settings-radio input, .settings-checkbox-row input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; margin-top: 2px; flex: none; cursor: pointer; }
+.settings-radio-disabled { color: var(--ink-sub); cursor: default; }
+.settings-radio-disabled input { cursor: default; }
+.settings-badge { font-size: 10.5px; color: var(--ink-sub); background: var(--paper); border: 1px solid var(--rule); border-radius: 999px; padding: 1px 7px; margin-left: 6px; }
+.settings-checkbox-title { font-weight: 600; }
+.settings-field-desc { display: block; font-size: 11.5px; color: var(--ink-sub); font-weight: 400; margin-top: 2px; }
+.settings-field-desc code { font-family: var(--font-mono); background: var(--paper); border-radius: 4px; padding: 0 4px; }
+.settings-select-row, .settings-text-row { display: flex; flex-direction: column; gap: 4px; font-size: 13px; font-weight: 600; max-width: 380px; }
+.settings-select-row select, .settings-text-row input { font: inherit; font-size: 13px; font-weight: 400; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; background: var(--paper); color: var(--ink); }
+.settings-text-row input[type="number"] { max-width: 110px; }
+
+/* 下部: 保存・キャンセル */
+.settings-modal-foot { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 20px; border-top: 1px solid var(--rule); }
+.settings-modal-msg { font-size: 12px; color: var(--ink-sub); }
+.settings-modal-msg.error { color: var(--danger); font-weight: 700; }
+.settings-modal-actions { display: flex; gap: 8px; }
+
+/* ファイルの関連付け(C-13): カテゴリ→言語→拡張子の3階層チェックボックスツリー */
+.ft-quickrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ft-count { font-size: 11.5px; color: var(--ink-sub); margin-left: auto; }
+.ft-tree { border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; }
+.ft-category + .ft-category { border-top: 1px solid var(--rule); }
+.ft-row { display: flex; align-items: center; gap: 6px; padding: 7px 10px; }
+.ft-row-category { background: var(--paper); font-weight: 700; font-size: 12.5px; }
+.ft-row-lang { font-size: 12.5px; padding-left: 26px; }
+.ft-row-ext { padding: 5px 10px 5px 58px; font-size: 12px; }
+.ft-row-ext:hover, .ft-row-lang:hover { background: var(--accent-soft); }
+.ft-row-label { display: flex; align-items: center; gap: 6px; cursor: pointer; flex: 1; min-width: 0; }
+.ft-row input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px; flex: none; cursor: pointer; }
+.ft-ext-hint { color: var(--ink-sub); font-size: 11px; font-weight: 400; }
+.ft-chevron { border: none; background: transparent; color: var(--ink-sub); padding: 2px; display: inline-flex; cursor: pointer; transition: transform 160ms ease; flex: none; }
+.ft-chevron.expanded { transform: rotate(90deg); }
+.ft-ext-list { display: flex; flex-direction: column; background: var(--surface); }
+.ft-lang-list { display: flex; flex-direction: column; }
+
+/* キーボード(C-10): コマンド名・現在のショートカットの一覧 */
+.kb-table { display: flex; flex-direction: column; border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; }
+.kb-row { display: flex; align-items: center; gap: 10px; padding: 8px 12px; font: inherit; font-size: 12.5px; text-align: left; color: var(--ink); background: var(--surface); border: none; border-top: 1px solid var(--rule); cursor: pointer; width: 100%; }
+.kb-row:first-child { border-top: none; }
+.kb-row.capturing { background: var(--accent-soft); outline: 2px solid var(--accent); outline-offset: -2px; }
+.kb-row.conflict .kb-cell-shortcut kbd { color: var(--danger); border-color: var(--danger); }
+.kb-cell-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kb-cell-shortcut { flex: none; font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-sub); }
+.kb-cell-warn { flex: none; font-size: 11px; color: var(--danger); font-weight: 700; }
+
+/* ホバー装飾はホバー可能なデバイス限定(既存の方針、上のホバー専用ブロックを参照) */
+@media (hover: hover) {
+.settings-modal-close:hover { background: var(--paper); color: var(--ink); }
+.settings-nav-item:hover { background: var(--surface); color: var(--ink); }
+.kb-row:hover { background: var(--accent-soft); }
+}
+
+/* 拡張子ごとの編集モード上書き(fileModeOverrides、src/settings.js「編集」カテゴリ) */
+.fm-list { display: flex; flex-direction: column; gap: 6px; }
+.fm-row { display: flex; align-items: center; gap: 8px; }
+.fm-row .fm-ext { width: 100px; flex: none; font: inherit; font-size: 13px; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; background: var(--paper); color: var(--ink); }
+.fm-row .fm-mode { flex: none; font: inherit; font-size: 13px; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; background: var(--paper); color: var(--ink); }
+.fm-row .fm-remove { flex: none; border: 1px solid var(--line); background: var(--surface); color: var(--ink-sub); border-radius: 8px; width: 28px; height: 28px; padding: 0; }
+.fm-row .fm-remove svg { width: 14px; height: 14px; }
+.fm-row.fm-row-dup .fm-ext { border-color: var(--danger); color: var(--danger); }
+.fm-row .fm-warn { flex: 1; min-width: 0; }
+
+@media (hover: hover) {
+.fm-row .fm-remove:hover { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+}
+
+/* ===== 内容からの編集モード自動判定(仕様書 第1章の拡張、src/main.js・src/detect-mode.js) =====
+   ステータスバー付近に浮かべる非モーダルな通知バナー。既存の.palette-overlay等とは違い
+   全画面を覆わない(入力の邪魔をしないための仕様上の要件)。接頭辞は"ad-"(auto-detect)に
+   統一し、色は既存のCSSカスタムプロパティのみを使う。 */
+.ad-banner { position: fixed; right: 14px; bottom: 34px; z-index: 55; display: flex; align-items: center; gap: 10px; max-width: min(440px, calc(100% - 28px)); background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; box-shadow: var(--shadow-pop); font-size: 12.5px; color: var(--ink); }
+.ad-banner[hidden] { display: none; }
+#ad-banner-text { flex: 1; min-width: 0; }
+.ad-banner-btn { flex: none; border: none; font: inherit; font-size: 11.5px; cursor: pointer; padding: 5px 10px; border-radius: 6px; white-space: nowrap; }
+.ad-banner-action { background: var(--accent-soft); color: var(--accent); }
+.ad-banner-close { background: transparent; color: var(--ink-mute); }
+@media (hover: hover) {
+.ad-banner-action:hover { background: var(--accent); color: var(--surface); }
+.ad-banner-close:hover { background: var(--paper); color: var(--ink); }
+}
+
+/* コードモードの言語ピッカー(#status-mode クリック)。既存のコマンドパレット/
+   クイックオープンと同じ.palette-overlay/.palette/#palette-input/#palette-listを
+   そのまま再利用するため、専用のCSSはここには不要。 */
+
+/* ===== 設定画面の拡張(10カテゴリ化、src/settings.js) =====
+   検索欄・パス選択(参照…)ボタン・関連付けの警告バナー・詳細カテゴリの操作ボタン群。
+   既存の設定画面用クラス(.settings-*)の接頭辞をそのまま使い、フォームの外観は
+   settings-select-row/settings-text-rowと揃える。 */
+.settings-search-row { flex: none; display: flex; align-items: center; gap: 8px; margin: 10px 20px 0; padding: 7px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); color: var(--ink-sub); }
+.settings-search-row svg { flex: none; }
+.settings-search-input { flex: 1; min-width: 0; border: none; background: transparent; color: var(--ink); font: inherit; font-size: 13px; outline: none; }
+.settings-search-input::placeholder { color: var(--ink-mute); }
+.settings-nav-empty { padding: 10px 10px; font-size: 12px; color: var(--ink-sub); }
+
+/* textareaも settings-text-row の input と同じ見た目に揃える */
+.settings-text-row textarea { font: inherit; font-size: 13px; font-weight: 400; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; background: var(--paper); color: var(--ink); resize: vertical; min-height: 4.5em; }
+
+/* パス選択(フォルダ・ファイル)+「参照…」ボタン */
+.settings-path-row { display: flex; flex-direction: column; gap: 4px; font-size: 13px; font-weight: 600; max-width: 480px; }
+.settings-path-input-row { display: flex; gap: 6px; }
+.settings-path-input-row input { flex: 1; min-width: 0; font: inherit; font-size: 13px; font-weight: 400; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; background: var(--paper); color: var(--ink); }
+.settings-path-browse-btn { flex: none; }
+.settings-path-browse-btn:disabled { opacity: .5; cursor: default; }
+
+/* ファイルの関連付け: Windowsの既定のアプリで奪われている拡張子の警告バナー */
+.ft-blocked-warn { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--danger); border-radius: 9px; background: var(--danger-soft); }
+.ft-blocked-warn p { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--ink); }
+
+/* 詳細カテゴリ: 値ではなくアクションのボタン群。破壊的な操作は adv-confirm を挟む */
+.adv-actions { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.adv-action-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.adv-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--danger); border-radius: 9px; background: var(--danger-soft); }
+.adv-confirm-text { font-size: 12px; color: var(--ink); flex-basis: 100%; }
+.adv-action-msg { font-size: 12px; color: var(--accent); min-height: 1.4em; }
+
+/* バージョン情報カテゴリ: ラベル+値+操作ボタンの行、ライセンス一覧 */
+.settings-info-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; }
+.settings-info-label { color: var(--ink-sub); flex: 1 1 auto; min-width: 0; word-break: break-all; }
+.settings-license-list { display: flex; flex-direction: column; gap: 2px; }
+.settings-license-row { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; font-size: 12.5px; padding: 5px 0; border-bottom: 1px solid var(--rule); }
+.settings-license-row:last-child { border-bottom: none; }
+.settings-license-name { font-weight: 600; }
+.settings-license-type { color: var(--ink-sub); }
+
+/* ===== 外部サイトを開く前の確認ダイアログ(src/editor.js の confirmOpenExternal) =====
+   誤クリックで既定のブラウザが勝手に開くのを防ぐ。見た目は既存のパレット/設定画面と
+   揃える(--surface背景・--line枠・--shadow-pop)。色は既存のCSS変数のみを使う。 */
+.extlink-overlay { position: fixed; inset: 0; z-index: 90; background: rgba(10,14,16,.4); display: flex; justify-content: center; align-items: center; padding: min(24px, 3vh) 16px; }
+.extlink-box { width: min(460px, 100%); max-height: 100%; overflow-y: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow-pop); padding: 18px 20px 14px; }
+.extlink-title { font-size: 13.5px; font-weight: 700; color: var(--ink); margin-bottom: 10px; }
+.extlink-url { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-sub); background: var(--code-bg); border: 1px solid var(--rule); border-radius: 6px; padding: 8px 10px; word-break: break-all; margin-bottom: 14px; }
+.extlink-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.extlink-btn { border: 1px solid var(--line); background: var(--surface); color: var(--ink); font: inherit; font-size: 12px; padding: 6px 14px; border-radius: 6px; cursor: pointer; }
+.extlink-btn-primary { background: var(--accent); border-color: var(--accent); color: var(--surface); font-weight: 700; }
+@media (hover: hover) {
+.extlink-btn:hover { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+.extlink-btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--surface); }
+}
+
+/* ===== 共通ダイアログ(src/dialog.js: paneConfirm / paneAlert / paneInput) =====
+   ブラウザ標準の確認・入力・警告ダイアログの置き換え。見た目は上の.extlink-*と揃える
+   (--surface背景・--line枠・--shadow-pop)。設定ウィンドウ(settings-window.html)からも
+   読み込まれるため、.settings-modal-overlay(z-index:80)より上に出す。 */
+.pane-dialog-overlay { position: fixed; inset: 0; z-index: 95; background: rgba(10,14,16,.4); display: flex; justify-content: center; align-items: center; padding: min(24px, 3vh) 16px; }
+.pane-dialog-box { width: min(420px, 100%); max-height: 100%; overflow-y: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow-pop); padding: 18px 20px 14px; }
+.pane-dialog-title { font-size: 13.5px; font-weight: 700; color: var(--ink); margin-bottom: 8px; }
+.pane-dialog-message { font-size: 12.5px; color: var(--ink-sub); line-height: 1.6; margin-bottom: 14px; white-space: pre-wrap; }
+.pane-dialog-input { display: block; width: 100%; font: inherit; font-size: 13px; color: var(--ink); background: var(--input-bg); border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; margin-bottom: 6px; }
+.pane-dialog-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.pane-dialog-error { font-size: 11.5px; color: var(--danger); font-weight: 600; margin-bottom: 8px; }
+.pane-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.pane-dialog-btn { border: 1px solid var(--line); background: var(--surface); color: var(--ink); font: inherit; font-size: 12px; padding: 6px 14px; border-radius: 6px; cursor: pointer; }
+.pane-dialog-btn:disabled { opacity: .5; cursor: default; }
+.pane-dialog-btn-primary { background: var(--accent); border-color: var(--accent); color: var(--surface); font-weight: 700; }
+.pane-dialog-btn-danger { background: var(--danger); border-color: var(--danger); color: var(--surface); font-weight: 700; }
+@media (hover: hover) {
+.pane-dialog-btn:hover:not(:disabled) { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+.pane-dialog-btn-primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--surface); }
+.pane-dialog-btn-danger:hover:not(:disabled) { background: var(--danger); border-color: var(--danger); filter: brightness(1.1); color: var(--surface); }
+}
+
+/* ===== 拡張子の関連付けツリーの三状態表示 =====
+   「全部選択」と「一部だけ選択」が同じ色だと見分けがつかないため、チェック色を分ける。
+   全部選択はアクセント色、一部選択は控えめな灰色にし、行のラベルにも「一部選択」と出す。
+   :indeterminate は syncFileTypeTree() がJS側で設定している。 */
+.ft-tree input[type="checkbox"] { accent-color: var(--accent); }
+.ft-tree input[type="checkbox"]:indeterminate { accent-color: var(--ink-mute); }
+.ft-row-label:has(input:indeterminate) > span { color: var(--ink-sub); }
+.ft-row-label:has(input:indeterminate) > span::after {
+  content: "一部選択";
+  margin-left: 6px;
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 9.5px;
+  color: var(--ink-mute);
+  white-space: nowrap;
+}
+
+/* .settings-content は縦並びのフレックスなので、既定では背の高い子要素が
+   押し潰されてしまう(拡張子ツリーが数十pxの枠に収まってしまい、その中で
+   さらにスクロールが必要になっていた)。子は自然な高さのままにし、
+   はみ出す分は .settings-content 自体のスクロールで見せる。 */
+.settings-content > * { flex: 0 0 auto; }
+
+/* 既定のアプリが他アプリになっている拡張子ごとの「選び直す」ボタンの並び。 */
+.ft-blocked-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+
+/* ===== 本文フォント・等幅フォントの設定(仕様書 C-08) =====
+   main.js が apply-settings を受け取って --editor-font-body / --editor-font-mono を
+   設定する。未設定のときはテーマ既定(--font-body / --font-mono)へフォールバックする。
+   本文は「地の文」、等幅は「コードブロック・インラインコード・コードモード・行番号」に効く。
+   CodeMirrorのテーマは .ͼ1 付きの高い詳細度で .cm-content に font-family を当てるため、
+   ここでは !important で確実に上書きする。 */
+#cm-host { font-family: var(--editor-font-body, var(--font-body)); }
+.tok-code, .tok-codeblock { font-family: var(--editor-font-mono, var(--font-mono)) !important; }
+#cm-host.mode-code .cm-content,
+#cm-host.mode-code .cm-gutters,
+#cm-host .cm-lineNumbers .cm-gutterElement { font-family: var(--editor-font-mono, var(--font-mono)) !important; }
+
+/* <select>の内在的な最小幅は「いちばん長い項目」で決まる。インストール済みフォントの
+   一覧は数百件あり長い名前も含まれるため、親の max-width を無視して横に伸びていた
+   (等幅フォントは候補が少ないため問題が出ていなかった)。
+   フレックス項目の既定 min-width:auto を打ち消し、親の幅に収める。 */
+.settings-select-row select, .settings-text-row input, .settings-text-row select {
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* ===== 本文の余白・最大幅・行の高さ(仕様書 C-08・第10.3節) =====
+   本文が左端にぴったり付いて読みにくかったため、左右に余白を入れる。
+   --editor-padding-left / --editor-padding-right(設定 editorPaddingLeft/editorPaddingRight、
+   既定どちらも32px)がその余白の幅。左右を個別に指定できるようにした(ユーザー要望。
+   旧・editorPaddingXは左右共通の1値しか持てなかった。移行はPane/AppSettings.cs
+   GetEffectiveEditorPaddingLeft/Right参照)。
+   --editor-line-height(設定 editorLineHeight)は行の高さ。未設定なら既定のまま。
+   CodeMirrorのテーマは .cm-scroller に line-height を当てるため、そちらも上書きする。
+   最大幅(--editor-max-width、設定 editorMaxWidthPx)は既定で無制限にしておき、
+   下のMarkdownモード限定ルールでだけ有効にする(コードモード・プレーンテキストモードで
+   幅を制限すると、横に長いコード行やログが折り返されて読みにくくなるため対象外にする)。 */
+#cm-host .cm-content {
+  padding-left: var(--editor-padding-left, 32px) !important;
+  padding-right: var(--editor-padding-right, 32px) !important;
+  box-sizing: border-box;
+  max-width: none;
+  margin-left: auto;
+  margin-right: auto;
+}
+#cm-host .cm-scroller { line-height: var(--editor-line-height, 1.95); }
+/* 本文の最大幅は仕様書どおりMarkdownモードのときだけ適用する。data-editor-modeは
+   main.jsのupdateStatusMode()がモード切替のたびに<html>要素へ付け直す。 */
+:root[data-editor-mode="markdown"] #cm-host .cm-content {
+  max-width: var(--editor-max-width, none);
+}
+/* コードモードは行番号の余白があるので、本文ほど左を空けない。
+   マーカーの位置を本文エリアの左端に固定する変更(editor.js FOLD_MARKER_GAP_LEFT/
+   FOLD_MARKER_SIZE/FOLD_MARKER_GAP_RIGHT)に伴い、左余白の内訳を次のとおり左右対称にした
+   (ユーザー指摘「プラスマイナスの位置とコードの開始位置が近すぎるので、本文エリアの
+   左端とプラスマイナスマーカーの隙間と同じ分開けてください」への対応)。
+     本文エリア左端 --5px-- マーカー左端 --15px(マーカー本体)-- マーカー右端 --5px-- コード開始位置
+   合計 5 + 15 + 5 = 25px。この3つの数値(5/15/5)を変えるときは、editor.jsの
+   FOLD_MARKER_GAP_LEFT/FOLD_MARKER_SIZE/FOLD_MARKER_GAP_RIGHTと必ず連動させて変更すること
+   (双方が独立している値のため、片方だけ変えると隙間の左右対称が崩れる)。
+   事実確認(2026-08、コメントと実装の食い違いを修正): この25pxもFOLD_MARKER_GAP_LEFT/
+   FOLD_MARKER_SIZE/FOLD_MARKER_GAP_RIGHTもいずれも設定画面から変更できるユーザー設定
+   ではなくハードコードされた定数であり(Markdown/プレーンテキストモードの左余白が従う
+   --editor-padding-left設定は、上のより詳細なセレクタ#cm-host.mode-code .cm-contentに
+   よってコードモードでは常に上書きされる=このpadding-leftはコードモードでは常に25pxの
+   まま変わらない)、editor.js側のcomputeFixedMarkerLeftPxにもクランプ処理は無い(単純な
+   引き算のみ)。両者が食い違う経路は現状の設定項目には存在しないため、保険としての
+   クランプは実装せず、上記の「3つの数値を変えるときは必ず連動させること」という
+   コメント上の注意点だけで一貫性を保つ方針にしてある。 */
+#cm-host.mode-code .cm-content { padding-left: 25px !important; padding-right: 12px !important; }
+
+/* ===== コード中のカラープレビュー・カラーピッカー(docs/カラープレビュー仕様.md) =====
+   スウォッチ・カラーピッカーパネルとも、色は--paper/--ink/--accent等の既存トークンから
+   派生させる(CLAUDE.md: ここにない色を新たに導入しない)。市松模様(半透明の可視化)だけは
+   固有の値が必要なので、--ink由来のcolor-mix()でテーマに自動追従する形にする。 */
+:root {
+  --cp-checker: color-mix(in srgb, var(--ink) 16%, transparent);
+}
+
+/* ---- インラインスウォッチ(仕様書 3.1) ---- クリックできる要素にはしない(非インタラクティブ)。 */
+.cm-color-swatch {
+  display: inline-block;
+  box-sizing: border-box;
+  width: .85em;
+  height: .85em;
+  margin-right: .25em;
+  border-radius: 2px;
+  vertical-align: -0.1em;
+  border: 1px solid color-mix(in srgb, var(--ink) 35%, transparent);
+  background-color: var(--cm-color-swatch);
+}
+/* 半透明の色(仕様書 3.1): 市松模様の上に色を重ねて透明度を一目で分かるようにする。
+   先頭のグラデーション層(単色2色指定=ベタ塗り)がARGB色そのまま、その下が市松模様。 */
+.cm-color-swatch-alpha {
+  background-color: var(--paper);
+  background-image:
+    linear-gradient(var(--cm-color-swatch), var(--cm-color-swatch)),
+    linear-gradient(45deg, var(--cp-checker) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--cp-checker) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--cp-checker) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--cp-checker) 75%);
+  background-size: 100% 100%, 6px 6px, 6px 6px, 6px 6px, 6px 6px;
+  background-position: 0 0, 0 0, 0 3px, 3px -3px, -3px 0;
+}
+/* カラーピッカーを開いている間、対象の色リテラルに付ける枠線ハイライト(仕様書 4.4)。 */
+.cm-color-picker-target {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+
+/* ---- カラーピッカーパネル(仕様書 第4章) ---- position:fixedで編集領域の上に重ねる。 */
+.color-picker-panel {
+  position: fixed;
+  z-index: 80; /* .menu-dropdown(70)より上に出す */
+  /* 改善要望3: 264pxだとR/G/B欄が3桁(255)ぎりぎりで、スピナー分と合わせて欠けていた。
+     数値入力欄まわり全体に余裕を持たせるため288pxへ広げる(位置決めはJS側がoffsetWidthを
+     見て動的に計算するため、この値を変えても4.4節の重なり回避・クランプは自動で追従する)。 */
+  width: 288px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  box-sizing: border-box;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: var(--shadow-pop);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--ink);
+  font-family: var(--font-body);
+}
+.color-picker-panel:focus { outline: none; }
+
+/* ユーザー要望1: プレビュー行をドラッグしてパネルを移動できるようにする。
+   cursor: move で掴めることを示す(実際のドラッグ処理はcolor-picker.js側)。 */
+.cp-preview { display: flex; align-items: center; gap: 10px; cursor: move; }
+.cp-preview-swatch-wrap {
+  flex: none;
+  width: 36px; height: 36px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background-image:
+    linear-gradient(45deg, var(--cp-checker) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--cp-checker) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--cp-checker) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--cp-checker) 75%);
+  background-size: 8px 8px;
+  background-position: 0 0, 0 4px, 4px -4px, -4px 0;
+}
+.cp-preview-swatch { display: block; width: 100%; height: 100%; background: var(--cp-color); }
+.cp-preview-text { min-width: 0; }
+.cp-primary { font-family: var(--font-mono); font-size: 13.5px; font-weight: 600; word-break: break-all; }
+.cp-secondary { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-sub); margin-top: 2px; word-break: break-all; }
+
+/* 彩度×明度の四角形。ドラッグ操作の実際のs/lはJS側で正しいHSL式から計算するが、
+   背景の見た目は一般的なCSSグラデーション近似(黒〜透明・白〜透明を色相ベースに重ねる)を使う。 */
+.cp-sl-box {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1.7 / 1;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  overflow: hidden;
+  cursor: crosshair;
+  touch-action: none;
+}
+.cp-sl-gradient {
+  position: absolute; inset: 0;
+  background:
+    linear-gradient(to top, #000, rgba(0, 0, 0, 0)),
+    linear-gradient(to right, #fff, rgba(255, 255, 255, 0)),
+    hsl(var(--cp-hue, 0), 100%, 50%);
+}
+.cp-sl-handle {
+  position: absolute;
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .45), 0 1px 3px rgba(0, 0, 0, .3);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.cp-hue-slider {
+  position: relative;
+  width: 100%; height: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  cursor: pointer;
+  touch-action: none;
+  background: linear-gradient(to right, red 0%, #ff0 17%, #0f0 33%, #0ff 50%, #00f 67%, #f0f 83%, red 100%);
+}
+.cp-hue-handle {
+  position: absolute; top: 50%;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid var(--surface);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .45);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+/* 不透明度スライダー(仕様書 4.1: 元のリテラルがアルファを持っていた場合のみ表示)。
+   市松模様の上に「透明→現在の色」のグラデーションを重ねる。 */
+.cp-alpha-slider {
+  position: relative;
+  width: 100%; height: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  overflow: hidden;
+  cursor: pointer;
+  touch-action: none;
+}
+.cp-alpha-track {
+  position: absolute; inset: 0;
+  background-image:
+    linear-gradient(to right, transparent, rgb(var(--cp-alpha-color, 0, 0, 0))),
+    linear-gradient(45deg, var(--cp-checker) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--cp-checker) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--cp-checker) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--cp-checker) 75%);
+  background-size: 100% 100%, 6px 6px, 6px 6px, 6px 6px, 6px 6px;
+  background-position: 0 0, 0 0, 0 3px, 3px -3px, -3px 0;
+}
+.cp-alpha-handle {
+  position: absolute; top: 50%;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid var(--surface);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .45);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.cp-numeric { display: grid; grid-template-columns: repeat(3, 1fr) 1.6fr; gap: 6px; }
+/* min-width:0がないとgridアイテムがinputの既定最小幅(auto)分だけ広がろうとして
+   隣の列を圧迫することがあるため明示する(改善要望3の見直しの一環)。 */
+.cp-num-field { display: flex; flex-direction: column; gap: 2px; font-size: 10.5px; color: var(--ink-sub); min-width: 0; }
+.cp-num-field input {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--ink);
+  background: var(--input-bg);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 4px 6px;
+  width: 100%;
+  box-sizing: border-box;
+}
+.cp-num-field input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* 改善要望3: number入力のスピナー(上下ボタン)がR/G/B欄の横幅を大きく食い、
+   3桁(0〜255)の表示が欠ける原因になっていたため非表示にする。
+   キーボードの上下キーによる増減はtype="number"のまま残るため機能は維持される
+   (appearanceは見た目だけを変える指定で、ステップ増減の挙動には影響しない)。 */
+.cp-num-field input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+.cp-num-field input[type="number"]::-webkit-inner-spin-button,
+.cp-num-field input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.cp-eyedropper {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  border-radius: 6px;
+  padding: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.cp-eyedropper:hover { background: var(--accent-soft); border-color: var(--accent); }
+
+.cp-palettes { display: flex; flex-direction: column; gap: 8px; }
+.cp-palette-group { display: flex; flex-direction: column; gap: 4px; }
+.cp-palette-title { font-size: 10.5px; color: var(--ink-sub); }
+.cp-palette-row { display: flex; gap: 6px; }
+/* パレットの色: 左クリックで確定、右クリックでコピー(仕様書 4.2 追加要件)。
+   ブラウザ既定のコンテキストメニューは出さない(色-picker.js側でe.preventDefault())。 */
+.cp-palette-swatch {
+  position: relative;
+  flex: 1;
+  height: 22px;
+  min-width: 0;
+  border-radius: 5px;
+  border: 1px solid color-mix(in srgb, var(--ink) 20%, transparent);
+  padding: 0;
+  cursor: pointer;
+}
+.cp-palette-swatch:hover, .cp-palette-swatch:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.cp-copy-toast {
+  position: absolute;
+  left: 50%; bottom: calc(100% + 5px);
+  transform: translateX(-50%);
+  background: var(--ink);
+  color: var(--paper);
+  font-size: 10px;
+  line-height: 1.4;
+  padding: 3px 7px;
+  border-radius: 4px;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: var(--shadow-pop);
+  z-index: 1;
+}
+
+/* 改善要望2: キャンセルボタンを追加。既存の独自ダイアログ(.pane-dialog-actions)と同じく
+   flex-end + gapで右寄せに並べ、「キャンセル→適用」の順にする(dialog.jsのcancelBtn/okBtnの
+   並びと同じ視覚的な作法)。ボタン自体は既存のPane共通クラス(.btn.tiny)をそのまま使う。 */
+.cp-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* ===== 取扱説明書ウィンドウ(F1、Pane/HelpWindow.cs、src/help-entry.js) =====
+   新しい色トークンは導入せず、本体のMarkdown表示・設定ウィンドウのカテゴリ一覧
+   (.settings-nav系)で既に使っているトークン(--paper/--ink/--ink-sub/--accent等)だけを使う。 */
+.help-shell { position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.help-body { flex: 1; min-height: 0; display: flex; }
+
+/* サイドバーの目次。.settings-nav(設定ウィンドウのカテゴリ一覧)と全く同じ値に揃える。 */
+.help-sidebar { width: 220px; flex: none; border-right: 1px solid var(--rule); background: var(--paper); padding: 10px; display: flex; flex-direction: column; gap: 1px; overflow-y: auto; }
+.help-toc-item { display: block; width: 100%; border: none; background: transparent; color: var(--ink-sub); font: inherit; font-size: 12.5px; line-height: 1.5; text-align: left; padding: 6px 10px; border-radius: 8px; cursor: pointer; }
+.help-toc-item:hover { background: var(--surface); color: var(--ink); }
+.help-toc-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.help-toc-l2 { padding-left: 20px; }
+.help-toc-l3 { padding-left: 30px; font-size: 12px; }
+.help-toc-l4 { padding-left: 40px; font-size: 12px; }
+.help-toc-l5 { padding-left: 50px; font-size: 11.5px; }
+.help-toc-l6 { padding-left: 60px; font-size: 11.5px; }
+
+.help-content { flex: 1; min-width: 0; overflow-y: auto; }
+.help-article { max-width: 760px; margin: 0 auto; padding: 32px 40px 64px; color: var(--ink); font-family: var(--font-body); line-height: 1.8; font-size: 14.5px; }
+.help-article:focus { outline: none; }
+.help-load-error { color: var(--danger); }
+
+/* 見出し・段落等の本文装飾。Pane本体のMarkdown表示と揃えるため--font-heading(本文の
+   見出しフォント)・--accent(リンク色)等の既存トークンのみを使う。新しい色は導入しない。 */
+.help-article h1, .help-article h2, .help-article h3,
+.help-article h4, .help-article h5, .help-article h6 {
+  font-family: var(--font-heading, var(--font-body));
+  font-weight: 700;
+  color: var(--ink);
+  line-height: 1.4;
+  scroll-margin-top: 12px;
+}
+.help-article h1 { font-size: 1.7em; margin: 0 0 .6em; padding-bottom: .3em; border-bottom: 1px solid var(--rule); }
+.help-article h2 { font-size: 1.35em; margin: 1.6em 0 .5em; padding-bottom: .25em; border-bottom: 1px solid var(--rule); }
+.help-article h3 { font-size: 1.15em; margin: 1.4em 0 .4em; }
+.help-article h4 { font-size: 1.03em; margin: 1.2em 0 .3em; }
+.help-article h5, .help-article h6 { font-size: 1em; color: var(--ink-sub); margin: 1em 0 .3em; }
+.help-article h1:first-child, .help-article h2:first-child { margin-top: 0; }
+.help-article p { margin: 0 0 1em; }
+.help-article a { color: var(--accent); text-decoration: none; }
+.help-article a:hover { text-decoration: underline; }
+.help-article ul, .help-article ol { margin: 0 0 1em; padding-left: 1.6em; }
+.help-article li { margin: .25em 0; }
+.help-article li > ul, .help-article li > ol { margin: .25em 0 0; }
+.help-article blockquote { margin: 0 0 1em; padding: 2px 14px; border-left: 3px solid var(--line); color: var(--ink-sub); }
+.help-article code { font-family: var(--font-mono); font-size: .92em; background: var(--code-bg); border-radius: 4px; padding: .1em .35em; }
+.help-article pre { margin: 0 0 1em; padding: 12px 14px; background: var(--code-bg); border-radius: 8px; overflow-x: auto; }
+.help-article pre code { background: none; padding: 0; font-size: .88em; line-height: 1.6; }
+.help-article hr { border: none; border-top: 1px solid var(--rule); margin: 2em 0; }
+.help-article table { border-collapse: collapse; margin: 0 0 1em; font-size: .92em; }
+.help-article th, .help-article td { border: 1px solid var(--line); padding: 5px 12px; }
+.help-article th { background: var(--surface); font-weight: 700; }
+.help-article img { max-width: 100%; }
+.help-article mark { background: var(--accent-soft); color: var(--ink); border-radius: 2px; }
+
+/* Ctrl+F検索バー。既存の.search-panel(本体エディタのCtrl+F)と同じ見た目の作法に揃える。
+   本文の上に常設で被さるのではなく、開いている間だけ右上に浮かせる。 */
+.help-search-bar { position: absolute; top: 10px; right: 16px; z-index: 30; display: flex; align-items: center; gap: 6px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow-pop); padding: 6px 8px; color: var(--ink-sub); }
+.help-search-bar[hidden] { display: none; }
+.help-search-bar input { border: none; background: transparent; color: var(--ink); font: inherit; font-size: 12.5px; outline: none; width: 200px; }
+.help-search-count { font-size: 11px; color: var(--ink-sub); min-width: 42px; text-align: center; font-family: var(--font-mono); }
+.help-search-nav-btn { border: none; background: transparent; color: var(--ink-sub); font-size: 11px; cursor: pointer; padding: 4px 6px; border-radius: 6px; line-height: 1; }
+.help-search-nav-btn:hover { background: var(--accent-soft); color: var(--accent); }
+mark.help-search-hit { background: var(--accent-soft); color: var(--ink); border-radius: 2px; }
+mark.help-search-hit.current { background: var(--accent); color: var(--paper); }

@@ -1,0 +1,572 @@
+/* ===== テーマプリセット(仕様書 第2.10節 C-06) =====
+   style.css側で定義済みのCSS変数(--paper/--surface/--ink/--ink-sub/--ink-mute/
+   --line/--rule/--accent/--accent-hover/--accent-soft/--code-bg、および画面の各部を
+   個別に塗り分けるための--chrome-bg/--sidebar-bg/--titlebar-bg/--titlebar-fg)を
+   上書きするだけで、それ以外の新しい変数は増やさない。
+   --chrome-bg/--sidebar-bg/--titlebar-bg/--titlebar-fgは、指定しなければstyle.css側の
+   既定(それぞれ--paper/--surface、および「タイトルバーは本文の実描画色を送る」動作)へ
+   自動的に倒れるため、各プリセットは「他と違う色にしたい部位だけ」を書けばよい。
+
+   適用の仕組み: main.jsがapply-settings受信時にdocument.documentElement(=html)へ
+   data-light-theme="<id>" / data-dark-theme="<id>" を付与する(既定値は"default")。
+   style.css側の配色は
+     :root { --paper: ...; }                      (ライト既定値, 特異度 0-1-0)
+     html[data-theme="dark"] { --paper: ...; }     (ダーク既定値, 特異度 0-1-1)
+   という構成のため、ここでは
+     html[data-theme="light"][data-light-theme="sepia"] { ... }  (特異度 0-2-1)
+   のように data-theme と data-light-theme/data-dark-theme を同時に指定し、
+   両方より高い特異度でも上書きできるようにする。
+   このファイルはstyle.cssより後に読み込む(index.html参照)ため、
+   ソース順でも上書きが効く。
+
+   "default"(既定)は本ファイルに対応するルールを持たない
+   (data-light-theme="default" / data-dark-theme="default" が付いていても
+   ここでは何も上書きされない)。ただし既定の配色自体はstyle.css側の
+   :root / html[data-theme="dark"] ブロックが持っており、そちらで
+   --chrome-bg/--sidebar-bg/--titlebar-bgに独自の値を与えている
+   (本文・サイドバー・メニュー/タイトルバーの3階調は既定にも適用済み。
+   詳細な色の根拠はstyle.css側のコメント参照)。
+
+   部位ごとの色分け(ユーザー要望2): 当初はnightプリセット(旧typora-night)だけの
+   実例だったが、「他のプリセットも本文・サイドバー・メニューバー+タイトルバーで
+   色を変えてほしい」という要望を受け、night以外にもsepia/github/solarized-light/
+   nord/dracula/solarized-darkの6プリセット(本ファイル)、および既定(style.css側)
+   にも--chrome-bg/--titlebar-bgを追加し、全カラーモードで部位別の色分けを行った。 */
+
+/* ---- ライト用プリセット ---- */
+
+/* sepia: セピア調の紙色。長時間の読書を意識した暖色系。
+   --chrome-bg/--titlebar-bg: 「本文よりわずかに濃い紙色」(ユーザー要望2の参考値)を
+   採用。--surface(サイドバー、#FBF3E3)は本文より明るい"綴じ込みの用紙"、
+   --chrome-bg(メニュー・タイトルバー、#EAD9B5)は本文より濃い"表紙"の色、という
+   3階調の書き分けにした。
+   シンタックスハイライト(--code-*): sepiaに公式のシンタックス配色は無いため、
+   紙面の暖色(セピア)を邪魔しない範囲で色相を意図的に散らした独自案。
+   キーワード=赤褐(テラコッタ)、変数=青緑(紙の暖色に対する差し色)、関数=オリーブ金、
+   文字列=深緑、数値=琥珀(--accentと同系統で統一感)、型=プラム(紫)。
+   いずれも紙色(#F4ECD8)・コード背景(#ECE0C4)に対しコントラスト比4.5以上を
+   実測確認済み(演算子はvar(--ink)、コメントは既存の--ink-muteを流用)。 */
+html[data-theme="light"][data-light-theme="sepia"] {
+  --paper: #F4ECD8;
+  --surface: #FBF3E3;
+  --ink: #3B2F22;
+  --ink-sub: #7A6A55;
+  --ink-mute: #7A6A55;
+  --line: #E3D5B8;
+  --rule: #E3D5B8;
+  --accent: #A9762C;
+  --accent-hover: #8F5F1E;
+  --accent-soft: #EDE0C0;
+  --code-bg: #ECE0C4;
+  --chrome-bg: #EAD9B5;
+  --titlebar-bg: #EAD9B5;
+  /* 実バグ2の修正で追加。未定義のままだと本文の実描画色をJS側が読んで代用するが、
+     WebView2非表示中はCSSトランジションが実時間どおり進まず古い色が読めてしまう
+     ことがあった(詳細はstyle.css :root ブロックのコメント参照)。--inkをそのまま
+     使い(実測コントラスト比9.34:1)、この問題自体を起こさないようにする。 */
+  --titlebar-fg: var(--ink);
+  /* 実バグ3の修正: メニューホバー時の文字色。var(--accent)(#A9762C)を
+     var(--accent-soft)(#EDE0C0)の上の文字色にすると実測コントラスト比3.02:1しか
+     出ずWCAG AA(4.5)を割り込むため、var(--ink)へ補正する(実測9.92:1)。 */
+  --menu-hover-fg: var(--ink);
+  --code-kw: #8B3A2B;
+  --code-kw2: #8B3A2B;
+  --code-var: #3E6B6E;
+  --code-fn: #6B5B14;
+  --code-str: #2E6E4E;
+  --code-num: #8A5A00;
+  --code-cmt: #7A6A55;
+  --code-type: #5B4B8A;
+  --code-prop: #7A4A1E;
+  --code-op: var(--ink);
+  --code-regex: #A33B4E;
+  /* 依頼(ホバー強調色をテーマごとに個別実測): sepiaのvar(--accent)(#A9762C、琥珀色)を
+     そのまま使うと、本文中のリンク色・メニューのアクセントと同じ色になり「強調されて
+     いる線」が地の配色に紛れやすい(実測コントラスト比も3.36と9テーマ中もっとも低い)。
+     このテーマの--code-kw(キーワード色、#8B3A2B、深いテラコッタ)を転用する。
+     紙色(#F4ECD8)に対しコントラスト比6.51、通常線--rule(#E3D5B8、淡い黄褐色)に対して
+     色相・明度ともはっきり異なる(コントラスト比5.29)ため、強調中の線だけが際立って見える。 */
+  --fold-guide-hover: #8B3A2B;
+}
+
+/* github: GitHub風。白背景+青系アクセント。
+   --chrome-bg/--titlebar-bg: 【方針転換】以前はGitHub本体のUI階層に倣いサイドバーと
+   同じcanvas.subtle相当(#F6F8FA)を適用していたが、「メニューバー・タイトルバーは
+   本文・サイドバーのどちらよりも濃い(暗い)色にする」という全テーマ共通の原則
+   (ユーザーがTypora実機と比較して明示した要望、詳細はstyle.css側の該当コメント
+   参照)に合わせ、サイドバー(#F6F8FA)よりさらに一段濃いグレーにする。
+   GitHubのPrimer配色にサイドバー(canvas.subtle)よりさらに沈んだ中立グレー
+   (canvas.inset相当)があるため、その近似値(#EAEEF2)を採用した
+   (Primerの正確な配列は取得できなかったため近似値である旨を明記する)。
+   本文(白)→サイドバー(#F6F8FA)→メニュー・タイトルバー(#EAEEF2、最も濃い)の
+   3階調になる。
+   シンタックスハイライト(--code-*): 「性格に合わせて決めてよい」対象だが、他の
+   部位(--accent等)を実機のGitHub Primer配色に忠実に合わせている以上、コードの
+   配色だけ架空の値にするとかえって嘘っぽくなる。そこでGitHub本体が実際に使っている
+   シンタックス配色(highlight.js公式のgithub.cssテーマの実測値)をそのまま採用した。
+   キーワード=赤、文字列=紺、関数/型=紫、変数/プロパティ=青。
+   ただし実測したgithub.cssは数値(.hljs-number)にも変数と同じ青(#005CC5)を
+   割り当てており、そのままだと「6種のトークンがそれぞれ違う色に見える」という
+   要件を満たせない。GitHubの実UIで実際に使われる緑(diffの追加行や成功表示に
+   使うUI色 #22863A)を数値だけ転用し、区別できるようにした。 */
+html[data-theme="light"][data-light-theme="github"] {
+  --paper: #FFFFFF;
+  --surface: #F6F8FA;
+  --ink: #1F2328;
+  --ink-sub: #59636E;
+  --ink-mute: #59636E;
+  --line: #D0D7DE;
+  --rule: #D0D7DE;
+  --accent: #0969DA;
+  --accent-hover: #0550AE;
+  --accent-soft: #DDF4FF;
+  --code-bg: #F6F8FA;
+  --chrome-bg: #EAEEF2;
+  --titlebar-bg: #EAEEF2;
+  /* 実バグ2の修正で追加(根拠はsepiaブロックのコメント参照)。実測コントラスト比13.55:1。 */
+  --titlebar-fg: var(--ink);
+  /* 実バグ3の修正。var(--accent)(#0969DA)とvar(--accent-soft)(#DDF4FF)の実測
+     コントラスト比は4.56:1でAA基準(4.5)を満たすため、var(--accent)のまま使う。 */
+  --menu-hover-fg: var(--accent);
+  --code-kw: #D73A49;
+  --code-kw2: #D73A49;
+  --code-var: #005CC5;
+  --code-fn: #6F42C1;
+  --code-str: #032F62;
+  --code-num: #22863A;
+  --code-cmt: #6A737D;
+  --code-type: #6F42C1;
+  --code-prop: #005CC5;
+  --code-op: var(--ink);
+  --code-regex: #B31D28;
+  /* 依頼(ホバー強調色をテーマごとに個別実測): githubのvar(--accent)(#0969DA)は
+     GitHub本体のリンク色そのものであり、本文中にリンクがあると同じ色の線が2種類の
+     意味(リンク/強調中のガイド線)を持つ紛らわしさが生じうる。GitHub Primerの実際の
+     UI色である「マージ済みPR」等に使うdone.emphasis相当の紫(#6639BA)を転用する。
+     白地(#FFFFFF)に対しコントラスト比7.34、通常線--rule(#D0D7DE)に対しても
+     はっきり異なる(コントラスト比5.06)ため、リンクと混同せずに強調線だと分かる。 */
+  --fold-guide-hover: #6639BA;
+}
+
+/* solarized-light: Solarized(Ethan Schoonover配色)のライト側。
+   --chrome-bg/--titlebar-bg: 【方針転換】以前はSolarized公式パレットにbase3(本文)/
+   base2(UI)の2階調しか無いため、サイドバーと同じbase2(#EEE8D5)をそのまま
+   メニュー・タイトルバーにも適用していた。しかし「メニューバー・タイトルバーは
+   本文・サイドバーのどちらよりも濃い(暗い)色にする」という全テーマ共通の原則
+   (詳細はstyle.css側の該当コメント参照)に合わせ、サイドバー(base2)よりさらに
+   濃い値が要る。Solarizedの公式パレットにbase2より暗く、かつbase01(本来は
+   文字色用でUI背景には暗すぎる)より明るい中間段は存在しないため、base2を黒へ
+   12%ほど寄せた独自値(#D1CCBB)を採用した(公式に該当する段が無いための
+   独自算出であることを明記する)。
+   シンタックスハイライト(--code-*): 役割の割り当ては公式のvim-colors-solarized
+   ソース(altercation/vim-colors-solarized)のhi宣言に忠実に従う
+   (Statement=green、Type=yellow、Constant(String/Number/Bool共通)=cyan、
+   Identifier(変数・関数とも)=blue、Comment=base01)。
+   ただしSolarizedのアクセント色は本来「base3(#FDF6E3)の上で最小限のコントラストで
+   浮かせる」設計思想のため、素の値だと本文文字色として使うには実測でコントラスト比
+   3程度しか無くAA基準(4.5)を割り込む(「本文の可読性が最優先」という指摘に反する)。
+   そのためライト側の--code-*だけ、色相・Solarizedとしての見た目はそのままに
+   彩度・明度方向へ25%ほど黒を混ぜて暗くし、コントラスト比4.2〜5.5まで引き上げた
+   (ダーク側は元々コントラストが足りているため無調整、公式値そのまま)。
+   なお関数名(--code-fn)だけは公式のIdentifier=blueをそのまま使うと変数(--code-var)と
+   同色になり、「6種のトークンがそれぞれ違う色に見える」という要件を満たせない。
+   vim-colors-solarizedはFunction専用のハイライトグループを持たない(Identifierに
+   委譲している)ため、公式8アクセント色のうち唯一どの役割にも割り当てられていない
+   violet(#6C71C4)を関数名に転用し、既定の25%黒寄せを適用した(#515593)。 */
+html[data-theme="light"][data-light-theme="solarized-light"] {
+  --paper: #FDF6E3;
+  --surface: #EEE8D5;
+  --ink: #073642;
+  --ink-sub: #657B83;
+  --ink-mute: #657B83;
+  --line: #D3CBB7;
+  --rule: #D3CBB7;
+  --accent: #268BD2;
+  --accent-hover: #1E6FA8;
+  --accent-soft: #E3EFFA;
+  --code-bg: #EEE8D5;
+  --chrome-bg: #D1CCBB;
+  --titlebar-bg: #D1CCBB;
+  /* 実バグ2の修正で追加(根拠はsepiaブロックのコメント参照)。実測コントラスト比8.09:1。 */
+  --titlebar-fg: var(--ink);
+  /* 実バグ3の修正: var(--accent)(#268BD2)とvar(--accent-soft)(#E3EFFA)の実測
+     コントラスト比は3.15:1でAA基準を割り込むため、var(--ink)へ補正する(実測11.14:1)。 */
+  --menu-hover-fg: var(--ink);
+  --code-kw: #647300;
+  --code-kw2: #647300;
+  --code-var: #1D689E;
+  --code-fn: #515593;
+  --code-str: #207972;
+  --code-num: #207972;
+  --code-cmt: #657B83;
+  --code-type: #886700;
+  --code-prop: #1D689E;
+  --code-op: var(--ink);
+  --code-regex: #A52623;
+  /* 依頼(ホバー強調色をテーマごとに個別実測): solarized-lightのvar(--accent)(#268BD2、
+     Solarizedのblue)は実測コントラスト比3.41と9テーマ中もっとも低い部類で、本文の
+     リンク色とも同じ色になり紛らわしい。同じ画面内の--code-regex(赤、#A52623)を
+     転用する(公式vim-colors-solarizedのアクセント8色のうち、blue以外で最も
+     目立つ暖色)。紙色(#FDF6E3)に対しコントラスト比6.71、通常線--rule(#D3CBB7、
+     淡い黄褐色)に対してもはっきり異なる(コントラスト比4.48)。 */
+  --fold-guide-hover: #A52623;
+}
+
+/* ---- ダーク用プリセット ---- */
+
+/* nord: Nord配色。
+   --chrome-bg/--titlebar-bg: 【方針転換】以前はNord公式パレットのnord0(本文)/
+   nord1(サイドバー)/nord2(メニュー・タイトルバー)という3段階(明るくなる方向)を
+   採用していた。しかし「メニューバー・タイトルバーは本文・サイドバーのどちらよりも
+   濃い(暗い)色にする」という全テーマ共通の原則(詳細はstyle.css側の該当コメント
+   参照)に合わせて方向を反転する。Nord公式パレットにnord0(本文)より暗い色は
+   無いため、下の--code-bgと同じ考え方でnord0を黒へ寄せた独自値を使うが、
+   --code-bgと完全に同じ値にすると役割が紛れるため、--code-bg(30%黒寄せ)より
+   ゆるい22%黒寄せの値(#242932)を採用した。
+   --code-bg: 旧値#333A47は本文(nord0 #2E3440)よりわずかに明るく、「コードブロックが
+   本文よりはっきり暗い」という今回の要望に反していた。Nord公式パレットにnord0より
+   暗い色は無いため、nord0を黒へ30%寄せた値(#20242D)を採用する(色相はNordの
+   寒色グレーのまま、明度だけ落とす)。
+   シンタックスハイライト(--code-*): Nord公式ドキュメント(nordtheme.com/docs/
+   colors-and-palettes)の「soft recommendations」に忠実に従う。
+   キーワード・演算子/記号=nord9(#81A1C1、frost)、関数=nord8(#88C0D0)、
+   文字列=nord14(#A3BE8C、aurora green)、数値=nord15(#B48EAD、aurora purple)、
+   型/クラス=nord7(#8FBCBB)、変数/プロパティ=nord4(#D8DEE9)、コメント=nord3
+   (#4C566A、公式ドキュメントが「ダークアンビアンスで使用」と明記する値)。 */
+html[data-theme="dark"][data-dark-theme="nord"] {
+  --paper: #2E3440;
+  --surface: #3B4252;
+  --ink: #ECEFF4;
+  --ink-sub: #D8DEE9;
+  --ink-mute: #9AA5B1;
+  --line: #434C5E;
+  --rule: #434C5E;
+  --accent: #88C0D0;
+  --accent-hover: #8FBCBB;
+  --accent-soft: #3B4A52;
+  --code-bg: #20242D;
+  --chrome-bg: #242932;
+  --titlebar-bg: #242932;
+  /* 実バグ2の修正で追加(根拠はsepiaブロックのコメント参照)。実測コントラスト比12.67:1。 */
+  --titlebar-fg: var(--ink);
+  /* 実バグ3の修正。var(--accent)(#88C0D0)とvar(--accent-soft)(#3B4A52)の実測
+     コントラスト比は4.59:1でAA基準を満たすため、var(--accent)のまま使う。 */
+  --menu-hover-fg: var(--accent);
+  --code-kw: #81A1C1;
+  --code-kw2: #81A1C1;
+  --code-var: #D8DEE9;
+  --code-fn: #88C0D0;
+  --code-str: #A3BE8C;
+  --code-num: #B48EAD;
+  --code-cmt: #4C566A;
+  --code-type: #8FBCBB;
+  --code-prop: #D8DEE9;
+  --code-op: #81A1C1;
+  --code-regex: #CB7D85;
+  /* 依頼(ホバー強調色をテーマごとに個別実測): nordのvar(--accent)(#88C0D0、nord8の
+     frost cyan)は--code-fnと同色で、コード中の関数名と紛れる懸念がある。Nord公式
+     パレット(nordtheme.com)のnord13(aurora yellow、#EBCB8B)を転用する。寒色系で
+     まとめられたnordの中で唯一の暖色差し色となり視認性が高い。本文(#2E3440)に対し
+     コントラスト比8.00、通常線--rule(#434C5E)に対してもはっきり異なる
+     (コントラスト比5.52)。 */
+  --fold-guide-hover: #EBCB8B;
+}
+
+/* dracula: Dracula配色。
+   --sidebar-bg: 公式パレットにサイドバー専用の値は無いが、実機で広く使われている
+   VSCode版Dracula拡張の慣習(サイドバーを本文より暗い#21222Cにする)に倣い、
+   --surface(#343746、フローティングUI全般で使う値。変更なし)とは別に
+   --sidebar-bgだけ上書きした。
+   --chrome-bg/--titlebar-bg: 【方針転換】以前は既存の--surface(#343746、本文より
+   明るい"Current Line"寄りの色)を流用し、サイドバー(#21222C、最も暗い) < 本文
+   (#282A36) < メニュー/タイトルバー(#343746、最も明るい)という3階調にしていた。
+   しかし「メニューバー・タイトルバーは本文・サイドバーのどちらよりも濃い(暗い)
+   色にする」という全テーマ共通の原則(詳細はstyle.css側の該当コメント参照)に
+   合わせて方向を反転する。Dracula公式パレットにサイドバー(#21222C、VSCode拡張の
+   慣習値で公式ではない)よりさらに暗い定義は無いため、本文(#282A36)を黒へ35%
+   寄せた独自値(#1B1C24、サイドバーの#21222Cよりも暗い)を採用した。
+   --code-bg: 旧値#2F3140は本文(#282A36)よりわずかに明るく、「コードブロックが本文より
+   はっきり暗い」という今回の要望に反していた。Dracula公式パレットに本文より暗い色の
+   定義は無いため、本文を黒へ25%寄せた値(#1E2029)を採用する。
+   シンタックスハイライト(--code-*): Dracula公式Specification(spec.draculatheme.com)の
+   対応表に忠実に従う。キーワード・演算子/記号=Pink(#FF79C6)、関数名=Green
+   (#50FA7B)、文字列=Yellow(#F1FA8C)、数値/定数=Purple(#BD93F9)、クラス/型=Cyan
+   (#8BE9FD)、変数=Foreground(#F8F8F2、--inkと同値=無色化)、コメント=Comment
+   (#6272A4)。プロパティ名/JSONキーは公式表に無い(汎用言語仕様のため)ため、
+   最も近い役割であるCyan(クラス/組込み識別子の色)を独自に転用した。 */
+html[data-theme="dark"][data-dark-theme="dracula"] {
+  --paper: #282A36;
+  --surface: #343746;
+  --ink: #F8F8F2;
+  --ink-sub: #B4B9D6;
+  --ink-mute: #8892B0;
+  --line: #44475A;
+  --rule: #44475A;
+  --accent: #BD93F9;
+  --accent-hover: #FF79C6;
+  --accent-soft: #3B3D52;
+  --code-bg: #1E2029;
+  --sidebar-bg: #21222C;
+  --chrome-bg: #1B1C24;
+  --titlebar-bg: #1B1C24;
+  /* 実バグ2の修正で追加(根拠はsepiaブロックのコメント参照)。実測コントラスト比15.91:1。 */
+  --titlebar-fg: var(--ink);
+  /* 実バグ3の修正: var(--accent)(#BD93F9)とvar(--accent-soft)(#3B3D52)の実測
+     コントラスト比は4.41:1でAA基準(4.5)にわずかに届かないため、var(--ink)へ
+     補正する(実測9.97:1)。 */
+  --menu-hover-fg: var(--ink);
+  --code-kw: #FF79C6;
+  --code-kw2: #FF79C6;
+  --code-var: #F8F8F2;
+  --code-fn: #50FA7B;
+  --code-str: #F1FA8C;
+  --code-num: #BD93F9;
+  --code-cmt: #6272A4;
+  --code-type: #8BE9FD;
+  --code-prop: #8BE9FD;
+  --code-op: #FF79C6;
+  --code-regex: #FF5555;
+  /* 依頼(ホバー強調色をテーマごとに個別実測): draculaのvar(--accent)(#BD93F9、
+     Purple)は--code-num(数値・定数)と同色で紛れる懸念がある。Dracula公式
+     Specification(spec.draculatheme.com)のGreen(#50FA7B)を転用する。Dracula
+     配色の中でもっとも彩度・輝度が高く、9テーマ中最大のコントラスト比が出る
+     (本文#282A36に対し10.38、通常線--rule#44475Aに対しても6.67とはっきり異なる)。 */
+  --fold-guide-hover: #50FA7B;
+}
+
+/* solarized-dark: Solarizedのダーク側。
+   --chrome-bg/--titlebar-bg: 【方針転換】以前はSolarized公式パレットにbase03
+   (本文)/base02(UI)の2階調しか無いため、サイドバーと同じbase02(#073642)を
+   そのままメニュー・タイトルバーにも適用していた。しかし「メニューバー・
+   タイトルバーは本文・サイドバーのどちらよりも濃い(暗い)色にする」という
+   全テーマ共通の原則(詳細はstyle.css側の該当コメント参照)に合わせ、
+   サイドバー(base02)よりさらに濃い値が要る。本文(base03)より暗い公式の段も
+   無いため、下の--code-bgで使ったbase03の25%黒寄せ(#001F2A)よりもさらに
+   ゆるい15%黒寄せの独自値(#00252E)を採用した(--code-bgとの役割の混同を
+   避けるため、あえて同値にしていない)。
+   --code-bg: 旧値はサイドバー/chrome-bgと同じbase02(#073642)を流用していたが、
+   本文(base03 #002B36)より明るく、「コードブロックが本文よりはっきり暗い」という
+   今回の要望に反していた。Solarized公式パレットにbase03より暗い色は無いため、
+   base03を黒へ25%寄せた値(#001F2A)を採用する(サイドバー・chrome-bgは
+   base02のまま変更しない)。
+   シンタックスハイライト(--code-*): solarized-light側と同じ根拠(公式
+   vim-colors-solarizedのhi宣言)で役割を割り当てる。ダーク側は元の本文
+   (base03 #002B36)に対して実測コントラスト比4.0以上が出ているため、ライト側とは
+   異なり暗さの補正は不要で公式のアクセント値をそのまま使う。
+   関数名(--code-fn)はsolarized-light側と同じ理由(公式にFunction専用の色が無く、
+   Identifierと同色だと変数と区別できない)でviolet(#6C71C4)を転用するが、暗い
+   背景では素のvioletだとコントラスト比が3.4程度まで下がるため白へ20%寄せて
+   明るくした(#898DD0)。 */
+html[data-theme="dark"][data-dark-theme="solarized-dark"] {
+  --paper: #002B36;
+  --surface: #073642;
+  --ink: #93A1A1;
+  --ink-sub: #839496;
+  --ink-mute: #586E75;
+  --line: #0A3C4A;
+  --rule: #0A3C4A;
+  --accent: #268BD2;
+  --accent-hover: #4CA6E0;
+  --accent-soft: #0E4B5E;
+  --code-bg: #001F2A;
+  --chrome-bg: #00252E;
+  --titlebar-bg: #00252E;
+  /* 実バグ2の修正で追加(根拠はsepiaブロックのコメント参照)。実測コントラスト比6.02:1
+     (9テーマ中もっとも低いが、AA基準の4.5は満たす)。 */
+  --titlebar-fg: var(--ink);
+  /* 実バグ3の修正: var(--accent)(#268BD2)とvar(--accent-soft)(#0E4B5E)の実測
+     コントラスト比は2.61:1、var(--ink)(#93A1A1)でも3.59:1までしか出ずどちらも
+     AA基準(4.5)を割り込む(9テーマ中もっとも厳しいケース)。白(#FFFFFF)なら
+     9.60:1出るため、これで補正する。 */
+  --menu-hover-fg: #FFFFFF;
+  --code-kw: #859900;
+  --code-kw2: #859900;
+  --code-var: #268BD2;
+  --code-fn: #898DD0;
+  --code-str: #2AA198;
+  --code-num: #2AA198;
+  --code-cmt: #586E75;
+  --code-type: #B58900;
+  --code-prop: #268BD2;
+  --code-op: var(--ink);
+  --code-regex: #E56563;
+  /* 依頼(ホバー強調色をテーマごとに個別実測): solarized-darkのvar(--accent)
+     (#268BD2、Solarized blue)は本文のリンク色と同じ色になるうえ、実測コントラスト比
+     4.08と9テーマ中で低い部類。公式パレットのmagenta(#D33682)を試したが本文
+     (#002B36)に対し3.30しか出ずAA非text基準の3.0をわずかに超える程度で不十分
+     だったため、色相はそのままに白を寄せて明るくした値(#F092C0、solarized-light側の
+     暗さ補正と対になる「ダーク側は明るさ補正」)を採用する。本文に対しコントラスト比
+     6.85、通常線--rule(#0A3C4A)に対してもはっきり異なる(コントラスト比5.45)。 */
+  --fold-guide-hover: #F092C0;
+}
+
+/* night: Typoraの「Night」テーマ移植(ユーザー要望、id/ラベルは実機フィードバックで
+   typora-night → night に変更。旧idからの移行はPane/AppSettings.cs側で読み替える)。
+   本文・サイドバー・メニューバー/ステータスバー・タイトルバーをそれぞれ別の色にする、
+   という要望の実例として最初に用意したプリセット(このプリセットのために
+   --chrome-bg/--sidebar-bg/--titlebar-bg/--titlebar-fgを導入した)。
+
+   【実機フィードバックによる修正・1回目】Typora本体と並べて比較したところ、メニュー
+   バー・タイトルバーの色が異なると指摘された。Typora公式のnight.cssを確認したところ、
+   以下の2点に移植の誤りがあった。
+     1. Typora本体は#top-titlebarに専用の背景色指定を持たず、--bg-color(本文と
+        同じ色)を継承する。つまり実際のTyporaは「タイトルバー・メニューバーは
+        本文と同じ色、サイドバーだけが別色」という2階調。
+        旧実装はメニューバー・ステータスバー・タイトルバーをサイドバー側の色
+        (#2E3033)に揃えてしまっていた(誤り)。
+     2. --primary-color(アクセント色)は正しくは#6dc1e7。旧実装は#a5b4cbを
+        使っていた(誤り)。
+   この2点を修正し、いったんTypora公式night.cssの値に忠実にした(メニュー/
+   タイトルバーをvar(--paper)にして本文と同色にした)。
+
+   【実機フィードバックによる修正・2回目、Typora準拠から再度方針転換】上記の
+   修正で「本文・タイトルバー・メニューバーが同色、サイドバーだけ別色」という
+   Typora準拠の2階調にしたところ、今度は「タイトルバーとメニューバーの色が
+   戻っています(メリハリが失われた)」という指摘を受けた。ユーザーの一連の要望を
+   時系列で並べると:
+     (1) 「メニューバー・タイトルバーの色がTyporaと違う」→ Typora準拠(2階調)に修正
+     (2) 「他のカラーモードも本文・サイドバー・メニュー+タイトルバーで色を変えて
+          ほしい。メリハリが付いていて良いと思うので」→ 他の7プリセット・既定を
+          3階調化(このコメント末尾の他プリセットの説明を参照)
+     (3) 「タイトルバーとメニューバーの色が戻っている」→ 今回の修正
+   (1)のときはTypora準拠を優先したが、(2)(3)を踏まえると、ユーザーが一貫して
+   優先しているのは「Typora本体との完全一致」ではなく「3つの領域が見てすぐ
+   区別できるメリハリ」だと判断できる。そのため、nightだけ2階調(本文+タイトルバー
+   =サイドバー)に据え置くのをやめ、他の8テーマ(既定・sepia・github・
+   solarized-light・nord・dracula・solarized-dark)と同じ3階調(本文 <
+   サイドバー(暗) / メニュー・タイトルバー(明) の3色)に変更する。
+   【今後この判断を見た人へ】「Typora本体の#top-titlebarに専用の背景指定が無い」
+   という上記1回目修正時の調査結果それ自体は事実であり、誤りではない。しかし
+   「Typora本体に忠実であること」よりも「ユーザーが求める3階調のメリハリ」を
+   優先するとあえて決めた結果、ここだけTypora本体とは異なる配色になっている。
+   Typora本体と見比べて「タイトルバーの色が違う」と気づいても、それは意図した
+   差分なので絶対にTypora準拠へ戻さないこと(このコメントが無いと、また
+   同じ調査から--chrome-bg: var(--paper)へ戻してしまいかねないため明記する)。
+   具体的な色は、本文(#363B40)・サイドバー(#2E3033、いずれもTypora公式値のため
+   変更しない)に対し、当時の既定ダーク(--paper < --surface < --chrome-bgの順で
+   明るくなる並び)にあわせた「本文よりワントーン明るい第3の色」#3E444Aを
+   新設していた。
+
+   【実機フィードバックによる修正・3回目、明暗の方向が全体的に逆だった】上記
+   2回目の修正(#3E444A、本文より明るい)を適用した直後、今度はユーザーから
+   Typora実機のダーク画面が届き、「Typoraのタイトルバー+メニューバーはサイドバー
+   より濃い(暗い)。Paneも同じにしたい」という明確な指摘を受けた。2回目の修正は
+   「本文・サイドバーと違う色にする」という点は正しく押さえていたが、明暗の
+   方向を逆に判断していた(本文より明るくしていたが、Typoraは逆に暗くしている)。
+   これを受けて、Pane全体の原則を次のとおり確定する(詳細・根拠はstyle.css側の
+   該当コメント参照): メニューバー・タイトルバーは、本文・サイドバーの
+   どちらよりも濃い(暗い)色にする。night単体の話ではなく全9テーマに適用する
+   原則としたため、既定ダーク・nord・dracula・solarized-dark・solarized-light・
+   githubも同じ方針でこのファイル内の該当箇所を修正している。
+   night自体の値は、本文(#363B40)・サイドバー(#2E3033、どちらもTypora公式値
+   なので変更しない)のどちらよりも濃い#26282B(コーディネーター提案値をそのまま
+   採用)にした。サイドバー(#2E3033)よりもさらに一段暗く、メニューバーの文字色
+   --ink(#b8bfc6)とのコントラスト比は約8.0で、本文(#363B40)に対する6.1より
+   むしろ高く、文字は問題なく読める。
+   【今後この判断を見た人へ】このコメントには方向違いの修正(2回目)の記録も
+   あえて残してある。「本文より明るい色にする」という2回目の判断は、実機との
+   比較で誤りと判明したものなので、絶対に#3E444A(またはそれに類する「本文より
+   明るい」値)へ戻さないこと。
+
+   色の対応づけ(Typora公式night.cssより):
+     --paper                   … --bg-color(#363B40)。
+     --ink                     … --text-color(#b8bfc6)。
+     --surface / --sidebar-bg  … --side-bar-bg-color(#2E3033)。Typora側に
+                                  「フローティングUI(ドロップダウン等)専用」の
+                                  変数が別途無いため、サイドバーと同じ色として扱う
+                                  (以前からの扱いを踏襲)。
+     --chrome-bg / --titlebar-bg
+                                … 【3回目の修正で確定】Typora本体の#top-titlebarに
+                                  忠実にするならvar(--paper)(本文と同色)だが、上記
+                                  「実機フィードバックによる修正・2回目/3回目」の
+                                  経緯によりあえてTypora非準拠の第3の色#26282Bを
+                                  採用した(詳細な根拠は同セクション参照。本文・
+                                  サイドバーのどちらよりも濃い(暗い)色)。
+     --accent                   … --primary-color(#6dc1e7)。
+     --accent-hover              … Typora側にprimary-colorの2色目(ホバー用)が
+                                  無いため、他プリセットの傾向に倣い独自に決めた値。
+                                  accent(#6dc1e7)を白へ約15%寄せた明るいバリアント
+                                  (#83CAEB)。検討したTypora側の--search-select-
+                                  bg-color(#428bca)は、ボタン押下時に文字色として
+                                  使われる--surface(#2E3033)との組み合わせで
+                                  コントラスト比が不足気味だったため不採用にし、
+                                  代わりにこの値(同条件でコントラスト比約7.3:1)を
+                                  採用した。
+     --accent-soft               … Typora側の--item-hover-bg-color(#70717d)は、
+                                  hover時に文字色となる--accent(#6dc1e7)との
+                                  組み合わせでコントラスト比が約2.4:1しか出ず
+                                  アクセシビリティ要件(4.5以上)を満たせないため
+                                  不採用にした。代わりに他プリセット(nord/dracula等)
+                                  と同じ手法—accentを本文色(--paper)へ約10%だけ
+                                  混ぜる—で算出した値(#3C4851、同条件でコントラスト
+                                  比約4.7:1)を採用した。
+     --line/--rule               … --window-border(1px solid #555)。
+     --ink-sub                   … --meta-content-color(#838A92、フロントマター等の
+                                  メタ情報色)。今回の実機フィードバックの指摘対象外
+                                  のため、以前からの値を据え置いた。
+     --ink-mute                  … --md-char-color(#6A7280、#や*等のMarkdown記号の
+                                  色)。同上、据え置いた。
+     --code-bg                   … コードブロック背景。Typora Night側に指定が無いため
+                                  据え置いてきた値だったが(以前は本文よりわずかに
+                                  明るいグレー #3B4247)、「MDのコードブロックは黒系が
+                                  普通」「ダークは本文よりはっきり暗く」という今回の
+                                  指摘を受けて見直す。Typoraに正式な値が無い以上、
+                                  他のダークプリセット(nord/dracula/solarized-dark)と
+                                  同じ手法—本文(--paper)を黒へ25%寄せる—で揃え、
+                                  本文よりはっきり暗いニュートラルなグレー(#292C30)に
+                                  変更した。
+     --code-*(シンタックス配色)     … Typora Night側に指定が無いため独自案。
+                                  キーワードはこのテーマの--accentをそのまま流用
+                                  (nord/draculaが自テーマのアクセントを一部の役割に
+                                  再利用しているのに倣った)。他の役割は「霧がかった
+                                  寒色グレーの中に暖色を一色差す」方向で選定した:
+                                  関数=金(#D7BA7D)、文字列=テラコッタ(#DE9C72、
+                                  この2つだけ暖色にして視線を誘導する)、変数=鋼青
+                                  (#9FB6C7)、数値=セージ緑(#9FBF8F)、型=薄い水色
+                                  (#7FB4CA)、プロパティ=スレート青(#8FA8C4)。
+                                  いずれも本文(#363B40)・コード背景(#292C30)に対し
+                                  実測コントラスト比4.6以上を確認済み。 */
+html[data-theme="dark"][data-dark-theme="night"] {
+  --paper: #363B40;
+  --surface: #2E3033;
+  --sidebar-bg: #2E3033;
+  --chrome-bg: #26282B;
+  --titlebar-bg: #26282B;
+  --ink: #b8bfc6;
+  /* 実バグ2の修正で追加。実機ログで実際に不具合が再現したのがこのnightテーマだった
+     (背景#26282Bは正しく送られたのに、文字色だけ一つ前のライトテーマの色#1F2428の
+     まま送られていた)。根拠・機序の詳細はstyle.css :rootブロックのコメント参照。
+     --inkをそのまま使う(実測コントラスト比7.96:1)。 */
+  --titlebar-fg: var(--ink);
+  --ink-sub: #838A92;
+  --ink-mute: #6A7280;
+  --line: #555555;
+  --rule: #555555;
+  --accent: #6dc1e7;
+  --accent-hover: #83CAEB;
+  --accent-soft: #3C4851;
+  /* 実バグ3の修正。var(--accent)とvar(--accent-soft)の実測コントラスト比は4.66:1で
+     AA基準を満たすため、var(--accent)のまま使う(実機報告の「水色」はこの色自体では
+     なく、ネイティブメニュー側がテーマを無視して既定色を使っていたことが原因。
+     詳細はPane/NativeMenu.cs参照)。 */
+  --menu-hover-fg: var(--accent);
+  --code-bg: #292C30;
+  --code-kw: #6dc1e7;
+  --code-kw2: #6dc1e7;
+  --code-var: #9FB6C7;
+  --code-fn: #D7BA7D;
+  --code-str: #DE9C72;
+  --code-num: #9FBF8F;
+  --code-cmt: #6A7280;
+  --code-type: #7FB4CA;
+  --code-prop: #8FA8C4;
+  --code-op: var(--ink);
+  --code-regex: #DF9090;
+  /* 依頼(ホバー強調色をテーマごとに個別実測): nightのvar(--accent)(#6dc1e7)は
+     --code-kw/--code-kw2(キーワード色)と同色で紛れる懸念がある。このテーマの
+     設計方針「霧がかった寒色グレーの中に暖色を一色差す」(上のコメント参照)に
+     沿って、--code-fn(金、#D7BA7D)をさらに白へ寄せて明るくした値(#E4CC9A)を
+     採用する。本文(#363B40)に対しコントラスト比7.22、通常線--rule(#555555、
+     中間グレー)に対してもはっきり異なる(コントラスト比4.76)。 */
+  --fold-guide-hover: #E4CC9A;
+}
