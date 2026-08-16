@@ -39,10 +39,15 @@ internal static class ImageInsertService
     /// <summary>
     /// ローカル画像1件を挿入する(オンライン画像=http(s)は<see cref="InsertOnlineImage"/>を使う)。
     /// </summary>
-    /// <param name="sourcePath">実ファイルが既にディスク上にある場合の絶対パス
-    /// (メニューの「画像を挿入」でOpenFileDialogから選んだ場合のみ非null)。</param>
-    /// <param name="bytes">クリップボード貼り付け・ドラッグ&amp;ドロップ由来のバイト列
-    /// (WebView2の標準DOM File APIでは実パスが取れないため、この経路では常にこちらになる)。</param>
+    /// <param name="sourcePath">実ファイルが既にディスク上にある場合の絶対パス。
+    /// メニューの「画像を挿入」(OpenFileDialog)のほか、画像のドラッグ&amp;ドロップでも非nullになる
+    /// (MainForm.HandleOpenDroppedFileWithPath→OpenDroppedPathAsync→InsertLocalImageAndNotifyの経路。
+    /// WebView2のpostMessageWithAdditionalObjects+CoreWebView2File.Pathで実パスを取得できるよう
+    /// 修正済み)。</param>
+    /// <param name="bytes">実パスが得られない場合のバイト列。クリップボードから貼り付けた画像
+    /// (ビットマップ)はそもそもディスク上にファイルが存在しないため、常にこちらになる。
+    /// D&amp;Dも、postMessageWithAdditionalObjectsが使えない古いランタイムでは従来どおり
+    /// バイト列経由のフォールバックへ落ちる。</param>
     /// <param name="suggestedFileName">コピー先でのファイル名の候補(拡張子込み)。</param>
     internal static InsertResult InsertLocalImage(
         string? sourcePath,

@@ -370,7 +370,25 @@ internal sealed class SettingsWindow : Form
         // 大原則1)。このウィンドウでは入力欄用の最小メニュー(第5節)だけを"open-context-menu"
         // 経由で表示する(MainFormと同じ受け口。下のOnWebMessageReceived参照)。
         _webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
+        // ブラウザ標準のスクリプトダイアログ(alert/confirm/prompt/beforeunload)を出さない。
+        // Paneのデザインと無関係な標準ダイアログが出るのを防ぐ(MainFormと同じ理由)。
+        _webView.CoreWebView2.Settings.AreDefaultScriptDialogsEnabled = false;
+        // タッチ/プレシジョンタッチパッドの2本指ピンチズームを無効化する。IsZoomControlEnabled=false
+        // だけでは塞がらず(公式に「has no effect on the existing browser zoom properties」と明記)、
+        // 設定画面がクリップされてスクロールバーでも到達できない領域が生まれるため。
+        _webView.CoreWebView2.Settings.IsPinchZoomEnabled = false;
+        // リンクにマウスを乗せたときのChromium標準のURLチップ(左下)を出さない。
+        _webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
+        // Chromium標準のオートフィル候補を出さない。設定画面は入力欄が多く、Paneのデザインと
+        // 無関係な候補ポップアップが頻繁に出るうえ、入力内容をブラウザプロファイルへ保存しない。
+        _webView.CoreWebView2.Settings.IsGeneralAutofillEnabled = false;
         _webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
+        // 外部リンクをPane内のポップアップで開かせず、OSの既定ブラウザへ委譲する
+        // (処理の中身と判断の理由は3ウィンドウ共通のExternalLinkServiceを参照)。
+        // この画面にリンク(バージョン情報等)が増えたとき、あるいは中クリック・Ctrl+クリックの
+        // ような JS を経由しない経路でも、Pane内にポップアップが開かないようにしておく。
+        _webView.CoreWebView2.NewWindowRequested += (_, e) =>
+            ExternalLinkService.HandleNewWindowRequested(e, "[設定ウィンドウ] ");
 
         // 起動時の白フラッシュ対策の3層目(MainForm.OnLoadAsyncと同じ、多層防御のうちの1つ)。
         // WebView2が非表示の間は表に出ない対策なので必須ではないが、表示に切り替わった

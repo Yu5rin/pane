@@ -260,7 +260,28 @@ internal sealed class HelpWindow : Form
         // ブラウザ既定の右クリックメニューを一切表示しない(docs/コンテキストメニュー仕様.md 大原則1)。
         // 読むだけのウィンドウのため独自メニューは実装しない(JS側でcontextmenuをpreventDefaultするのみ)。
         _webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
+        // ブラウザ標準のスクリプトダイアログ(alert/confirm/prompt/beforeunload)を出さない。
+        // Paneのデザインと無関係な標準ダイアログが出るのを防ぐ(MainFormと同じ理由)。
+        _webView.CoreWebView2.Settings.AreDefaultScriptDialogsEnabled = false;
+        // タッチ/プレシジョンタッチパッドの2本指ピンチズームを無効化する。IsZoomControlEnabled=false
+        // だけでは塞がらず(公式に「has no effect on the existing browser zoom properties」と明記)、
+        // 説明書本文がクリップされてスクロールバーでも到達できない領域が生まれるため。
+        _webView.CoreWebView2.Settings.IsPinchZoomEnabled = false;
+        // リンクにマウスを乗せたときのChromium標準のURLチップ(左下)を出さない。このウィンドウは
+        // 本文に実際の<a href>を多数含むため、特に目立つ。
+        _webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
+        // Chromium標準のオートフィル候補を出さない(読むだけのウィンドウだが、設定を3ウィンドウで
+        // 揃えておく。入力内容をブラウザプロファイルへ保存しない方針も同じ)。
+        _webView.CoreWebView2.Settings.IsGeneralAutofillEnabled = false;
         _webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
+        // 外部リンクをPane内のポップアップで開かせず、OSの既定ブラウザへ委譲する
+        // (処理の中身と判断の理由は3ウィンドウ共通のExternalLinkServiceを参照)。
+        // このウィンドウは本文に実際の<a href>を多数含む。左クリックはJS側(src/help-entry.js
+        // wireArticleLinks)がpreventDefaultして"open-in-default-app"で送ってくるが、
+        // 中クリック・Ctrl+クリックはJS側を経由せずWebView2がそのまま新しいウィンドウを
+        // 開こうとするため、C#側のこの受け口が無いとPane内にポップアップが開いてしまう。
+        _webView.CoreWebView2.NewWindowRequested += (_, e) =>
+            ExternalLinkService.HandleNewWindowRequested(e, "[取扱説明書ウィンドウ] ");
 
         // 起動時の白フラッシュ対策の3層目(MainForm/SettingsWindowと同じ、多層防御のうちの1つ)。
         AppSettings navigateSettings = SettingsService.Load();

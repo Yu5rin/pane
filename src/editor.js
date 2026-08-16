@@ -6,7 +6,7 @@ import { EditorState, Compartment, StateEffect, StateField, Prec, Transaction, c
 import { markdown } from "@codemirror/lang-markdown";
 import { Strikethrough, Table, Superscript, Subscript, Emoji, Autolink } from "@lezer/markdown";
 import { defaultKeymap, history, historyKeymap, indentWithTab, insertNewline, undo, redo, moveLineUp, moveLineDown, copyLineDown, deleteLine, indentLess, indentSelection, selectAll } from "@codemirror/commands";
-import { syntaxTree, syntaxHighlighting, HighlightStyle, LanguageDescription, bracketMatching, indentUnit, foldCode, unfoldCode, foldAll, unfoldAll, foldable, codeFolding, foldNodeProp, foldedRanges, foldEffect, unfoldEffect, language, foldService } from "@codemirror/language";
+import { syntaxTree, syntaxHighlighting, HighlightStyle, LanguageDescription, bracketMatching, indentUnit, foldCode, unfoldCode, foldAll, unfoldAll, foldable, codeFolding, foldNodeProp, foldedRanges, foldEffect, unfoldEffect, language, foldService, StreamLanguage } from "@codemirror/language";
 import { autocompletion, closeBrackets, closeBracketsKeymap, startCompletion } from "@codemirror/autocomplete";
 import { search, setSearchQuery, getSearchQuery, SearchQuery, findNext, findPrevious, replaceNext, replaceAll } from "@codemirror/search";
 import { tags as t } from "@lezer/highlight";
@@ -3097,10 +3097,12 @@ function doUnfoldRecursivelyAtCursor(view) {
 //      過不足なく表現できると判断し、既存の複数マーカー設計と無理なく両立させた
 //      (下記buildFoldOpenMarkers内の分岐を参照。言語が有る場合は従来どおり
 //      collectLineFoldOpensを使い、この関数には一切触れない)。
-//   3. 登録は「言語が未設定のときだけ」codeModeExtras()から追加する(currentCodeLanguage
-//      === nullの分岐)。言語が設定されている通常のコードモード・Markdownモードでは
-//      一切登録しないため、foldServiceが構文木由来の結果より先に呼ばれてしまい既存挙動を
-//      壊す、という心配が構造的に起こらない(そもそも登録されていない)。
+//   3. 登録はコードモード時に常時行い(codeModeExtras())、実際に範囲を返すかどうかは
+//      indentFoldService自身が「構文木ベースの折りたたみが使えない言語か」をstateから
+//      毎回判定する(treeFoldingAvailable定義部のコメント参照)。Lezer言語では常にnullを
+//      返すため、foldServiceが構文木由来の結果より先に呼ばれても既存挙動を壊さない
+//      (foldable()はfoldServiceが全てnullならfoldNodeProp由来の結果へフォールバックする)。
+//      Markdownモードではそもそも登録されない(codeModeExtrasはコードモード限定)。
 //
 // 【アルゴリズム】(VS Codeのインデント折りたたみプロバイダと同じ考え方)
 //   - 対象行の行頭空白の文字数を「その行のインデント」とする(タブ・スペース混在は
@@ -3142,9 +3144,35 @@ function indentFoldRangeForLine(state, docLine) {
   if (!lastDeepLine) return null; // 深い行が1つも無かった→折りたためない
   return { from: docLine.to, to: doc.line(lastDeepLine).to };
 }
+// ---- 構文木ベースの折りたたみが使えるかどうかの共通判定(バグ修正: .sh等でマーカーが出ない) ----
+// 【背景】 従来は「言語が有るか(state.facet(language)がnullでないか)」だけで構文木ベースと
+// インデントベースを切り替えていた。ところが legacy-modes 由来の言語(file-types.jsで
+// StreamLanguage.define(...)している shell・PowerShell・バッチ・Fortran・COBOL・Tcl・
+// Verilog/VHDL・アセンブリ等)は、Languageとしては存在するもののLezerの構文木を持たず
+// foldNodeProp由来の折りたたみ情報を一切提供しない。その結果「言語は有る→構文木ベースを
+// 使う→しかし範囲が1件も取れない」となり、折りたたみマーカーがまったく出なかった。
+// 【判定方法】 state.facet(language)は現在アクティブなLanguage(無ければnull)を返す。
+// StreamLanguage.define()の戻り値はStreamLanguageインスタンス(Languageのサブクラス)が
+// そのままlanguage facetに積まれるため、instanceof StreamLanguage で「構文木ベースの
+// 折りたたみを提供できない言語」を確実に見分けられる(Lezer言語=LanguageSupport経由の
+// languageはLRLanguage等でありStreamLanguageではない)。
+// 【使い所】 マーカー描画(buildFoldOpenMarkers)・縦線ガイド(collectActiveGuideSegments)・
+// foldService(下記indentFoldService)の3箇所すべてがこの1関数を共有する。判定をstateから
+// 毎回取ることで、タブ切替(setEditorState)や言語切替(setFileMode/setCodeLanguage)の
+// どの経路でも「そのstateに実際に積まれている言語」に常に追従する(クロージャ変数での
+// 追跡が不要になり、更新漏れが構造的に起こらない)。
+function treeFoldingAvailable(state) {
+  const lang = state.facet(language);
+  return !!lang && !(lang instanceof StreamLanguage);
+}
 // foldService(state, lineStart, lineEnd) => {from,to}|null の形。foldable()経由でfoldCode等の
 // 標準コマンドから呼ばれる(上記コメント参照)。
-const indentFoldService = foldService.of((state, lineStart) => indentFoldRangeForLine(state, state.doc.lineAt(lineStart)));
+// バグ修正(.sh等): 構文木ベースの折りたたみが使える言語(Lezer言語)ではnullを返して
+// 一切干渉しない(foldable()はfoldServiceが全てnullならfoldNodeProp由来のsyntaxFoldingへ
+// フォールバックするため、従来の構文木ベースの挙動がそのまま保たれる)。言語未設定
+// (プレーン表示)とStreamLanguage系言語のときだけインデントベースの範囲を返す。
+const indentFoldService = foldService.of((state, lineStart) =>
+  treeFoldingAvailable(state) ? null : indentFoldRangeForLine(state, state.doc.lineAt(lineStart)));
 
 // ある1つのdocLineが新たに開く折りたたみ範囲の一覧を、インデントガイド(縦線)の描画に
 // 必要な位置情報付きで返す。buildAllIndentGuides/collectActiveGuideSegments(依頼②で
@@ -3323,13 +3351,12 @@ function buildFoldOpenMarkers(view) {
   // 依頼①: マーカーは本文エリアの左端から常に固定の位置。インデント列に依存しないため、
   // view全体でこの1値を使い回せる(旧実装のようにマーカーごとに計算し直す必要が無い)。
   const markerLeftPx = computeFixedMarkerLeftPx(contentPaddingLeftPx);
-  // 改善③: 言語(構文木)が設定されているかどうかをループの外で一度だけ判定する
-  // (state.facet(language)は現在アクティブなLanguageオブジェクト、無ければnull。
-  // @codemirror/languageの公開APIで、docModeComp.reconfigure()に言語のsupportが
-  // 積まれているかどうかをそのまま反映する)。構文木由来の判定(collectLineFoldOpens、
-  // foldNodeProp経由)は言語が有る場合に限って従来どおり使い、無い場合だけインデント
+  // 改善③+バグ修正(.sh等): 構文木ベースの折りたたみが使えるかをループの外で一度だけ
+  // 判定する(treeFoldingAvailable定義部のコメント参照)。構文木由来の判定
+  // (collectLineFoldOpens、foldNodeProp経由)はLezer言語の場合に限って従来どおり使い、
+  // 言語未設定またはStreamLanguage系言語(shell等、構文木を持たない)の場合はインデント
   // ベースのフォールバック(indentFoldRangeForLine、上記コメント参照)に切り替える。
-  const hasLanguage = !!state.facet(language);
+  const hasLanguage = treeFoldingAvailable(state);
   // 折り返し行のぶら下げインデント(codeHangIndentPlugin)がある行でも、マーカーの位置
   // 計算に特別な補正は要らない(FoldOpenMarkerWidget定義部の大きなコメント参照。
   // text-indentによる打ち消しでアンカー自体の画面位置が変わらないため)。
@@ -3632,7 +3659,7 @@ function collectActiveGuideSegments(view) {
   const doc = state.doc;
   const blocks = view.viewportLineBlocks;
   if (blocks.length === 0) return [];
-  const hasLanguage = !!state.facet(language);
+  const hasLanguage = treeFoldingAvailable(state);
   const firstLineNo = doc.lineAt(blocks[0].from).number;
   const active = [];
   const seenFrom = new Set(); // range.fromで重複排除(祖先チェーンと行走査の両方で拾いうるため)
@@ -4032,12 +4059,18 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
     lineNumbers(),
     ...(codeFoldingOn ? [
       codeFolding(), foldOpenMarkerPlugin, foldOpenMarkerTheme, keymap.of(foldKeymapSafe),
-      // 改善③: 言語が未設定(currentCodeLanguage===null。ハイライトのロードに失敗して
-      // プレーン表示にフォールバックした場合も含む)のときだけ、インデントベースの
-      // フォールバックfoldServiceを追加する(indentFoldService定義部のコメント参照)。
-      // 言語が設定されている通常のコードモードでは登録しない=既存の構文木ベースの
-      // 折りたたみ(foldNodeProp)を一切妨げない。
-      ...(currentCodeLanguage === null ? [indentFoldService] : []),
+      // 改善③+バグ修正(.sh等): インデントベースのフォールバックfoldServiceを常に登録する。
+      // どの言語で実際に働くかはindentFoldService自身がstateから毎回判定する
+      // (treeFoldingAvailable定義部のコメント参照): Lezer言語では常にnullを返して
+      // 既存の構文木ベースの折りたたみ(foldNodeProp)を一切妨げず、言語未設定
+      // (currentCodeLanguage===null。ハイライトのロードに失敗してプレーン表示に
+      // フォールバックした場合も含む)とStreamLanguage系言語(shell・PowerShell等、
+      // 構文木を持たないためfoldNodePropの情報が無い)のときだけ範囲を提供する。
+      // 旧実装はここで「currentCodeLanguage===nullのときだけ登録」していたが、その方式では
+      // タブ切替(setEditorState)でEditorStateごと復元された後の再構成時にクロージャ変数の
+      // 同期が必要になるため、state自身を見る方式に改めた(登録は常時でも、判定がnullを
+      // 返す限り挙動は登録しない場合と同一)。
+      indentFoldService,
     ] : []),
     bracketMatching(),
     // allとfoldは排他(=二重線が出ないよう、どちらか一方だけを追加する。依頼②)。

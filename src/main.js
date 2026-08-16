@@ -1222,10 +1222,13 @@ const ctx = {
       bridge.postMessage({ type: "export", format, text, pageOptions: buildExportPageOptions(fm) });
     },
     print() {
-      // 用紙サイズ・余白・ヘッダー/フッター等の詳細設定(仕様書「エクスポート・印刷」節)は
-      // WebView2のShowPrintUI(ネイティブ印刷ダイアログ)には渡せないAPI上の制約があるため、
-      // この経路(File>印刷、Ctrl+Alt+P)には適用されない(PDFエクスポートにのみ適用される。
-      // 詳細はMainForm.HandlePrintRequestAsyncのコメントを参照)。
+      // 用紙サイズ・余白・ヘッダー/フッター等の詳細設定(仕様書「エクスポート・印刷」節)は、
+      // この経路(File>印刷、Ctrl+Alt+P)には適用されない(PDFエクスポートにのみ適用される)。
+      // 理由: C#側が使うShowPrintUI(ネイティブ印刷ダイアログを出すメソッド)には設定を渡す
+      // 引数が無いため。設定を反映して印刷するAPI自体はCoreWebView2.PrintAsync(printSettings)
+      // として存在するが、そちらは印刷ダイアログを出さずプリンタ指定も自前で行う必要があり、
+      // プリンタ選択UIをPane側に用意することになるため、現状は使っていない。
+      // 詳細はMainForm.HandlePrintRequestAsyncのコメントを参照。
       if (bridge) bridge.postMessage({ type: "print" });
       else window.print();
     },
