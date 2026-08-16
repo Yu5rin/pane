@@ -2312,6 +2312,11 @@ async function handleHostMessage(msg) {
       // (C#側ConfirmDiscardDirtyAsync)から届く。通常のCtrl+Sと同じ保存フローを使う。
       saveFile(false);
       break;
+    case "request-dropped-file-fallback":
+      // ファイルD&D(C#側MainForm.HandleOpenDroppedFileByName)がDragEnterで得たフルパスとの
+      // 照合に失敗した場合の保険。名前+バイト列だけの「無題」文書として開く従来経路へ倒す。
+      await fallbackOpenDroppedFile();
+      break;
     case "apply-settings":
       // マークダウン記法拡張のON/OFF(仕様書 第2.10節 C-01)・最近使ったファイル(F-09)・
       // Pandoc導入状況・既定コピー形式。起動時と設定変更時、最近使ったファイル更新時に届く。
@@ -2706,17 +2711,21 @@ imageInput.addEventListener("change", async () => {
 // ウィンドウへのファイルD&D。WebView2は本文エリアではWebページとしてドラッグ&ドロップを
 // 扱うため、HTML5の標準どおりdragoverでpreventDefault()しないとブラウザが既定で
 // ドロップを拒否し、禁止マークが出て何も起きない(C#側のOLEドラッグ&ドロップ設定とは
-// 無関係)。
+// 無関係)。この既定動作はブリッジの有無に関わらず働くため、dragenter/dragoverの
+// preventDefault()はブリッジがある場合(実アプリ)でも省略できない
+// (不具合修正の経緯: 一度はC#側でWebView2のAllowExternalDropをfalseにし、ここのdragenter/
+// dragover/dropをすべて素通りさせる方式を試みたが、それだと本文エリア上へドラッグしている間
+// ずっと禁止マークが出る副作用が実機で確認され撤回した。AllowExternalDropは既定のtrueへ戻して
+// あるため、ここでも通常のブラウザと同じ既定動作阻止(preventDefault)が必要)。
 //
-// 不具合修正: 実アプリ(ブリッジあり)では、標準のDOM File APIがセキュリティ上実パスを
-// 返さないため、以前はここでファイル名とバイト列しかC#へ渡せず、拡張子に基づく
-// コードモード判定・保存先の特定ができない「無題」の文書としてしか開けなかった。
-// 今はC#側(Pane/MainForm.cs OnLoadAsync)でWebView2のAllowExternalDropをfalseにしており、
-// ウィンドウ外(エクスプローラ等)からのファイルD&Dはこのページのdrop event自体が発火せず、
-// 代わりにC#側のOnDragDrop(DataFormats.FileDropから実フルパスを取得できる)が受け取る
-// ようになっている。そのため、下のdragenter/dragover/dropの各ハンドラは
-// ブリッジがある場合(＝実アプリ)は何もしない(AllowExternalDropの設定漏れ等に備えた
-// 二重の安全策として、念のため明示的にも早期returnしておく)。ブリッジが無いブラウザ単体動作
+// 不具合修正: 標準のDOM File APIはセキュリティ上実パスを返さないため、ブリッジがある場合
+// (実アプリ)、dropイベントで分かるのはファイル名とサイズ、そしてFileオブジェクト経由の
+// バイト列のみで、そのままでは拡張子に基づくコードモード判定・保存先の特定ができない
+// 「無題」の文書としてしか開けない。C#側は、ドラッグがウィンドウに入った時点(WebView2の
+// 領域より前)で発火するOnDragEnterでDataFormats.FileDropからフルパスを先に取得できているため
+// (Pane/MainForm.cs _pendingDragFiles参照)、ここではバイト列を送らずファイル名+サイズだけを
+// "open-dropped-file-by-name"として送り、C#側で照合してもらう。C#が照合できればフルパス経由の
+// 正規の経路(拡張子に基づくコードモード判定が効く)で開かれる。ブリッジが無いブラウザ単体動作
 // (開発確認用、WebView2を介さないため上記の仕組みが使えない)では、従来どおりここで処理する。
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
@@ -2730,27 +2739,38 @@ function arrayBufferToBase64(buffer) {
 function hasFileDrag(e) {
   return !!e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files");
 }
+// C#側(MainForm.HandleOpenDroppedFileByName)がDragEnterで得たフルパスとの照合に失敗した場合の
+// フォールバック用。直近のdropイベントで受け取ったFileオブジェクトを1件だけ覚えておき、
+// C#から"request-dropped-file-fallback"が届いたときだけ、その中身(バイト列)を送る
+// (毎回バイト列を送らないことで、通常経路=照合成功時の変換・送信コストを避ける設計。
+// 大きいファイルをドロップしたときにも影響しない)。次のドロップが来れば単純に上書きする。
+let pendingDroppedFile = null;
 // captureフェーズ(第3引数true)で登録する。CodeMirror自身がエディタ内テキストの
 // ドラッグ移動用にdragover/drop相当を独自処理しており、bubbleフェーズで登録すると
 // そちらが先に処理してこちらまで届かない(stopPropagation等で握りつぶされる)ことがある。
 window.addEventListener("dragenter", (e) => {
-  if (bridge) return; // 実アプリではC#側(MainForm.OnDragEnter)に任せる(上のコメント参照)。
   if (hasFileDrag(e)) e.preventDefault();
 }, true);
 window.addEventListener("dragover", (e) => {
-  if (bridge) return; // 実アプリではC#側(MainForm.OnDragEnter/Over)に任せる(上のコメント参照)。
   if (hasFileDrag(e)) e.preventDefault();
 }, true);
 window.addEventListener("drop", async (e) => {
   logToHost("log", `drop event: hasFileDrag=${hasFileDrag(e)}, filesCount=${e.dataTransfer?.files?.length ?? 0}`);
-  // 実アプリではC#側(MainForm.OnDragDrop、画像は同OnDragDrop経由のInsertLocalImageAndNotify)に
-  // 任せる(上のコメント参照)。AllowExternalDrop=falseによりこのイベント自体、実アプリでは
-  // 通常発火しないはずだが、念のため明示的にも早期returnしておく。
-  if (bridge) return;
   if (!hasFileDrag(e) || !e.dataTransfer.files.length) return;
   e.preventDefault();
   e.stopPropagation();
+  // 複数ファイルが同時にドロップされても、扱うのは先頭の1件のみ(C#側MainForm.OnDragDropと
+  // 同じ判断)。
   const file = e.dataTransfer.files[0];
+  if (bridge) {
+    // 実アプリ: フルパスの照合はC#側に任せる(上のコメント参照)。ここでは名前とサイズだけを
+    // 送り、バイト列はC#が照合に失敗してフォールバックを要求してきたときだけ送る
+    // (下のhandleHostMessageの"request-dropped-file-fallback"参照)。
+    pendingDroppedFile = file;
+    logToHost("log", `open-dropped-file-by-nameを送信: name=${file.name}, size=${file.size}`);
+    bridge.postMessage({ type: "open-dropped-file-by-name", name: file.name, size: file.size });
+    return;
+  }
   // 画像ファイルのドロップは「このファイルを開く」ではなく「本文へ画像を挿入する」として扱う
   // (仕様書 docs/設定項目一覧.md「画像」節: 画像挿入の3経路の1つ)。
   if (isImageFile(file)) {
@@ -2771,6 +2791,36 @@ window.addEventListener("drop", async (e) => {
   updateCount();
   updateStatusMode();
 }, true);
+
+// C#側(MainForm.HandleOpenDroppedFileByName)がDragEnterで得たフルパスとの照合に失敗した場合の
+// 保険。直近にドロップされたFile(pendingDroppedFile)の中身を使い、名前+バイト列だけの
+// 「無題」文書として開く従来経路("open-dropped-file"、C#側HandleOpenDroppedFile)へ送り直す。
+async function fallbackOpenDroppedFile() {
+  const file = pendingDroppedFile;
+  pendingDroppedFile = null;
+  if (!file) {
+    // 通常はここに来ないはず(dropの直後にC#から返ってくる応答のため)。中断されたドラッグの
+    // 遅延応答等、想定外の状況への保険としてログだけ残して何もしない。
+    logToHost("error", "request-dropped-file-fallback: 直近にドロップされたファイルが見当たらない");
+    return;
+  }
+  // 画像ファイルのドロップは「このファイルを開く」ではなく「本文へ画像を挿入する」として扱う
+  // (isImageFile/insertImageFileはbridgeの有無に関わらず動く。実アプリではinsertImageFileが
+  // 内部でinsert-imageメッセージとしてC#へバイト列を送る)。
+  if (isImageFile(file)) {
+    await insertImageFile(file);
+    return;
+  }
+  const isEmptyDocument = editor.getValue().trim() === "";
+  const buf = await file.arrayBuffer();
+  logToHost("log", `open-dropped-fileを送信(フォールバック): name=${file.name}, size=${buf.byteLength}, newWindow=${!isEmptyDocument}`);
+  bridge.postMessage({
+    type: "open-dropped-file",
+    name: file.name,
+    dataBase64: arrayBufferToBase64(buf),
+    newWindow: !isEmptyDocument,
+  });
+}
 
 // switchFileFromSidebar()専用: saveFile()を呼び出し、対応する"save-result"が届くまで待つ。
 // saveFile()自体はpostMessageを送るだけで完了を待たない(結果は非同期にhandleHostMessageへ

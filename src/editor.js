@@ -3538,28 +3538,54 @@ function indentAncestorColsAt(state, doc, lineNumber) {
 // rangeFrom: この線が属する折りたたみ範囲の一意な鍵(範囲のfrom位置。isRangeFolded/
 //   toggleFoldRangeと同じ「範囲の一意な鍵」)。"all"モードで、どの折りたたみ範囲にも
 //   対応しない汎用のインデント目盛り線はnull(依頼⑤のホバー強調の対象外になる)。
+//
+// 【不具合修正: 折り返した行で縦線が途切れる】 このwidgetはline.from(行頭の直前、side:-1)に
+// 挿入される、行の「1行目」に属するインライン要素。以前はanchor・line(縦線本体)の両方の
+// 高さにlineHeightPx(view.defaultLineHeight、1行ぶん固定)を使っていたため、長い行が
+// 折り返されて2行以上になっても線は1行ぶんしか伸びず、折り返し部分で線が途切れていた
+// (原因はユーザーからの報告どおり。直前の「折り返し行を字下げ位置に揃える」ぶら下げ
+// インデント実装で、折り返し行が字下げ位置から始まるようになり、縦線の隣に来て
+// 目立つようになっただけで、不具合自体は以前から存在した)。
+// 修正: anchor自身の高さ(lineHeightPx、インライン要素として行の通常の1行ぶんの高さ)は
+// そのまま据え置き、縦線本体(絶対配置の子要素)の高さだけblockHeightPx(その行が実際に
+// 占める描画高さ。折り返しがあれば複数行ぶん、折りたたまれていれば1行ぶん)にする。
+// anchorはposition:relativeなので、絶対配置の子の基準点(containing block)にはなるが、
+// 子の実際のサイズはanchor自身の高さに制約されない(絶対配置要素は通常のフローから
+// 外れるため、親の自動計算に含まれない)。そのため、anchorの高さを1行ぶんのまま保てば
+// 折り返しによる行自体の高さ(=inline要素としてのanchorが行の高さを押し広げてしまう
+// 副作用)を避けつつ、縦線本体だけがanchorの外(下方向)へ描画としてはみ出し、折り返し後の
+// 行の下端まで途切れず伸びる(#cm-host .cm-line { padding: 0 !important; margin: 0 }で
+// 行に余白が無いことを確認済みのため、blockHeightPxをそのまま使ってよい。実測して
+// ズレが無いことも.verify-indentguide-wrap.mjsで確認済み)。
 class GuideLineWidget extends WidgetType {
-  constructor(leftPx, lineHeightPx, rangeFrom) {
+  constructor(leftPx, lineHeightPx, rangeFrom, blockHeightPx) {
     super();
     this.leftPx = leftPx;
     this.lineHeightPx = lineHeightPx;
     this.rangeFrom = rangeFrom;
+    // blockHeightPx省略時(呼び出し漏れの保険)はlineHeightPxと同じ(=従来どおり1行ぶん)。
+    this.blockHeightPx = blockHeightPx != null ? blockHeightPx : lineHeightPx;
   }
   eq(o) {
     return o.leftPx === this.leftPx && o.lineHeightPx === this.lineHeightPx &&
-      o.rangeFrom === this.rangeFrom;
+      o.rangeFrom === this.rangeFrom && o.blockHeightPx === this.blockHeightPx;
   }
   toDOM() {
     // FoldOpenMarkerWidgetのアンカーと同じ理由: .cm-lineは既定でposition:staticのため、
     // absolute配置の子を置くには幅0のinline-blockでposition:relativeの基準を別途作る必要がある。
     const anchor = document.createElement("span");
     anchor.className = "cm-guide-anchor";
+    // anchorはインライン要素として行の通常の1行ぶんの高さのまま(折り返しても広げない。
+    // 上の大きなコメント参照)。
     anchor.style.height = `${this.lineHeightPx}px`;
     const line = document.createElement("span");
     line.className = "cm-guide-line";
     line.style.left = `${this.leftPx}px`;
     line.style.top = "0";
-    line.style.height = `${this.lineHeightPx}px`;
+    // 縦線本体だけは行の実際の描画高さ(折り返しを含む)を使う。絶対配置なので
+    // anchorの高さより大きくてもanchorの外へそのまま描画される(通常のフローの
+    // サイズ計算には含まれないため、行の高さを押し広げる副作用は起きない)。
+    line.style.height = `${this.blockHeightPx}px`;
     // 依頼⑤: マーカーホバー時の強調対象を特定するための鍵。値がある場合だけ属性を持たせる
     // (querySelectorAll('[data-fold-from="X"]')で拾う側はFoldOpenMarkerWidget参照)。
     if (this.rangeFrom != null) line.dataset.foldFrom = String(this.rangeFrom);
@@ -3665,8 +3691,13 @@ function buildFoldGuideLines(view) {
       // 終了行(seg.toLine)は、実インデントがこの範囲の階層より深い場合(=閉じ括弧/閉じタグ
       // ではなく実内容行そのもの。Pythonのインデント折りたたみ等)だけ引く。
       if (n === seg.toLine && !seg.toLineDeep) continue;
+      // 不具合修正: 縦線本体の高さにはblock.height(このブロックの実際の描画高さ)を使う。
+      // 折り返した行はblock.heightが複数行ぶんになり(CodeMirrorが既に持っている値、
+      // 追加のレイアウト計算は発生しない)、折りたたまれた行はブロック自体が1行に
+      // 畳まれているためblock.heightはそのまま1行ぶんになる(GuideLineWidget定義部の
+      // 大きなコメント参照)。
       marks.push(Decoration.widget({
-        widget: new GuideLineWidget(seg.leftCol * charWidthPx, lineHeightPx, seg.rangeFrom),
+        widget: new GuideLineWidget(seg.leftCol * charWidthPx, lineHeightPx, seg.rangeFrom, block.height),
         side: -1,
       }).range(block.from));
     }
@@ -3730,9 +3761,21 @@ function buildAllIndentGuides(view) {
   // そのrangeFromを線に載せ、"all"モードでもマーカーホバー時の強調が効くようにする
   // (無ければrangeFrom=nullの汎用線として扱う=ホバー強調の対象外)。
   const structuralByLine = new Map(); // lineNumber -> Map(leftCol -> rangeFrom)
+  // 不具合修正: 縦線本体の高さに使う「行番号→実際の描画高さ(block.height)」も、
+  // 同じviewportLineBlocksの1回の走査でついでに作る(スキャンを増やさない。要件④の
+  // 「表示範囲だけを見る」性質を壊さないため)。block.heightはCodeMirrorが
+  // レイアウト計算の一部として既に保持している値で、ここで読むだけでは追加の
+  // レイアウト計算(強制同期レイアウト)は起きない(GuideLineWidget定義部の
+  // コメント・.perf-indentguide-wrap.mjsでの実測も参照)。
+  // 折りたたみで複数の実行(document)行が1つのブロックに畳まれている場合、
+  // このMapにはブロックの先頭行番号にしかエントリが作られない(=畳まれて非表示に
+  // なった内側の行は元々このMapに現れない。畳まれた行はどのみち非表示のため、
+  // それらの行に対する後段のフォールバック(lineHeightPx)を使っても見た目には影響しない)。
+  const blockHeightByLine = new Map(); // lineNumber -> block.height(px)
   for (const block of view.viewportLineBlocks) {
     const docLine = doc.lineAt(block.from);
     const n = docLine.number;
+    blockHeightByLine.set(n, block.height);
     for (const seg of segments) {
       if (n <= seg.fromLine || n > seg.toLine) continue;
       if (n === seg.toLine && !seg.toLineDeep) continue;
@@ -3788,6 +3831,10 @@ function buildAllIndentGuides(view) {
         while (stack.length && stack[stack.length - 1] >= ownCol) stack.pop();
       }
       const structural = structuralByLine.get(line.number);
+      // この行の実際の描画高さ(折り返しがあれば複数行ぶん)。viewportLineBlocksに
+      // 現れなかった行(=表示範囲の走査対象だが上のMap構築ループには含まれない、
+      // 通常は起こらない想定だが念のため)はlineHeightPx(1行ぶん)にフォールバックする。
+      const blockHeightPx = blockHeightByLine.get(line.number) ?? lineHeightPx;
       for (const col of stack) {
         // 空行はスタックを更新しないため(上のisBlank分岐参照)、ここで改めてownCol未満に
         // 絞る必要がある(非空行では事前のpopにより常にtrue、実質は空行向けの絞り込み)。
@@ -3795,7 +3842,7 @@ function buildAllIndentGuides(view) {
         if (col >= ownCol) break;
         const rangeFrom = structural ? (structural.get(col) ?? null) : null;
         marks.push(Decoration.widget({
-          widget: new GuideLineWidget(col * charWidthPx, lineHeightPx, rangeFrom),
+          widget: new GuideLineWidget(col * charWidthPx, lineHeightPx, rangeFrom, blockHeightPx),
           side: -1,
         }).range(line.from));
       }
