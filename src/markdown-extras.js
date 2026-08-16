@@ -1,7 +1,11 @@
 // 仕様書 第2.9節のマークダウン記法拡張で共有するユーティリティ。
 // サイドバーのアウトライン(第2.8節 S-01、Phase 6で実装予定)とも
 // 同じ見出し抽出ロジックを使うため、ここに独立させておく。
-import { syntaxTree } from "@codemirror/language";
+import { ensureSyntaxTree, syntaxTree } from "@codemirror/language";
+
+// extractHeadingsがensureFullParse時に構文木を最後まで伸ばすのに使う上限時間(ミリ秒)。
+// src/md-to-html.jsの同名の定数と同じ考え方(一度きりの処理なので長めに取る)。
+const ENSURE_PARSE_TIMEOUT_MS = 10000;
 
 const HEADING_NODE_NAMES = new Set([
   "ATXHeading1", "ATXHeading2", "ATXHeading3", "ATXHeading4", "ATXHeading5", "ATXHeading6",
@@ -37,10 +41,24 @@ function slugify(text) {
 
 // 見出し一覧を構文木から抽出する(全行の正規表現走査ではなく、見出しノードのみを辿る)。
 // 目次ウィジェット・内部リンクのジャンプ先解決の両方から使う共通ロジック。
-export function extractHeadings(state, maxLevel = outlineMaxLevel) {
+//
+// ensureFullParse: 文書の末尾まで確実にパースしてから抽出するかどうか(既定false)。
+//   CodeMirrorの構文木は遅延パースで、syntaxTree(state)は「今までにパースが済んだ範囲」
+//   までしか伸びていない。EditorViewがある場合(本文のアウトラインパネル)はCodeMirrorが
+//   アイドル時にバックグラウンドでパースを進めるため、少し待てば文書全体に追いつく。
+//   そのため、入力のたびに呼ばれるアウトライン側は既定のfalseのままにして、1文字打つ
+//   たびに全文パースが走らないようにする(第8章の入力遅延の目標を守るため)。
+//   いっぽう取扱説明書ウィンドウ(src/help-entry.js)はEditorViewを作らずEditorStateだけを
+//   組み立てて呼ぶため、バックグラウンドパース自体が動かず、放っておいても木が伸びない
+//   (実測で425行の説明書のうち11見出しまでしか拾えず、目次が途中で切れていた)。
+//   このように「一度きりの変換で、確実に文書全体が要る」呼び出し側だけtrueにする。
+export function extractHeadings(state, maxLevel = outlineMaxLevel, { ensureFullParse = false } = {}) {
   const headings = [];
   const slugCount = new Map();
-  syntaxTree(state).iterate({
+  const tree = ensureFullParse
+    ? (ensureSyntaxTree(state, state.doc.length, ENSURE_PARSE_TIMEOUT_MS) ?? syntaxTree(state))
+    : syntaxTree(state);
+  tree.iterate({
     enter: (node) => {
       if (!HEADING_NODE_NAMES.has(node.name)) return;
       const level = headingLevel(node.name);

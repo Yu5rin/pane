@@ -21,6 +21,12 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// 各段階のタイムスタンプ)を見てから調整する。</summary>
     private const int SettingsPregenerateDelayMs = 2500;
 
+    /// <summary>取扱説明書ウィンドウの事前生成を始めるまでの待ち時間。設定ウィンドウの事前生成
+    /// (<see cref="SettingsPregenerateDelayMs"/>)と同時に走らせると起動直後の輻輳が増えるため、
+    /// 少しずらして開始する(WebView2環境自体は共有キャッシュのため、2つ目のPrewarmが増やす
+    /// コストはEnsureCoreWebView2Async呼び出し程度で小さい)。</summary>
+    private const int HelpPregenerateDelayMs = 3500;
+
     private readonly List<MainForm> _windows = new();
     private readonly AppSettings _settings;
 
@@ -32,12 +38,22 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// nullに戻るのはアプリ終了時(<see cref="SettingsWindow.CloseForReal"/>経由)のみ。</summary>
     private SettingsWindow? _settingsWindow;
 
+    /// <summary>取扱説明書ウィンドウ(F1)。<see cref="_settingsWindow"/>と全く同じ流儀
+    /// (同時に1つしか開かない・<see cref="_windows"/>のウィンドウ数の勘定に含めない・
+    /// 通常のCloseでは破棄せず非表示化のみ)。詳細は<see cref="OpenHelpWindow"/>と
+    /// <see cref="OnWindowClosed"/>を参照。</summary>
+    private HelpWindow? _helpWindow;
+
     /// <summary>設定ウィンドウの事前生成を1回だけ・遅延して行うためのワンショットタイマー。
     /// Timerのコールバックはメッセージループ経由でこのオブジェクトを作ったスレッド(UIスレッド)
     /// 上で発火するため、Application.Run()より前(コンストラクタ内)にStartしても安全。
     /// (preload起動時のWebView2環境事前生成と違い、こちらはUIスレッド上でForm/WebView2
     /// コントロールを直接作る必要があるため、Task.ContinueWithでの後続処理は使わない。)</summary>
     private readonly System.Windows.Forms.Timer _settingsPregenerateTimer;
+
+    /// <summary>取扱説明書ウィンドウの事前生成用ワンショットタイマー。<see cref="_settingsPregenerateTimer"/>と
+    /// 同じ考え方(UIスレッド上でForm/WebView2コントロールを直接作るため)。</summary>
+    private readonly System.Windows.Forms.Timer _helpPregenerateTimer;
 
     /// <summary>--preloadで起動されたプロセスかどうか(B-1)。trueの間は、最後のウィンドウが
     /// 閉じられてもプロセスを終了させず、ウィンドウ0枚の常駐状態へ戻す(OnWindowClosed参照)。
@@ -65,6 +81,14 @@ internal sealed class PaneApplicationContext : ApplicationContext
             PregenerateSettingsWindow();
         };
         _settingsPregenerateTimer.Start();
+
+        _helpPregenerateTimer = new System.Windows.Forms.Timer { Interval = HelpPregenerateDelayMs };
+        _helpPregenerateTimer.Tick += (_, _) =>
+        {
+            _helpPregenerateTimer.Stop();
+            PregenerateHelpWindow();
+        };
+        _helpPregenerateTimer.Start();
 
         if (preload)
         {
@@ -233,6 +257,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
             requestSwitchDocument: SwitchToNextWindow,
             requestBroadcastSettings: BroadcastSettingsChanged,
             requestOpenSettingsWindow: OpenSettingsWindow,
+            requestOpenHelpWindow: OpenHelpWindow,
             droppedFile: droppedFile,
             initialFolderPath: initialFolderPath);
 
@@ -418,6 +443,52 @@ internal sealed class PaneApplicationContext : ApplicationContext
         }
     }
 
+    /// <summary>
+    /// 取扱説明書ウィンドウ(F1)を開く。<paramref name="owner"/>(呼び出し元のウィンドウ)の
+    /// 中央に表示する。既に開いていれば新しく作らず<see cref="WindowChrome.ForceActivate"/>で
+    /// 前面に出すだけにする(同時に1つしか開かない)。<see cref="OpenSettingsWindow"/>と同じ構成。
+    /// </summary>
+    public void OpenHelpWindow(Form owner)
+    {
+        var sw = Stopwatch.StartNew();
+        bool isNew = _helpWindow is not { IsDisposed: false };
+        if (isNew)
+        {
+            _helpWindow = new HelpWindow(owner);
+            _helpWindow.FormClosed += (_, _) => _helpWindow = null;
+        }
+        _helpWindow!.Reveal(owner);
+        Logger.Write(isNew
+            ? $"OpenHelpWindow: 新規に開いた(事前生成は間に合っていなかった, {sw.ElapsedMilliseconds}ms)"
+            : $"OpenHelpWindow: 既存インスタンスを表示({(_helpWindow.IsRevealed ? "事前生成/前回分の読み込み完了済み" : "まだ読み込み中")}, {sw.ElapsedMilliseconds}ms)");
+    }
+
+    /// <summary>
+    /// 取扱説明書ウィンドウをユーザーがまだ開いていない段階で裏で作っておく(体感速度対策)。
+    /// <see cref="_helpPregenerateTimer"/>から遅延して1回だけ呼ばれる。<see cref="PregenerateSettingsWindow"/>と
+    /// 全く同じ構成・同じ理由。
+    /// </summary>
+    private void PregenerateHelpWindow()
+    {
+        if (_helpWindow is not null) return;
+        HelpWindow? window = null;
+        try
+        {
+            Form? owner = _windows.Count > 0 ? _windows[0] : null;
+            window = new HelpWindow(owner);
+            window.FormClosed += (_, _) => _helpWindow = null;
+            _helpWindow = window;
+            window.Prewarm();
+            Logger.Write("PregenerateHelpWindow: アイドル時の事前生成を開始した");
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException("PregenerateHelpWindow: 事前生成に失敗(次回OpenHelpWindowで通常経路にフォールバック)", ex);
+            _helpWindow = null;
+            window?.Dispose();
+        }
+    }
+
     private void OnWindowClosed(MainForm form)
     {
         bool isLastWindow = _windows.Count == 1 && _windows[0] == form;
@@ -469,14 +540,18 @@ internal sealed class PaneApplicationContext : ApplicationContext
             }
             else
             {
-                // アプリ全体を終了する。設定画面はウィンドウ数の勘定に含めていないため
-                // (_windowsに含まれない)、開いたままExitThreadすると取り残されてしまう。
-                // 明示的に閉じてからスレッドを終了する。体感速度対策(インスタンス再利用)により
-                // 通常のCloseは非表示化に読み替えられてしまうため、ここでは本当に破棄する
-                // CloseForRealを使う(事前生成の途中で終了した場合も含め、確実に破棄する)。
+                // アプリ全体を終了する。設定画面・取扱説明書画面はどちらもウィンドウ数の勘定に
+                // 含めていないため(_windowsに含まれない)、開いたままExitThreadすると
+                // 取り残されてしまう。明示的に閉じてからスレッドを終了する。体感速度対策
+                // (インスタンス再利用)により通常のCloseは非表示化に読み替えられてしまうため、
+                // ここでは本当に破棄するCloseForRealを使う(事前生成の途中で終了した場合も含め、
+                // 確実に破棄する)。
                 _settingsPregenerateTimer.Stop();
                 _settingsPregenerateTimer.Dispose();
+                _helpPregenerateTimer.Stop();
+                _helpPregenerateTimer.Dispose();
                 _settingsWindow?.CloseForReal();
+                _helpWindow?.CloseForReal();
                 ExitThread();
             }
         }

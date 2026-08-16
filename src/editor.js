@@ -2783,6 +2783,25 @@ class FoldOpenMarkerWidget extends WidgetType {
   // leftPx: computeFixedMarkerLeftPxで求めた固定の左端px(依頼①、インデントに依存しない)。
   // lineHeightPx: view.defaultLineHeight(実測px値。height:100%は祖先の高さ不定で
   //   解決できないため、JSで実測した値をそのままインラインstyleに焼き込む)。
+  // 【依頼(コードの折り返し行をインデントに揃える)の落とし穴(1)の検証結果、実測して分かったこと】
+  // padding-leftでハンギングインデントを付けても、マーカーの位置は補正なしで元のまま
+  // 変わらない。理由: マーカーのアンカー(.cm-fold-open-anchor)はline.from(=行頭空白より前)
+  // に挿入されるDOM要素で、.cm-line内の「1行目」に属する最初のインライン要素になる。
+  // CSSのtext-indentは「ブロックの1行目に属するインライン内容すべて」を対象に効くため
+  // (テキストに限らずインラインブロック要素も含む)、cm-code-hangが付けた
+  // padding-left(+H)とtext-indent(-H)は、このアンカー自身の位置にも同時に効き、
+  // 両者がちょうど打ち消し合う(+Hで右へ押されたぶんが-Hでそのまま元へ戻る)。
+  // マーカー(.cm-fold-marker2)自身はposition:absoluteでこのアンカーを基準にleftを
+  // 指定しているだけなので、アンカーの画面上の位置が変わらない以上、マーカーの位置も
+  // 変わらない。
+  // 実装時は最初、「padding-leftのぶんアンカーごと右へ押し出される」という誤った前提で
+  // マーカー側のleftからhang分をさらに差し引く補正を入れたが、.verify-hang-code.mjsの
+  // (D)節(深さの異なる複数行でマーカーが本文左端から常に5pxの位置にあることを実測する
+  // テスト)で「深いインデントの行ほどマーカーが左にズレる(5pxのはずが負の値になる)」
+  // という回帰が実際に検出され、上記の理由により「そもそも補正不要」だったと判明した
+  // (text-indentによる打ち消しと、JS側の補正の“二重補正”になっていた)。そのため
+  // computeFixedMarkerLeftPx(依頼①、3世代目の固定位置方式)による1つの値を、
+  // ハンギングインデントの有無に関わらずそのまま使えばよい。
   constructor(range, folded, leftPx, lineHeightPx) {
     super();
     this.range = range;
@@ -3165,6 +3184,117 @@ function lineIndentColumn(state, text) {
   return m ? countColumn(text, state.tabSize, m[0].length) : 0;
 }
 
+// ==== コードモードの折り返し行ハンギングインデント(依頼: 「折り返した2行目以降を
+// 行頭の字下げ位置に揃える」) ====
+//
+// 【方式選定】 Markdownのリストのぶら下げ(.cm-hang、build()内・行1264付近)と同じ
+// CSSハック(padding-leftで全体を右へ押し、text-indentの負値で1行目だけ引き戻す)を
+// 踏襲する。ただし--hangの意味が違う(Markdown版は「箇条書きマーカー文字数」、
+// コード版は「行頭空白のタブ展開後の表示列数」)ため、クラスを.cm-code-hangとして
+// 完全に分ける。docModeComp/codeModeExtrasComp/livePreviewCompの構成上、Markdown用の
+// cm-hangはmarkdownモードのlivePreviewでしか付かず、cm-code-hangはcodeModeExtras()
+// 経由でcodeモードでしか付かないため、モードが排他である以上、同じ行に両方が
+// 同時に付くことは構造的に起こらない(要件3)。クラス名を分けたのは、その保証を
+// さらに読みやすくする狙いもある(DOMを見ただけでどちらの計算式が効いているか分かる)。
+//
+// 【折りたたみマーカーの位置(落とし穴(1))】 実装時に最初に想定していた「padding-leftの
+// ぶんマーカーも右へ押し出されるはずだから、マーカー側で同じ量を差し引いて打ち消す
+// 補正が要る」という前提は誤りだった。実際にはtext-indentが「1行目に属するインライン
+// 内容すべて」(マーカーのアンカーも含む)へ同時に効くため、padding-leftとtext-indentの
+// 増分がアンカー自身の位置でもそのまま打ち消し合い、マーカー側の追加補正なしで
+// 元の固定位置(computeFixedMarkerLeftPx)のまま変わらない。詳細な経緯・検証結果は
+// FoldOpenMarkerWidget定義部の大きなコメント参照。
+//
+// 【タブへの対応(落とし穴(2))】 行頭空白の「文字数」をそのままch単位にすると、
+// タブ1文字が表示上はタブ幅ぶん(既定4文字など)に広がるため足りなくなる。
+// 既存のlineIndentColumn(state.tabSizeを使うcountColumn実測、上で定義)をそのまま
+// 流用し、「表示上の桁数」で--hangを組み立てる。state.tabSizeは
+// setCodeIndentSize()が更新する値と常に一致する(既存のfoldOpenMarkerPlugin等と
+// 同じ前提)ため、タブ幅の設定を変えても自動的に追従する。
+//
+// 【極端に深いインデントへの上限(落とし穴(5))】 画面幅に対してインデントが
+// 極端に深い行では、padding-leftが本文幅の大半を占めてしまい、折り返し後の
+// 1行あたりの表示幅がほぼ0になって縦に間延びする破綻が起こりうる。
+// これを避けるため、ぶら下げ幅は「本文(.cm-contentの実測クライアント幅)の50%」を
+// 超えないようにJS側で列数を丸める(computeCodeHangCapCh)。50%というマジックナンバーの
+// 根拠: 折り返し後の1行に本文幅の半分以上を必ず残せば、実務でまず出ないレベルの深い
+// インデント(タブ幅4で25階層=100列超、等)でも「1行に数文字しか入らない」という
+// 見た目の破綻を避けられる、という実測に基づく目安。念のため下限として最低4文字ぶんの
+// 幅は必ず確保する(極端に狭いウィンドウでも0や負値にならないようにする保険)。
+// contentDOM.clientWidthは呼び出しのたびに実測するため、ペインのリサイズやサイドバーの
+// 開閉でも次回の再描画(下記codeHangIndentPluginのupdate()がgeometryChangedを見て
+// 再構築する)で自然に追従する。
+function computeCodeHangCapCh(view) {
+  const widthPx = view.contentDOM.clientWidth;
+  const charWidthPx = view.defaultCharacterWidth || 8;
+  const capCh = Math.floor((widthPx * 0.5) / charWidthPx);
+  return Math.max(4, capCh);
+}
+// 行頭空白の表示列数(lineIndentColumn)を、上記の上限(cap)で丸めた値として返す。
+// 0は「ぶら下げ不要(行頭に空白が無い)」を意味する。CSS側へは常にこの整数をそのまま
+// literalな"Nch"として渡す(pxへJS側で換算し直さない)。ブラウザは同一ドキュメント内で
+// 同じフォント計測を使ってchを解決するため、値の受け渡し経路を1つに保てば、どこで
+// 使ってもズレが積み重なる心配がない(2718行付近の大きなコメントで一度起きた
+// 「ch単位とJS実測pxの混在で深いネストほど誤差が積み重なる」不具合と同じ種類の事故を
+// 未然に避ける狙い)。
+function codeHangColumnFor(state, text, capCh) {
+  const col = lineIndentColumn(state, text);
+  return col > 0 ? Math.min(col, capCh) : 0;
+}
+// 可視範囲(view.visibleRanges)の行だけを走査し、行頭に空白があるコードモードの行へ
+// .cm-code-hang装飾を付ける(要件4: 性能。文書全体は舐めない。livePreviewのbuild()や
+// buildFoldOpenMarkersと同じ作法)。codeModeExtras()経由でcodeモードの時だけ組み込む。
+const codeHangIndentPlugin = ViewPlugin.fromClass(class {
+  // 【性能上の重要な注意、実測して分かったこと】 computeCodeHangCapChは
+  // view.contentDOM.clientWidthを読む(=ブラウザに強制同期レイアウトを起こさせる、
+  // いわゆるforced reflow)。build()の中で毎回これを呼ぶと、1文字入力するたびに
+  // 強制レイアウトが走ってしまい、10万行のファイルで実測したところ1文字入力の
+  // dispatch時間が3ms程度→22ms程度まで悪化する重大な退行を引き起こしていた
+  // (.verify-hang-code.mjs (J)節でplainモードとの差分・本プラグインの有無での差分を
+  // 両方実測して特定した)。上限(cap)は「本文の表示幅」が変わったとき(=ペインの
+  // リサイズ・サイドバー開閉・フォントサイズ変更等、update.geometryChangedが立つ時)
+  // だけ変わりうる値であり、1文字入力するたび(docChangedのたび)に変わる値ではない。
+  // そのためcapをインスタンスにキャッシュし、geometryChangedの時だけ再実測する
+  // (要件4の「可視範囲だけを見る」だけでなく、「レイアウト計測そのものの頻度を
+  // 最小限にする」ことも大きなファイルでの性能には同じくらい重要、という教訓)。
+  constructor(view) {
+    this.capCh = computeCodeHangCapCh(view);
+    this.decorations = this.build(view);
+  }
+  update(update) {
+    let capChanged = false;
+    if (update.geometryChanged) {
+      const nextCap = computeCodeHangCapCh(update.view);
+      if (nextCap !== this.capCh) { this.capCh = nextCap; capChanged = true; }
+    }
+    // tabSize変更はdocChanged/viewportChanged/geometryChangedのいずれにも該当しない
+    // ことがある(foldOpenMarkerPlugin・foldGuideLinePlugin等と同じ理由、3229行付近の
+    // 大きなコメント参照)ため明示的に検知する。
+    if (update.docChanged || update.viewportChanged || capChanged ||
+        update.startState.tabSize !== update.state.tabSize) {
+      this.decorations = this.build(update.view);
+    }
+  }
+  build(view) {
+    const { state } = view;
+    const capCh = this.capCh;
+    const marks = [];
+    for (const { from, to } of view.visibleRanges) {
+      let pos = from;
+      while (pos <= to) {
+        const line = state.doc.lineAt(pos);
+        const col = codeHangColumnFor(state, line.text, capCh);
+        if (col > 0) {
+          marks.push(Decoration.line({ attributes: { class: "cm-code-hang", style: `--hang:${col}ch` } }).range(line.from));
+        }
+        if (line.to + 1 > to) break;
+        pos = line.to + 1;
+      }
+    }
+    return Decoration.set(marks, true);
+  }
+}, { decorations: v => v.decorations });
+
 // 1行につき1つだけ、マーカーが必要ならその仕様を返す(依頼①「1行に出すマーカーは1つ
 // だけ」、VS Codeと同じ)。複数の範囲が同じ行で新たに開く稀なケースでは、最も外側の範囲を
 // 採用する(collectLineFoldOpensが外側→内側の順で返す配列の先頭=opens[0])。クリックすると
@@ -3200,6 +3330,9 @@ function buildFoldOpenMarkers(view) {
   // foldNodeProp経由)は言語が有る場合に限って従来どおり使い、無い場合だけインデント
   // ベースのフォールバック(indentFoldRangeForLine、上記コメント参照)に切り替える。
   const hasLanguage = !!state.facet(language);
+  // 折り返し行のぶら下げインデント(codeHangIndentPlugin)がある行でも、マーカーの位置
+  // 計算に特別な補正は要らない(FoldOpenMarkerWidget定義部の大きなコメント参照。
+  // text-indentによる打ち消しでアンカー自体の画面位置が変わらないため)。
   for (const line of view.viewportLineBlocks) {
     // 不具合修正(旧実装から継承): 範囲が畳まれている行は、view.viewportLineBlocksの
     // BlockInfo自体が「畳まれた範囲全体(複数のソース行ぶん)」を1つの行として表す
@@ -3871,6 +4004,10 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
     // 依頼②: 現在行の強調表示(本文・行番号ガター両方)。コードモード限定なのでここ
     // (codeModeExtras)に置く。setCodeActiveLineHighlight定義部のコメント参照。
     ...(codeActiveLineHighlightOn ? [activeLineHighlightPlugin, activeLineGutterHighlighter] : []),
+    // 依頼: 折り返し行を字下げ位置に揃える(ぶら下げインデント、codeHangIndentPlugin定義部の
+    // コメント参照)。Markdownのcm-hang(リストのぶら下げ)に既定でON/OFFの設定項目が無いのと
+    // 同じく、こちらも常時ONとする(トグル設定は要望に含まれていないため追加しない)。
+    codeHangIndentPlugin,
   ];
   // ソースコードモード(仕様書 V-05): 記法マーカーを隠さない生表示。docModeComp(構文ハイライト)は
   // 外さず、livePreviewComp(装飾・マーカー非表示)だけを空にすることで実現する。markdownモード
