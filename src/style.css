@@ -891,10 +891,113 @@ body:has(.list-pane.drawer-open) .mobile-bar { display: none !important; }
 .search-row { display: flex; gap: 4px; align-items: stretch; }
 .search-row #search-box { flex: 1; min-width: 0; }
 .search-row .btn.tiny { padding: 0 8px; }
-.cm-search-hit { background: var(--accent-soft); color: var(--accent); border-radius: 2px; }
-.cm-search-hit-active { background: #ffd43b; color: #000; } /* ∧∨で選択中のヒット */
-html[data-theme="dark"] .cm-search-hit-active { background: #ffd43b; color: #000; }
-html[data-theme="dark"] .cm-search-hit { background: rgba(61,193,181,.25); color: inherit; }
+/* ---- 検索ヒットのハイライト(本文) ----
+   【旧実装との関係】 ここには以前から .cm-search-hit / .cm-search-hit-active の指定が
+   あったが、このクラス名を付与するJSコードはどこにも存在せず(自前で描くつもりだった
+   名残のデッドコード)、実際の本文には何も表示されていなかった。装飾を付ける側を
+   editor.js に実装した(searchHighlightPlugin)ので、クラス名はそのまま活かし、配色だけを
+   視認性重視で見直す。
+
+   【通常のヒット(.cm-search-hit)】 テーマの主色(--accent)を紙色(--paper)に混ぜた面と、
+   その濃いめの1px枠線の組み合わせにした。
+   ・旧実装の var(--accent-soft) はライト既定で #E1EFED、紙色 #EEF1F0 との実測コントラスト比が
+     1.09:1しかなく「言われないと気づかない」レベルだった。--accent 40%混色にすると
+     実測1.5〜2.2:1まで上がり、さらに var(--accent) そのものの1px枠線(紙との実測3〜4.7:1)が輪郭を
+     はっきりさせる。背景だけに頼らず枠線を併用しているので、テーマによって面が薄めに
+     出ても位置は必ず分かる。
+   ・color は指定しない。コードモードではシンタックスハイライトの色(.ͼ〜、詳細度0-1-0)が
+     文字色を持っており、ここで color を指定すると同点勝負でstyle.css側が勝ってしまい、
+     ハイライト中だけコードの色分けが消える。面は薄いので、元の文字色のままで読める。
+
+   【現在のヒット(.cm-search-hit-active)】 通常のヒットが「テーマ追従の面」である以上、
+   同じ色相の濃淡で区別させると一目では見分けにくい。ここだけはテーマ非依存の橙で
+   固定し、色相ごと変えて区別する(画面内に1つしか無いので浮いても構わない、むしろ
+   すぐ見つかるべき、という判断)。橙は9テーマの --accent(緑・青緑・青・紫・シアン)の
+   いずれとも色相が離れており、通常のヒットと確実に見分けられる。
+   ・ライト: #E8590C。文字色 #1A1200 との実測コントラスト比 4.76:1(WCAG AA)。
+     ライト4テーマの紙色(#EEF1F0 / #F4ECD8 / #FFFFFF / #FDF6E3)に対して実測3.0〜3.4:1。
+   ・ダーク: #FFA94D。文字色 #1A1200 とは 9.0:1、ダーク5テーマの紙色に対して 6.9〜9.5:1。
+     ライトと同じ #E8590C を暗い紙に置くとコントラストが 1.4:1 程度まで落ちるため、
+     明暗で別の橙を使う(既存のCSSも html[data-theme="dark"] で分岐している作法に合わせる)。
+   ・現在のヒットは文字色も固定する(.cm-search-hit.cm-search-hit-active は詳細度0-2-0で
+     シンタックスハイライトに勝つ)。濃い面の上ではコードの色分けより可読性を優先する。 */
+.cm-search-hit {
+  background: color-mix(in srgb, var(--accent) 40%, var(--paper));
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px var(--accent);
+}
+/* ダークテーマだけ混色比を下げる(40%→26%)。ダークの--accentは明度の高い色
+   (#35B3AA / #88C0D0 / #BD93F9 等)が多く、ライトと同じ40%混色にすると面が明るくなりすぎて、
+   その上に載る本文(--ink)とのコントラストが実測2.84:1(night)まで落ちてしまう
+   (ライトは同じ40%でも7.1〜8.7:1を保てる)。26%へ下げると4.3:1以上に戻り、
+   面と紙のコントラスト低下(2.2:1→1.6:1前後)は var(--accent) の枠線(紙に対して
+   実測4.0〜7.4:1)が補う。「面は控えめ・輪郭ははっきり」という枠線併用の狙いどおりの配分。 */
+html[data-theme="dark"] .cm-search-hit {
+  background: color-mix(in srgb, var(--accent) 26%, var(--paper));
+}
+.cm-search-hit.cm-search-hit-active {
+  background: #E8590C;
+  color: #1A1200;
+  box-shadow: 0 0 0 2px #7A2E00;
+}
+html[data-theme="dark"] .cm-search-hit.cm-search-hit-active {
+  background: #FFA94D;
+  color: #1A1200;
+  box-shadow: 0 0 0 2px #FFE3BF;
+}
+
+/* ---- スクロールバー上の検索ヒットの印(オーバービュールーラー) ----
+   editor.js の searchRulerPlugin が .cm-editor へ直接ぶら下げるオーバーレイ。
+   幅は上方の *::-webkit-scrollbar { width: 17px } と揃えてあり、標準スクロールバーに
+   ぴったり重なる。帯自体は pointer-events:none でスクロールバーの操作を妨げず、
+   印だけがクリックを受ける(クリックでその位置へジャンプする)。
+   印の色は通常/現在で本文のハイライトと同じ考え方(通常=テーマ追従、現在=橙で固定)に
+   揃えてあり、本文の色と印の色が対応して見えるようにしている。 */
+#cm-host .cm-editor { position: relative; }
+.cm-search-ruler {
+  --ruler-mark-h: 4px;
+  position: absolute;
+  top: 0; right: 0; bottom: 0;
+  width: 17px;
+  pointer-events: none;
+  z-index: 5;
+}
+.cm-search-ruler[hidden] { display: none; }
+.cm-search-ruler-mark {
+  position: absolute;
+  right: 4px;
+  width: 9px;
+  height: var(--ruler-mark-h);
+  border-radius: 2px;
+  pointer-events: auto;
+  cursor: pointer;
+  /* スクロールバーのつまみ(--ink-mute の55%)の上に重なっても沈まないよう、
+     本文のハイライトより濃い混色(75%)にする。 */
+  background: color-mix(in srgb, var(--accent) 75%, var(--paper));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--paper) 70%, transparent);
+}
+/* 現在のヒットの印: 本文と同じ橙にし、さらに縦に大きくして一目で分かるようにする。 */
+.cm-search-ruler-mark.is-active {
+  right: 2px;
+  width: 13px;
+  height: calc(var(--ruler-mark-h) + 2px);
+  background: #E8590C;
+  box-shadow: 0 0 0 1px #FFE3BF;
+}
+html[data-theme="dark"] .cm-search-ruler-mark.is-active {
+  background: #FFA94D;
+  box-shadow: 0 0 0 1px #7A2E00;
+}
+/* 走査上限(editor.js の SEARCH_RULER_MAX_MARKS)で打ち切った場合、
+   「これで全部ではない」ことを帯の下端の細い線で示す。 */
+.cm-search-ruler[data-truncated="true"]::after {
+  content: "";
+  position: absolute;
+  left: 3px; right: 3px; bottom: 0;
+  height: 2px;
+  background: var(--ink-mute);
+  opacity: .55;
+}
 /* ④ リスト折り返しのハンギングインデント(1行目のテキスト開始位置に揃える)
    不具合修正: セレクタに#cm-hostを足した。移植元のSyncMemoでは上の打ち消し規則が
    `.cm-host .cm-line`(クラス、詳細度0-2-0)で、この規則(.cm-line.cm-hang、同じく0-2-0)とは

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 
 namespace Pane;
@@ -14,6 +15,7 @@ internal static class Program
         Application.ThreadException += (_, e) =>
             Logger.WriteException("未処理例外(UIスレッド)", e.Exception);
         Logger.Write($"=== Pane起動 args=[{string.Join(",", args)}] ===");
+        LogProcessStartToMainElapsed();
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
 
         // Shift_JIS(コードページ932)等のANSI系エンコーディングを使えるようにする。
@@ -90,6 +92,36 @@ internal static class Program
         Application.Run(context);
 
         server.Stop();
+    }
+
+    /// <summary>
+    /// [計測] OSがこのプロセスを起こした時刻(<see cref="Process.StartTime"/>)から
+    /// <see cref="Main"/>の先頭に到達するまでの経過時間をログへ残す。
+    ///
+    /// 実機で「初回起動だけ、MainForm生成からWebView2生成までの間に約8.7秒かかる」現象を
+    /// 追うために追加した(同じプロセス内の2枚目のウィンドウでは同区間が0msのため、
+    /// コードではなくプロセス初回だけの外的コストと分かっている)。この区間は今まで
+    /// まったく計測されておらず、単一ファイル(single-file)の展開・.NETランタイムの起動・
+    /// アセンブリの読み込みにどれだけかかっているのかが実機ログから分からなかった。
+    ///
+    /// ここが大きければ原因は起動時の展開・ランタイム側、小さければ原因はMain到達後
+    /// (=MainForm構築中の[計測]行を見る)と切り分けられる。取得に失敗しても起動は続行する。
+    /// </summary>
+    private static void LogProcessStartToMainElapsed()
+    {
+        try
+        {
+            using Process process = Process.GetCurrentProcess();
+            DateTime startTime = process.StartTime;
+            double elapsedMs = (DateTime.Now - startTime).TotalMilliseconds;
+            Logger.Write($"[計測] プロセス開始→Main到達: {elapsedMs:F0}ms (プロセス開始={startTime:HH:mm:ss.fff})");
+        }
+        catch (Exception ex)
+        {
+            // StartTimeは権限やプロセスの状態によっては取得できないことがある。
+            // 計測できないだけで起動には影響しないため、記録して続行する。
+            Logger.WriteException("[計測] プロセス開始時刻を取得できなかった", ex);
+        }
     }
 
     /// <summary>

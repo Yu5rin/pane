@@ -245,7 +245,7 @@ internal static class PaneDialog
             base.OnHandleCreated(e);
             string? backgroundHex = (_owner as MainForm)?.TitlebarBackgroundOverride;
             string? foregroundHex = (_owner as MainForm)?.TitlebarForegroundOverride;
-            WindowChrome.ApplyTheme(Handle, _isDark, backgroundHex, foregroundHex);
+            WindowChrome.ApplyTheme(this, _isDark, backgroundHex, foregroundHex);
         }
 
         protected override void OnLoad(EventArgs e)

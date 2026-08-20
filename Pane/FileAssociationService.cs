@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using Microsoft.Win32;
 
@@ -20,6 +22,38 @@ namespace Pane;
 /// ただし Windows 10 以降は UserChoice 保護により、登録後も設定画面での手動選択が
 /// 必要になる場合がある(仕様どおりの既知の制約であり、回避策は用いない)。
 /// </summary>
+/// <summary>
+/// 現在レジストリに登録されている「ファイルをダブルクリックしたときに起動するexe」の状態。
+/// 設定画面(src/settings.js)へそのまま渡して表示するためのもの。
+///
+/// Paneはインストーラ無しのポータブル配布(仕様書 第7.1節)で置き場所が自由。関連付けは
+/// 登録した時点のexeのフルパスをレジストリへ書くため、新しいバージョンを別の場所に置いて
+/// 使い始めても、ダブルクリックでは古いバージョンが起動し続ける。実際に v1.0.0 を掴んだまま
+/// v1.0.1 を使っているつもりになる事故が起きたため、判定は「パスが違うかどうか」ではなく
+/// 「関連付け先のexeのバージョンが今より古いかどうか」で行う(同じバージョンが別の場所に
+/// あるだけなら問題は起きないので警告しない)。
+/// </summary>
+/// <param name="Status">
+/// "older"   … 関連付け先が今より古いバージョン(これが主な警告対象)。
+/// "same"    … 今と同じバージョン(パスが違っていても問題なし)。
+/// "newer"   … 今より新しいバージョン。上書きすると新しい版が起動しなくなるため文言を分ける。
+/// "unknown" … exeはあるがバージョンを読み取れなかった。
+/// "missing" … 登録はあるが、そのパスにexeが存在しない(壊れている)。
+/// "none"    … 関連付けが1つも登録されていない。
+/// </param>
+/// <param name="RegisteredPath">レジストリに登録されている代表的なexeのパス(未登録なら空文字)。</param>
+/// <param name="CurrentPath">今動いているPaneのexeのパス。</param>
+/// <param name="ExtensionCount">実際に登録が見つかった拡張子の数。</param>
+/// <param name="RegisteredVersion">関連付け先exeのバージョン表記(読めなければ空文字)。</param>
+/// <param name="CurrentVersion">今動いているPaneのバージョン表記(読めなければ空文字)。</param>
+internal sealed record AssociationTarget(
+    string Status,
+    string RegisteredPath,
+    string CurrentPath,
+    int ExtensionCount,
+    string RegisteredVersion,
+    string CurrentVersion);
+
 internal static class FileAssociationService
 {
     /// <summary>拡張子ごとのProgIDの接頭辞。実際のProgIDは "Pane.File.md" のようになる。</summary>
@@ -62,6 +96,13 @@ internal static class FileAssociationService
 
     private static string ProgIdFor(string ext) => $"{ProgIdPrefix}{ext}";
 
+    /// <summary>
+    /// 今動いているPaneのexeのフルパス。関連付けの登録時に書き込む値であり、
+    /// 「現在の登録先が自分自身かどうか」の比較の基準でもあるため、
+    /// 両者で必ず同じ値を使うようここへ一本化する。
+    /// </summary>
+    public static string CurrentExePath => Environment.ProcessPath ?? Path.Combine(AppContext.BaseDirectory, "Pane.exe");
+
     /// <summary>拡張子表記を「ドット無し・小文字」に正規化する。呼び出し元の表記揺れ(先頭ドット有無・大文字)を吸収する。</summary>
     private static HashSet<string> Normalize(IReadOnlyCollection<string> extensions) =>
         new(extensions.Select(e => e.TrimStart('.').ToLowerInvariant()).Where(e => e.Length > 0), StringComparer.Ordinal);
@@ -71,6 +112,251 @@ internal static class FileAssociationService
         string ext = extension.TrimStart('.').ToLowerInvariant();
         using RegistryKey? key = Registry.CurrentUser.OpenSubKey($@"Software\Classes\{ProgIdFor(ext)}");
         return key is not null;
+    }
+
+    /// <summary>
+    /// 1つの拡張子について、いまレジストリに登録されている起動コマンドのexeパスを返す。
+    /// 読むのは登録時に書いたのと同じ
+    /// <c>HKCU\Software\Classes\Pane.File.&lt;ext&gt;\shell\open\command</c> の既定値で、
+    /// 値は <c>"C:\...\Pane.exe" "%1"</c> の形なので先頭の引用符で囲まれた部分を取り出す。
+    /// 未登録・読めない場合はnullを返す(読み取りだけなので例外は投げない)。
+    /// </summary>
+    public static string? ReadRegisteredExePath(string extension)
+    {
+        string ext = extension.TrimStart('.').ToLowerInvariant();
+        if (ext.Length == 0) return null;
+
+        try
+        {
+            using RegistryKey? key = Registry.CurrentUser.OpenSubKey($@"Software\Classes\{ProgIdFor(ext)}\shell\open\command");
+            if (key?.GetValue(string.Empty) is not string command) return null;
+            return ExtractExePath(command);
+        }
+        catch (Exception ex)
+        {
+            // 表示のための読み取りにすぎないので、失敗しても「不明(未登録扱い)」として続ける。
+            Logger.WriteException($"FileAssociationService: .{ext} の登録先exeパスの読み取りに失敗", ex);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// レジストリの起動コマンド文字列からexeのパスだけを取り出す。
+    /// 通常は <c>"C:\...\Pane.exe" "%1"</c> のように引用符で囲まれているが、
+    /// 手で書き換えられて引用符が無い場合もあるため、その場合は最初の空白までを採る。
+    /// </summary>
+    internal static string? ExtractExePath(string command)
+    {
+        string text = (command ?? string.Empty).Trim();
+        if (text.Length == 0) return null;
+
+        if (text[0] == '"')
+        {
+            int end = text.IndexOf('"', 1);
+            if (end <= 1) return null;
+            return text.Substring(1, end - 1);
+        }
+
+        int space = text.IndexOf(' ');
+        string candidate = space < 0 ? text : text.Substring(0, space);
+        return candidate.Length == 0 ? null : candidate;
+    }
+
+    /// <summary>
+    /// Windowsのパスは大文字小文字を区別せず、相対要素("..")や末尾の区切りでも同じ場所を指すため、
+    /// 比較前に <see cref="Path.GetFullPath(string)"/> で正規化する。
+    /// 正規化できない文字列(不正なパス)はそのまま返し、比較で一致しない側へ倒す。
+    /// </summary>
+    private static string NormalizeForCompare(string path)
+    {
+        try
+        {
+            return Path.GetFullPath(path).TrimEnd('\\', '/');
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException or System.Security.SecurityException)
+        {
+            return path;
+        }
+    }
+
+    /// <summary>
+    /// 今動いているPane自身のバージョン表記("1.0.1")を返す。読めなければnull。
+    ///
+    /// .NETの AssemblyName.Version は仕様上どうしても4桁(1.0.1.0)になるため、
+    /// csprojの&lt;Version&gt;から作られる InformationalVersion("1.0.1")を優先して使う
+    /// (Pane.csproj のコメント参照)。設定の「バージョン情報」に出る表記
+    /// (SettingsBridge.DetectAppVersion)と必ず同じ値になるよう、取得はここへ一本化し、
+    /// 向こうからもこれを呼ぶ。関連付け先exeのバージョンは ProductVersion から読むので、
+    /// どちらも「csprojの&lt;Version&gt;由来の3桁表記」という同じ土俵で比較できる。
+    /// </summary>
+    public static string? ReadOwnVersionText()
+    {
+        string? informational = Assembly.GetExecutingAssembly()
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        if (!string.IsNullOrWhiteSpace(informational))
+        {
+            // ビルド環境によっては "1.0.1+<コミットハッシュ>" の形になるため、"+"以降は落とす。
+            int plus = informational.IndexOf('+');
+            return plus >= 0 ? informational[..plus] : informational;
+        }
+
+        // InformationalVersionが取れない場合は4桁から先頭3つだけを使う。
+        Version? v = Assembly.GetExecutingAssembly().GetName().Version;
+        return v?.ToString(3);
+    }
+
+    /// <summary>
+    /// 指定したexeのバージョン表記を返す。読めなければnull。
+    /// ProductVersion は AssemblyInformationalVersion から作られるため3桁("1.0.1")で、
+    /// 自分自身のバージョン(<see cref="ReadOwnVersionText"/>)とそのまま比較できる。
+    /// 取れない場合のみ、4桁になる FileVersion("1.0.1.0")へフォールバックする
+    /// (桁数の違いは <see cref="ParseVersion"/> が4桁へ揃えて吸収する)。
+    /// </summary>
+    public static string? ReadExeVersionText(string exePath)
+    {
+        try
+        {
+            FileVersionInfo info = FileVersionInfo.GetVersionInfo(exePath);
+            string? text = info.ProductVersion;
+            if (string.IsNullOrWhiteSpace(text)) text = info.FileVersion;
+            return string.IsNullOrWhiteSpace(text) ? null : text.Trim();
+        }
+        catch (Exception ex)
+        {
+            // 表示のための読み取りにすぎないので、失敗しても「バージョン不明」として続ける。
+            Logger.WriteException($"FileAssociationService: exeのバージョン読み取りに失敗: {exePath}", ex);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// バージョン表記を比較可能な <see cref="Version"/> に変換する。読めなければnull。
+    ///
+    /// 比較は必ずここを通す(文字列一致では "1.0.10" と "1.0.9" の大小を誤るため)。
+    /// あわせて次の2点を吸収する。
+    ///   ・"1.0.1+&lt;ハッシュ&gt;" / "1.0.1-beta" のような追記を落とす。
+    ///   ・Versionは桁数が違うと同じ番号でも等しくならない(1.0.1 と 1.0.1.0)ので、
+    ///     欠けている桁を0で埋めて必ず4桁に揃える。
+    /// </summary>
+    internal static Version? ParseVersion(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+
+        string core = text.Trim();
+        int plus = core.IndexOf('+');
+        if (plus >= 0) core = core[..plus];
+        int hyphen = core.IndexOf('-');
+        if (hyphen >= 0) core = core[..hyphen];
+
+        if (!Version.TryParse(core, out Version? v)) return null;
+        return new Version(
+            Math.Max(v.Major, 0),
+            Math.Max(v.Minor, 0),
+            Math.Max(v.Build, 0),
+            Math.Max(v.Revision, 0));
+    }
+
+    /// <summary>
+    /// 状態の深刻さ(小さいほど深刻)。複数の拡張子でバラバラの登録が残っている場合に、
+    /// いちばん問題のあるものを代表として画面に出すために使う。
+    /// </summary>
+    private static int SeverityRank(string status) => status switch
+    {
+        "missing" => 0,
+        "older" => 1,
+        "unknown" => 2,
+        "newer" => 3,
+        _ => 4, // same
+    };
+
+    /// <summary>
+    /// 登録先exeのパス1つを、今動いているPaneと比べて状態へ分類する。
+    /// </summary>
+    private static (string Status, string? VersionText) ClassifyRegistered(
+        string registeredPath, string currentPath, Version? currentVersion, string? currentVersionText)
+    {
+        // 今動いているexe自身を指しているなら、ファイルを読み直すまでもなく同じバージョン。
+        if (NormalizeForCompare(registeredPath).Equals(NormalizeForCompare(currentPath), StringComparison.OrdinalIgnoreCase))
+        {
+            return ("same", currentVersionText);
+        }
+
+        bool exists;
+        try
+        {
+            exists = File.Exists(registeredPath);
+        }
+        catch (Exception ex)
+        {
+            // 存在確認そのものに失敗した場合は「壊れている」と断定せず、バージョン不明として扱う。
+            Logger.WriteException($"FileAssociationService: 登録先exeの存在確認に失敗: {registeredPath}", ex);
+            return ("unknown", null);
+        }
+        if (!exists) return ("missing", null);
+
+        string? versionText = ReadExeVersionText(registeredPath);
+        Version? registeredVersion = ParseVersion(versionText);
+        if (registeredVersion is null || currentVersion is null) return ("unknown", versionText);
+
+        int cmp = registeredVersion.CompareTo(currentVersion);
+        if (cmp < 0) return ("older", versionText);
+        if (cmp > 0) return ("newer", versionText);
+        return ("same", versionText);
+    }
+
+    /// <summary>
+    /// 渡した拡張子群について、いまレジストリに登録されている関連付け先を調べて返す
+    /// (設定画面の「現在の関連付け先」表示用)。レジストリへの書き込みは一切行わない
+    /// (設定画面を開いただけで関連付けが変わることは無い)。
+    ///
+    /// 登録が1つも見つからなければ "none"。見つかった場合は拡張子ごとに状態を求め、
+    /// いちばん深刻なもの(<see cref="SeverityRank"/>)を代表として返す
+    /// (一部の拡張子だけ古いバージョンを指したまま残っている状態を見逃さないため)。
+    /// </summary>
+    public static AssociationTarget GetCurrentTarget(IReadOnlyCollection<string> extensions)
+    {
+        string currentPath = CurrentExePath;
+        string? currentVersionText = ReadOwnVersionText();
+        Version? currentVersion = ParseVersion(currentVersionText);
+
+        string bestStatus = "none";
+        string? bestPath = null;
+        string? bestVersionText = null;
+        int bestRank = int.MaxValue;
+        int registeredCount = 0;
+
+        foreach (string ext in Normalize(extensions))
+        {
+            string? registeredPath = ReadRegisteredExePath(ext);
+            if (registeredPath is null) continue;
+            registeredCount++;
+
+            (string status, string? versionText) = ClassifyRegistered(registeredPath, currentPath, currentVersion, currentVersionText);
+            int rank = SeverityRank(status);
+            if (rank >= bestRank) continue;
+
+            bestRank = rank;
+            bestStatus = status;
+            bestPath = registeredPath;
+            bestVersionText = versionText;
+        }
+
+        if (registeredCount == 0)
+        {
+            Logger.Write("FileAssociationService.GetCurrentTarget: 関連付けの登録は見つからなかった");
+            return new AssociationTarget("none", string.Empty, currentPath, 0, string.Empty, currentVersionText ?? string.Empty);
+        }
+
+        Logger.Write($"FileAssociationService.GetCurrentTarget: status={bestStatus}, 登録先={bestPath}, " +
+                     $"登録先バージョン={bestVersionText ?? "不明"}, 現在={currentPath}({currentVersionText ?? "不明"}), 対象拡張子数={registeredCount}");
+
+        return new AssociationTarget(
+            bestStatus,
+            bestPath ?? string.Empty,
+            currentPath,
+            registeredCount,
+            bestVersionText ?? string.Empty,
+            currentVersionText ?? string.Empty);
     }
 
     /// <summary>
@@ -159,7 +445,7 @@ internal static class FileAssociationService
 
         try
         {
-            string exePath = Environment.ProcessPath ?? Path.Combine(AppContext.BaseDirectory, "Pane.exe");
+            string exePath = CurrentExePath;
 
             foreach (string ext in exts)
             {
