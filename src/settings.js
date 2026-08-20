@@ -335,6 +335,44 @@ function comboFromEvent(e) {
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
+// ---- 現在の関連付け先(「ファイルの関連付け」カテゴリ) ----
+// Paneはインストーラ無しのポータブル配布のため、exeの置き場所が自由。関連付けは登録した
+// 時点のexeのフルパスをレジストリへ書くので、新しいバージョンを別の場所に置いて使い始めても、
+// ファイルをダブルクリックしたときには古いバージョンが起動し続ける(実際にv1.0.0を掴んだまま
+// v1.0.1を使っているつもりになる事故が起きた)。それを利用者に見せて直せるようにするための
+// 表示とボタン。
+//
+// 判定は「パスが違うかどうか」ではなく「関連付け先exeのバージョンが今より古いかどうか」で行う
+// (同じバージョンが別の場所にあるだけなら実害が無いので警告しない)。状態はC#側
+// (FileAssociationService.GetCurrentTarget)が決める6種類:
+//   older   … 今より古いバージョンを指している(これが主な警告対象)
+//   same    … 今と同じバージョン(パスが違っていても問題なし)
+//   newer   … 今より新しいバージョン。上書きすると新しい版が起動しなくなるので文言を分ける
+//   unknown … exeはあるがバージョンを読み取れなかった
+//   missing … 登録先のexeが存在しない(壊れている)
+//   none    … 関連付けが1つも登録されていない
+const ASSOC_STATUSES = ["older", "same", "newer", "unknown", "missing", "none"];
+// 「関連付けを今のPaneに更新」ボタンが送るsave-settingsに付ける目印。C#側はこれを
+// そのままsave-settings-resultへ返してくるので、通常の「保存」ボタンの結果と区別できる。
+const ASSOC_REFRESH_REASON = "refresh-file-association";
+
+function normalizeAssocTarget(value) {
+  const v = value && typeof value === "object" ? value : {};
+  return {
+    status: ASSOC_STATUSES.includes(v.status) ? v.status : "none",
+    path: typeof v.path === "string" ? v.path : "",
+    currentPath: typeof v.currentPath === "string" ? v.currentPath : "",
+    extensionCount: Number.isFinite(v.extensionCount) ? v.extensionCount : 0,
+    registeredVersion: typeof v.registeredVersion === "string" ? v.registeredVersion : "",
+    currentVersion: typeof v.currentVersion === "string" ? v.currentVersion : "",
+  };
+}
+
+// バージョン表記の表示用("1.0.1" → "v1.0.1"。読めなかった場合は「バージョン不明」)。
+function assocVersionLabel(text) {
+  return text ? `v${escapeHtml(text)}` : "バージョン不明";
+}
+
 // ---- 設定項目のツールチップ(依頼2) ----
 // src/tooltips.jsのTOOLTIPSに個別の文言が無い項目のフォールバックとして、
 // 「ラベル。説明」の形の文言を組み立てるための下ごしらえ。field*ヘルパーが
@@ -863,6 +901,9 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     draft.logFolderPath = typeof msg.logFolderPath === "string" ? msg.logFolderPath : "";
     draft.themeFolderPath = typeof msg.themeFolderPath === "string" ? msg.themeFolderPath : "";
     draft.licenses = Array.isArray(msg.licenses) ? msg.licenses.slice() : [];
+    // いまレジストリに登録されている関連付け先(表示専用。保存対象ではない)。
+    // C#側 FileAssociationService.GetCurrentTarget の結果で、押したときだけ更新される。
+    draft.fileAssociationTarget = normalizeAssocTarget(msg.fileAssociationTarget);
 
     selectedExtensions = new Set(draft.associatedExtensions);
     fmRows = buildFmRows(draft.fileModeOverrides);
@@ -942,6 +983,9 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
   // main.jsのhandleHostMessageから"save-settings-result"受信時に呼ばれる。
   function handleSaveResult(msg) {
     if (!overlay) return;
+    // 「関連付けを今のPaneに更新」ボタンの結果は、通常の保存とは扱いが全く違う
+    // (画面は閉じない・保存ボタンの状態も触らない)ため、先に分岐する。
+    if (msg.reason === ASSOC_REFRESH_REASON) { handleAssocRefreshResult(msg); return; }
     if (saveBtn) saveBtn.disabled = false;
     if (!msg.ok) {
       setMessage(msg.error || "設定を保存できませんでした。", true);
@@ -958,6 +1002,69 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     }
     blockedExtensions = [];
     destroy();
+  }
+
+  // ---- 「関連付けを今のPaneに更新」ボタン ----
+  // 現在チェックが入っている拡張子を「一括で」今のexeへ登録し直す。登録そのものは
+  // C#側の既存処理(FileAssociationService.Apply→Register)がそのまま行うため、
+  // ここで新しい登録ロジックは持たない。
+  //
+  // 送るのは既存の save-settings で、settingsには associatedExtensions だけを載せる。
+  // C#側は「含まれている項目だけ反映する」部分更新なので、編集途中の他の設定を巻き込んで
+  // 保存してしまうことは無い(通常の「保存」ボタンが送る全項目のペイロードとは別物)。
+  // 通常の保存と区別するため reason を付け、C#側はそれを応答へそのまま返してくる。
+  let assocRefreshPending = false;
+
+  async function refreshFileAssociation(btn) {
+    if (!ctx.bridge) {
+      // ブリッジが無いブラウザ単体動作ではレジストリが無いため実行できない(保存と同じ扱い)。
+      await paneAlert({ title: "更新できません", message: "ファイルの関連付けの更新は、デスクトップアプリ版でのみ利用できます。" });
+      return;
+    }
+    if (assocRefreshPending) return; // 連打で二重に送らない
+    assocRefreshPending = true;
+    if (btn) btn.disabled = true;
+    ctx.bridge.postMessage({
+      type: "save-settings",
+      reason: ASSOC_REFRESH_REASON,
+      settings: { associatedExtensions: Array.from(selectedExtensions) },
+    });
+  }
+
+  // 上のボタンで送ったsave-settingsの応答。表示を最新の関連付け先へ差し替えたうえで、
+  // 結果を独自ダイアログ(paneAlert)で知らせる。失敗は握りつぶさずそのまま伝える。
+  async function handleAssocRefreshResult(msg) {
+    assocRefreshPending = false;
+    if (draft) draft.fileAssociationTarget = normalizeAssocTarget(msg.fileAssociationTarget);
+    if (Array.isArray(msg.blockedExtensions)) blockedExtensions = msg.blockedExtensions.slice();
+    // 「現在の関連付け先」の表示を更新する(このカテゴリを開いているときだけ描き直せばよい)。
+    if (activeCategory === "fileTypes") renderContent();
+
+    if (!msg.ok) {
+      await paneAlert({
+        title: "関連付けを更新できませんでした",
+        message: msg.error || "ファイルの関連付けを更新できませんでした。ログ(設定→バージョン情報→今日のログを開く)に詳細が記録されています。",
+      });
+      return;
+    }
+
+    const t = draft?.fileAssociationTarget ?? normalizeAssocTarget(msg.fileAssociationTarget);
+    const count = t.extensionCount;
+    if (count === 0) {
+      await paneAlert({
+        title: "関連付けは登録されていません",
+        message: "チェックが入っている拡張子が無いため、関連付けは登録されませんでした。ダブルクリックでPaneを開きたい拡張子にチェックを入れてから、もう一度お試しください。",
+      });
+      return;
+    }
+    const versionText = t.currentVersion ? `Pane v${t.currentVersion}` : "今のPane";
+    let message = `${count}件の拡張子の関連付けを、今の${versionText}(${t.currentPath || "パス不明"})へ登録し直しました。`;
+    if (blockedExtensions.length) {
+      // UserChoice(Windowsの「既定のアプリ」)で他アプリが選ばれている拡張子は、
+      // アプリ側からは変更できない。従来どおり画面側に案内を出したうえで、ここでも触れておく。
+      message += `\n\nただし ${blockedExtensions.map((e) => "." + e).join(" ")} は、Windowsの「既定のアプリ」で他のアプリが選ばれているため変更できませんでした。画面の案内から選び直してください。`;
+    }
+    await paneAlert({ title: "関連付けを更新しました", message });
   }
 
   // 「参照…」ボタンの応答。draftの該当キーへ入れ、そのフィールドが今表示中なら入力欄にも反映する。
@@ -1542,6 +1649,60 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     });
   }
 
+  // ---- 現在の関連付け先の表示 + 「関連付けを今のPaneに更新」ボタン ----
+  // 状態ごとに文言と見た目を変える。注意を促す3状態(older/missing/newer)は、
+  // 既存の警告用クラス(.ft-blocked-warn)をそのまま使う(新しい配色は増やさない)。
+  // ボタンはどの状態でも押せる(「同じバージョン」でも押して困ることは無い)。
+  function assocTargetHtml() {
+    const t = draft.fileAssociationTarget ?? normalizeAssocTarget(null);
+    const here = t.currentPath
+      ? `今のPane: ${assocVersionLabel(t.currentVersion)}(${escapeHtml(t.currentPath)})`
+      : `今のPane: ${assocVersionLabel(t.currentVersion)}`;
+    const there = t.path ? escapeHtml(t.path) : "(不明)";
+    // 「更新」という言い方は、新しい版を古い版で上書きすることになるnewerでは使わない。
+    const btnLabel = t.status === "newer" ? "関連付けを今のPaneに切り替える" : "関連付けを今のPaneに更新";
+    const btn = `<button type="button" class="btn tiny" data-action="refresh-file-association" data-tip="refreshFileAssociation">${btnLabel}</button>`;
+
+    // 注意を促す状態。<p>に本文、その下にボタンを置く(.ft-blocked-warnの中身と同じ作り)。
+    const warn = (text) =>
+      `<div class="ft-blocked-warn" data-assoc-status="${t.status}"><p>${text}</p>${btn}</div>`;
+    // 問題の無い状態。「バージョン情報」カテゴリと同じ1行レイアウト。
+    const info = (text) =>
+      `<div class="settings-info-row" data-assoc-status="${t.status}"><span class="settings-info-label">${text}</span>${btn}</div>`;
+
+    switch (t.status) {
+      case "older":
+        return warn(
+          `ファイルをダブルクリックしたときに起動するのは、<b>今より古い ${assocVersionLabel(t.registeredVersion)} のPane</b>です(${there})。` +
+          `そのため、この${assocVersionLabel(t.currentVersion)}での修正や設定は、ダブルクリックで開いたときには反映されません。` +
+          `下のボタンを押すと、チェックしている拡張子すべてをまとめて今のPaneへ登録し直します。<br>${here}`
+        );
+      case "missing":
+        return warn(
+          `関連付けに登録されているPaneが見つかりません(${there})。exeを移動または削除したあと、関連付けだけが古い場所を指したまま残っています。` +
+          `このままではファイルをダブルクリックしても開けません。下のボタンを押すと、チェックしている拡張子すべてをまとめて今のPaneへ登録し直します。<br>${here}`
+        );
+      case "newer":
+        return warn(
+          `関連付けられているのは、<b>今より新しい ${assocVersionLabel(t.registeredVersion)} のPane</b>です(${there})。` +
+          `下のボタンを押すと、ダブルクリックで開くPaneはこの${assocVersionLabel(t.currentVersion)}に変わり、新しい方は使われなくなります。` +
+          `新しい方を使い続けたい場合は、このまま何もしないでください。<br>${here}`
+        );
+      case "unknown":
+        return info(
+          `関連付けられているPaneのバージョンを読み取れませんでした: ${there}。<br>${here}`
+        );
+      case "none":
+        return info(
+          `ファイルの関連付けはまだ登録されていません。<br>${here}`
+        );
+      default: // same
+        return info(
+          `この Pane(${assocVersionLabel(t.currentVersion)})が関連付けられています。ダブルクリックで開くPaneは最新の状態です。<br>${here}`
+        );
+    }
+  }
+
   // ---- ファイルの関連付け(3階層チェックボックス、仕様書 C-13) ----
   // カテゴリ→言語→拡張子の3階層。カテゴリ・言語のチェックは配下すべての一括ON/OFFとし、
   // 配下が一部だけONならindeterminate(中間状態)にする。DOM自体は開くたびに1回だけ組み立て、
@@ -1593,6 +1754,10 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     el.innerHTML = `
       ${blockedBanner}
       <p class="settings-intro">チェックした拡張子のファイルを、エクスプローラーからダブルクリックしたときにPaneで開くようにします。</p>
+      <div class="settings-group" data-assoc-target>
+        <div class="settings-group-title">現在の関連付け先</div>
+        ${assocTargetHtml()}
+      </div>
       <div class="ft-quickrow">
         <button type="button" class="btn tiny" data-quick="markdown">マークダウンのみ</button>
         <button type="button" class="btn tiny" data-quick="all">すべて選択</button>
@@ -1608,6 +1773,11 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
 
     const openApps = el.querySelector('[data-action="open-default-apps-settings"]');
     if (openApps) openApps.addEventListener("click", () => ctx.bridge?.postMessage({ type: "open-default-apps-settings" }));
+
+    // 「関連付けを今のPaneに更新」。押したときだけレジストリを書き換える(この画面を
+    // 開いただけでは何も起きない)。
+    const refreshAssoc = el.querySelector('[data-action="refresh-file-association"]');
+    if (refreshAssoc) refreshAssoc.addEventListener("click", () => refreshFileAssociation(refreshAssoc));
 
     // 拡張子ごとの「開く方法を選ぶ」ダイアログ(C#側 DefaultAppsHelper.OpenWithDialog)。
     for (const btn of el.querySelectorAll("[data-open-with]")) {

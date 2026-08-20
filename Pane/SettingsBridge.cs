@@ -160,6 +160,9 @@ internal static class SettingsBridge
             associatedExtensions = settings.AssociatedExtensions,
             fileAssociationEnabled = settings.FileAssociationEnabled,
             explorerNewMenuEnabled = settings.ExplorerNewMenuEnabled,
+            // いまレジストリに登録されている関連付け先のexe(設定画面「ファイルの関連付け」
+            // カテゴリの「現在の関連付け先」表示用)。表示専用でありsave-settingsでは受け取らない。
+            fileAssociationTarget = BuildFileAssociationTargetPayload(settings),
 
             // ---- キーボード ----
             keyBindings = settings.KeyBindings,
@@ -210,17 +213,10 @@ internal static class SettingsBridge
     /// </summary>
     private static string DetectAppVersion()
     {
-        string? informational = Assembly.GetExecutingAssembly()
-            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
-        if (!string.IsNullOrWhiteSpace(informational))
-        {
-            // ビルド環境によっては "1.0.0+<コミットハッシュ>" の形になるため、"+"以降は落とす。
-            int plus = informational.IndexOf('+');
-            return plus >= 0 ? informational[..plus] : informational;
-        }
-        // InformationalVersionが取れない場合は4桁から先頭3つだけを使う。
-        Version? v = Assembly.GetExecutingAssembly().GetName().Version;
-        return v is null ? "不明" : v.ToString(3);
+        // 実処理は FileAssociationService.ReadOwnVersionText に一本化してある。
+        // 「現在の関連付け先」表示では、ここに出るバージョンと関連付け先exeのバージョンを
+        // 比べるため、両者が必ず同じ取り方になっている必要があるため。
+        return FileAssociationService.ReadOwnVersionText() ?? "不明";
     }
 
     /// <summary>WebView2ランタイムのバージョン。未導入等で取得できない場合は「不明」。</summary>
@@ -236,6 +232,32 @@ internal static class SettingsBridge
             return "不明";
         }
     }
+
+    /// <summary>
+    /// 「現在レジストリに登録されている関連付け先」を設定画面へ渡せる形にする。
+    /// 対象にするのは設定に保存されている拡張子(旧実装からの移行分を含む
+    /// <see cref="AppSettings.GetEffectiveAssociatedExtensions"/>)で、レジストリへの
+    /// 書き込みは一切行わない(設定画面を開いただけで関連付けが変わることは無い)。
+    /// </summary>
+    private static object BuildFileAssociationTargetPayload(AppSettings settings)
+    {
+        AssociationTarget target = FileAssociationService.GetCurrentTarget(settings.GetEffectiveAssociatedExtensions());
+        return BuildFileAssociationTargetPayload(target);
+    }
+
+    /// <summary>
+    /// <see cref="AssociationTarget"/> を設定画面へ渡すJSONの形に変換する
+    /// (get-settings と save-settings-result の両方で同じ形を使う)。
+    /// </summary>
+    private static object BuildFileAssociationTargetPayload(AssociationTarget target) => new
+    {
+        status = target.Status,
+        path = target.RegisteredPath,
+        currentPath = target.CurrentPath,
+        extensionCount = target.ExtensionCount,
+        registeredVersion = target.RegisteredVersion,
+        currentVersion = target.CurrentVersion,
+    };
 
     /// <summary>
     /// { type: "save-settings", settings: {...} } を受け取り、含まれている項目だけを
@@ -258,6 +280,14 @@ internal static class SettingsBridge
 
         // Windowsの「既定のアプリ」(UserChoice)で他アプリが選ばれている拡張子。設定画面へ案内する。
         IReadOnlyList<string> blockedExtensions = Array.Empty<string>();
+
+        // 呼び出し側(JS)が付けた任意の目印。応答へそのまま返すことで、JS側が
+        // 「通常の保存ボタン」と「関連付けを今のPaneに更新ボタン」を区別できるようにする
+        // (設定画面のボタンは save-settings に associatedExtensions だけを載せて送る)。
+        string? reason = TryGetString(root, "reason", out string reasonValue) ? reasonValue : null;
+
+        // 保存後の関連付け先を応答へ含めるため、書き込み後の拡張子集合を控えておく。
+        IReadOnlyCollection<string> savedExtensions = Array.Empty<string>();
 
         // Lost Update対策(SettingsService.Update参照)。previousExtensions等の「変更前の値」は
         // ここで読み直す最新の設定(settings、Update内でLoad()される)から取るため、
@@ -522,7 +552,14 @@ internal static class SettingsBridge
                 }
             }
 
+            // 応答に「現在の関連付け先」を載せるため、書き込みが終わった時点の値を控える。
+            savedExtensions = settings.GetEffectiveAssociatedExtensions();
+
         }); // SettingsService.Update終わり(この時点でLoad→上の変更適用→アトミック保存まで完了している)
+
+        // レジストリを実際に読み直して「今どこを指しているか」を返す(書き込みはしない)。
+        // 更新ボタンを押した直後に設定画面の表示を最新にするために使う。
+        AssociationTarget target = FileAssociationService.GetCurrentTarget(savedExtensions);
 
         postToWeb(new
         {
@@ -530,6 +567,8 @@ internal static class SettingsBridge
             ok = errorMessage is null,
             error = errorMessage,
             blockedExtensions,
+            reason,
+            fileAssociationTarget = BuildFileAssociationTargetPayload(target),
         });
 
         // 設定はアプリ全体で共有されるため、自分のウィンドウだけでなく他のウィンドウにも反映する。
