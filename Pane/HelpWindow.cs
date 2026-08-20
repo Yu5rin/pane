@@ -230,7 +230,7 @@ internal sealed class HelpWindow : Form
         base.OnHandleCreated(e);
         AppSettings settings = SettingsService.Load();
         bool isDark = MainForm.ResolveIsDarkTheme(settings.Theme);
-        WindowChrome.ApplyTheme(Handle, isDark);
+        WindowChrome.ApplyTheme(this, isDark);
     }
 
     private void OnLoadAsync(object? sender, EventArgs e)
