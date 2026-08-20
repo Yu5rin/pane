@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security;
 using System.Text;
@@ -245,6 +246,24 @@ internal sealed class MainForm : Form
         // OnLoadAsync側でNavigate前にdata-theme属性を注入することで対処する(そちらを参照)。
         ApplyInitialWebViewBackground();
 
+        // ---- [計測] 「初回起動だけこの区間に約8.7秒かかる」問題の切り分け用 ----
+        // 実機ログでは ApplyInitialWebViewBackground のログ行と「WebView2を非表示で生成」の
+        // ログ行の間に約8.68秒の空白があるが、その間に実際にあるコードは以下の数行しかない。
+        // 同じプロセス内で2枚目のウィンドウを作ると同じ区間が0msになるため、原因はコードでは
+        // なく「プロセス初回だけの外的コスト」(WebView2アセンブリの遅延ロード・ランタイム検出等)
+        // と分かっている。どの行でそれが起きているのかを実機ログだけで特定できるよう、
+        // 1ステップずつ経過ミリ秒を残す。特に Controls.Add(_webView) の前後は必ず分ける
+        // (親コントロールへの追加時にWebView2側の初期化が走りうるため)。
+        // 常時出力。後からgrepできるよう接頭辞を[計測]に揃える。
+        var buildStopwatch = Stopwatch.StartNew();
+        long lastStepMs = 0;
+        void LogBuildStep(string step)
+        {
+            long now = buildStopwatch.ElapsedMilliseconds;
+            Logger.Write($"[計測] MainForm構築 {step}: +{now - lastStepMs}ms (計測開始から{now}ms)");
+            lastStepMs = now;
+        }
+
         // ウィンドウ全体(タイトルバー等の非クライアント領域)へのD&D用。
         // 不具合修正の経緯: 一度は「WebView2のAllowExternalDropをfalseにして、クライアント領域上の
         // ドロップもすべてこのフォーム自身のDragDrop(OnDragDrop)で受け切る」方式を試みた。
@@ -265,9 +284,12 @@ internal sealed class MainForm : Form
         DragOver += OnDragEnter;
         DragDrop += OnDragDrop;
         DragLeave += OnDragLeave;
+        LogBuildStep("AllowDrop=true+D&Dイベント購読");
 
         _webView.Dock = DockStyle.Fill;
+        LogBuildStep("_webView.Dock=Fill");
         Controls.Add(_webView);
+        LogBuildStep("Controls.Add(_webView)");
 
         // 起動時の白フラッシュ対策(新方式、実機不具合の再修正): 従来の「背景色を先に塗る
         // +HTML側のタイミング調整」だけでは実機で直らなかった(ヘッドレス環境では実機の
@@ -279,6 +301,7 @@ internal sealed class MainForm : Form
         // 表示に切り替えるのはRevealWebView(JS側の"initial-render-ready"、または
         // フォールバックタイマー)。
         _webView.Visible = false;
+        LogBuildStep("_webView.Visible=false");
         Logger.Write("WebView2を非表示で生成(initial-render-ready受信まで表示しない)");
         _webViewRevealFallbackTimer = new System.Windows.Forms.Timer { Interval = WebViewRevealFallbackMs };
         _webViewRevealFallbackTimer.Tick += (_, _) => RevealWebView(viaFallback: true);
@@ -381,13 +404,25 @@ internal sealed class MainForm : Form
     /// があればそちらで上書きする。<see cref="WindowChrome"/>側で例外はすべて握りつぶされるため、
     /// ここから先で失敗してもアプリは落ちない。
     /// </summary>
-    private void ApplyTitleBarTheme() => ApplyTitleBarTheme(SettingsService.Load());
+    /// <remarks>
+    /// callerは「このウィンドウのタイトルバー塗り直しを誰が要求したか」(OnHandleCreated /
+    /// PostCapabilities / OnWebMessageReceived 等)を、コンパイラが自動で埋める呼び出し元名。
+    /// このメソッド自体が中継役なので、そのままWindowChrome側へ素通しして実機ログに残す
+    /// (そうしないとログ上の呼び出し元がいつもApplyTitleBarThemeになってしまい、
+    /// 「0.37秒ごとに呼ばれ続ける」経路の特定に使えない)。
+    /// </remarks>
+    private void ApplyTitleBarTheme([CallerMemberName] string caller = "")
+        => ApplyTitleBarTheme(SettingsService.Load(), caller);
 
-    private void ApplyTitleBarTheme(AppSettings settings)
+    private void ApplyTitleBarTheme(AppSettings settings, [CallerMemberName] string caller = "")
     {
         if (!IsHandleCreated) return;
         bool isDark = ResolveIsDarkTheme(settings.Theme);
-        WindowChrome.ApplyTheme(Handle, isDark, _titlebarBackgroundOverride, _titlebarForegroundOverride);
+        // callerFile/callerLineはコンパイラの自動補完に任せず明示的に渡す(自動補完だと
+        // 中継役であるこのメソッドの位置が入ってしまうため)。行番号は意味を持たないので0。
+        WindowChrome.ApplyTheme(
+            this, isDark, _titlebarBackgroundOverride, _titlebarForegroundOverride,
+            callerMember: caller, callerFile: "MainForm.cs", callerLine: 0);
     }
 
     /// <summary>設定の"theme"("system"/"light"/"dark")を実際のダーク/ライト判定に解決する。

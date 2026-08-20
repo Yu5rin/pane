@@ -2435,6 +2435,276 @@ function countSearchMatches(state) {
   }
   return { count, index };
 }
+// ---- 検索ヒットのハイライト(自前実装) ----
+// 【なぜ自前で描くのか】 @codemirror/search の search() 拡張はハイライト用のViewPluginを
+// 内蔵しているが、その実装は
+//     highlight({query, panel}) { if (!panel || !query.spec.valid) return Decoration.none; ... }
+// となっており、「CodeMirror標準の検索パネル(openSearchPanel)が開いている間」しか装飾を
+// 作らない。Paneは検索UIを自前で持つ(src/search-ui.js)ためopenSearchPanelを呼ばず、
+// panelが常にfalseになり、装飾が1つも生成されていなかった
+// (実測: 件数表示は「5」と出るのに document.querySelectorAll(".cm-searchMatch").length === 0)。
+// setSearchQuery自体は正しく届いており、件数カウント・次/前への移動は動いていたので、
+// 「装飾だけが出ない」という状態だった。そこで一致箇所の装飾だけをここで自前に作る。
+//
+// 【一致箇所の求め方】 自前で正規表現を組み立て直すと、件数表示(countSearchMatches)や
+// findNext/findPreviousとの間で判定がズレる恐れがある(最悪の不具合)。そのため必ず
+// SearchQuery.getCursor(state, from, to) を使う。この中で検索本体とまったく同じ
+// SearchCursor / RegExpCursor が選ばれ、大文字小文字・単語単位・正規表現の各オプションも
+// 同じ実装で適用されるため、「ハイライトの数 = 件数表示の数」が構造的に保証される。
+//
+// 【性能】 走査は可視範囲(view.visibleRanges)だけに限定する(livePreviewのbuild()や
+// buildAllIndentGuidesと同じ作法)。10万行の文書でも1回の走査は画面に見えている数十行だけで
+// 済む。文書全体のヒット位置が必要なのはスクロールバーの印(searchRulerPlugin)の方だけで、
+// そちらは走査上限とデバウンスで別途守っている。
+const searchHitMark = Decoration.mark({ class: "cm-search-hit" });
+// 「現在選択中のヒット」にも cm-search-hit を併せて付けておく(=ハイライトの総数を数えるとき
+// 現在のヒットも1件として数えられる)。見た目はCSS側の .cm-search-hit.cm-search-hit-active
+// (詳細度0-2-0)が通常のヒット(.cm-search-hit、0-1-0)に確実に勝つ形で上書きする。
+const searchHitActiveMark = Decoration.mark({ class: "cm-search-hit cm-search-hit-active" });
+
+// 可視範囲を「行単位に丸めて、重なりをマージした」走査区間の配列にする。
+// ・行頭/行末に丸めるのは、正規表現検索の ^ / $ の判定を文書全体を走査したときと
+//   一致させるため(可視範囲の境界は行の途中にもなりうる)。
+// ・丸めた結果、隣り合う可視範囲(折りたたみ等で分断される)が同じ行を共有することがある。
+//   マージしておかないと同じ一致箇所に装飾が二重に付き、「ハイライトの数 ≠ 件数」になる。
+function visibleScanSpans(view) {
+  const { doc } = view.state;
+  const spans = [];
+  for (const { from, to } of view.visibleRanges) {
+    const s = doc.lineAt(from).from, e = doc.lineAt(to).to;
+    const last = spans.length ? spans[spans.length - 1] : null;
+    if (last && s <= last.to) last.to = Math.max(last.to, e);
+    else spans.push({ from: s, to: e });
+  }
+  return spans;
+}
+
+function buildSearchHitDecorations(view) {
+  const { state } = view;
+  const query = getSearchQuery(state);
+  if (!query.valid) return Decoration.none;
+  const sel = state.selection.main;
+  const marks = [];
+  for (const { from, to } of visibleScanSpans(view)) {
+    const cursor = query.getCursor(state, from, to);
+    for (let r = cursor.next(); !r.done; r = cursor.next()) {
+      const f = r.value.from, t = r.value.to;
+      // 空マッチ(正規表現 `a*` 等で起こりうる)。mark decorationは空範囲を許さない
+      // (RangeSetがエラーを投げる)ため読み飛ばす。
+      if (f >= t) continue;
+      const active = f === sel.from && t === sel.to;
+      marks.push((active ? searchHitActiveMark : searchHitMark).range(f, t));
+    }
+  }
+  return Decoration.set(marks, true);
+}
+
+const searchHighlightPlugin = ViewPlugin.fromClass(class {
+  constructor(view) { this.decorations = buildSearchHitDecorations(view); }
+  update(update) {
+    // selectionSetは「現在のヒット」(cm-search-hit-active)の移動に必要。
+    // 検索クエリの変更はdocChanged/viewportChangedのどれにも該当しないため、
+    // searchStateの中身(SearchQuery)を直接見比べて検知する(eq()は検索語・置換語・
+    // 大文字小文字・正規表現・単語単位をまとめて比較する)。
+    if (update.docChanged || update.viewportChanged || update.selectionSet ||
+        !getSearchQuery(update.startState).eq(getSearchQuery(update.state))) {
+      this.decorations = buildSearchHitDecorations(update.view);
+    }
+  }
+}, { decorations: (v) => v.decorations });
+
+// ---- スクロールバー上の検索ヒット位置の印(オーバービュールーラー) ----
+// 画面外のヒットも含め、文書全体のどのあたりに何件あるかを一目で分かるようにする
+// (VS Code / Chromeの検索と同じ考え方)。
+//
+// 【なぜ「専用の帯」ではなくスクロールバーに重ねるのか】 PaneはCodeMirrorの
+// .cm-scroller のブラウザ標準スクロールバー(style.cssの *::-webkit-scrollbar で
+// 幅17pxに調整済み)をそのまま使っており、独自スクロールバーは持たない。標準の
+// スクロールバーは中身を描き込めないため、同じ幅(17px)・同じ位置(右端)の
+// オーバーレイを .cm-editor へ重ねる方式にした。左隣に専用の帯を新設する案は、
+// 本文の表示幅がその分狭くなるうえ「スクロールバーが出ていないときの右端」が
+// ずれるため採らない。帯自体は pointer-events:none にしてスクロールバーの操作を
+// 一切妨げず、印(数px四方)だけを pointer-events:auto にしてクリックでのジャンプを
+// 受け付ける(印は小さいので、スクロールバーのドラッグを実質的に邪魔しない)。
+//
+// 【走査上限】 文書全体の走査になるため、SEARCH_RULER_MAX_MARKS件で打ち切る。
+// 縦スクロールバーの実高さはせいぜい1000〜2000pxで、印1つに最小4pxを割り当てると
+// 視覚的に区別できるのは数百個が限界。それを超える印は同じ位置に重なるだけで情報量を
+// 増やさない一方、DOM要素数と走査時間だけが増える(エディタ製品が軒並み同種の上限を
+// 持つのと同じ理由)。打ち切った場合は帯の下端に印を出して「全部ではない」ことを示す。
+const SEARCH_RULER_MAX_MARKS = 1000;
+// 走査のデバウンス(ms)。検索欄へ1文字打つたびに文書全体を走査すると10万行の文書で
+// 入力が詰まるため、検索クエリの変更・本文の変更のどちらもここでまとめて待つ
+// (search-ui.js側の件数更新デバウンスと同じ150ms)。
+const SEARCH_RULER_DEBOUNCE_MS = 150;
+// 1回の走査で進む行数。件数の上限(SEARCH_RULER_MAX_MARKS)だけでは、一致がまったく
+// 無い検索語(ユーザーが打っている途中で頻繁に発生する)のときに文書の最後まで走査して
+// しまい、上限が効かない。実測では10万行(約350万文字)の全文走査に300ms以上かかり、
+// その間メインスレッドが止まる。そこで行数でも区切り、1チャンクごとにsetTimeout(0)で
+// 制御を返して、走査中もUIが応答できるようにする(1チャンクの実測は10万行の環境で
+// 15〜20ms程度)。
+const SEARCH_RULER_CHUNK_LINES = 5000;
+
+const searchRulerPlugin = ViewPlugin.fromClass(class {
+  constructor(view) {
+    this.view = view;
+    this.el = document.createElement("div");
+    this.el.className = "cm-search-ruler";
+    this.el.hidden = true;
+    // 印は装飾であり、読み上げの対象にはしない(件数はsearch-ui.jsの件数表示が担う)。
+    this.el.setAttribute("aria-hidden", "true");
+    view.dom.appendChild(this.el);
+    this.hits = [];
+    this.marks = [];
+    this.activeIndex = -1;
+    this.truncated = false;
+    this.timer = null;
+    this.chunkTimer = null;
+    this.pending = null;
+    this.startScan();
+  }
+  update(update) {
+    const query = getSearchQuery(update.state);
+    const queryChanged = !getSearchQuery(update.startState).eq(query);
+    // 検索していない(クエリが無効で、消すべき印も走査中の仕事も無い)間は完全に何もしない。
+    // ここを素通りさせると、ただ本文を打っているだけでdocChangedのたびに走査が予約され、
+    // 入力が止まるたびにrender()(DOMの作り直しとscrollHeightの読み取り=強制同期レイアウト)が
+    // 走ってしまう。検索と無関係な普段の編集に一切コストを足さないための早期リターン。
+    if (!query.valid && !this.hits.length && !this.pending && this.timer === null) return;
+    if (queryChanged || update.docChanged) {
+      // 印の位置(文書全体に対する相対位置)は、検索クエリか本文が変わったときにしか動かない。
+      // スクロール(viewportChanged)では再計算しない。
+      this.schedule();
+    } else if (update.selectionSet) {
+      // 「現在のヒット」の印だけを付け替える(全ヒットの走査はしない。軽い)。
+      this.updateActive();
+    } else if (update.geometryChanged) {
+      // スクロールバーの有無が変わりうる(ウィンドウのリサイズ等)。
+      this.applyVisibility();
+    }
+  }
+  schedule() {
+    this.cancelScan();
+    this.timer = setTimeout(() => { this.timer = null; this.startScan(); }, SEARCH_RULER_DEBOUNCE_MS);
+  }
+  // 予約中のデバウンスと、進行中のチャンク走査の両方を取り消す。
+  // (走査の途中で本文や検索語が変わったら、その結果はもう使えないため必ず捨てる)
+  cancelScan() {
+    if (this.timer !== null) { clearTimeout(this.timer); this.timer = null; }
+    if (this.chunkTimer !== null) { clearTimeout(this.chunkTimer); this.chunkTimer = null; }
+    this.pending = null;
+  }
+  startScan() {
+    const query = getSearchQuery(this.view.state);
+    if (!query.valid) {
+      this.hits = [];
+      this.truncated = false;
+      this.render();
+      return;
+    }
+    this.pending = { hits: [], line: 1, truncated: false };
+    this.scanChunk();
+  }
+  // 文書をSEARCH_RULER_CHUNK_LINES行ずつ走査してヒット位置を集める。
+  // 1チャンクごとにsetTimeout(0)で制御を返すため、10万行の文書でも走査中にUIが固まらない。
+  scanChunk() {
+    const p = this.pending;
+    if (!p) return;
+    const { state } = this.view;
+    const query = getSearchQuery(state);
+    const doc = state.doc;
+    const endLine = Math.min(doc.lines, p.line + SEARCH_RULER_CHUNK_LINES - 1);
+    const cursor = query.getCursor(state, doc.line(p.line).from, doc.line(endLine).to);
+    for (let r = cursor.next(); !r.done; r = cursor.next()) {
+      const from = r.value.from, to = r.value.to;
+      if (from >= to) continue;
+      // チャンクの境目は1行だけ重ねて走査している(下記)ので、前のチャンクで拾った
+      // 一致をもう一度拾わないようにする。
+      if (p.hits.length && from < p.hits[p.hits.length - 1].to) continue;
+      if (p.hits.length >= SEARCH_RULER_MAX_MARKS) { p.truncated = true; break; }
+      p.hits.push({ from, to });
+    }
+    if (!p.truncated && endLine < doc.lines) {
+      // 次のチャンクは「今回の最終行」から始める(1行ぶん重ねる)。こうしないと、
+      // 改行をまたぐ検索語("a\nb"のようにエスケープで改行を含めた場合)がチャンクの
+      // 境目で取りこぼされる。3行以上にまたがる検索語までは救えないが、
+      // 検索欄(input type=text)から入力しうる語としては現実的な範囲。
+      p.line = endLine;
+      this.chunkTimer = setTimeout(() => { this.chunkTimer = null; this.scanChunk(); }, 0);
+      return;
+    }
+    this.hits = p.hits;
+    this.truncated = p.truncated;
+    this.pending = null;
+    this.render();
+  }
+  render() {
+    const { state } = this.view;
+    const el = this.el;
+    el.textContent = "";
+    this.marks = [];
+    this.activeIndex = -1;
+    // 印の縦位置は「行番号の割合」で決める。view.lineBlockAt()の実描画位置(px)の方が
+    // 厳密だが、可視範囲外の行の高さは推定値でしかなく、しかもスクロールのたびに
+    // 推定が更新されて印が微妙に動いてしまう。行番号ベースなら文書が変わらない限り
+    // 位置が安定し、10万行でもO(log n)のlineAt()×最大1000回で済む。
+    const lastLine = Math.max(1, state.doc.lines - 1);
+    for (let i = 0; i < this.hits.length; i++) {
+      const hit = this.hits[i];
+      const ratio = (state.doc.lineAt(hit.from).number - 1) / lastLine;
+      const mark = document.createElement("div");
+      mark.className = "cm-search-ruler-mark";
+      // 帯の上端・下端から印がはみ出さないよう、印の高さ(--ruler-mark-h)を引いた
+      // 範囲に対する割合として置く。
+      mark.style.top = `calc(${ratio.toFixed(5)} * (100% - var(--ruler-mark-h)))`;
+      mark.addEventListener("mousedown", (e) => {
+        // スクロールバーのドラッグ開始と取り合いにならないよう、既定動作は止める。
+        e.preventDefault();
+        e.stopPropagation();
+        this.jumpTo(hit);
+      });
+      el.appendChild(mark);
+      this.marks.push(mark);
+    }
+    el.dataset.truncated = this.truncated ? "true" : "false";
+    this.applyVisibility();
+    this.updateActive();
+  }
+  // ヒットが無い/スクロールが不要なときは帯ごと隠す(本文の右端に印が重なるのを防ぐ)。
+  applyVisibility() {
+    const sc = this.view.scrollDOM;
+    // scrollHeightの読み取りは強制同期レイアウトを起こすため、ここ(走査後・
+    // リサイズ時)以外では絶対に呼ばない。入力のたびには走らせない。
+    const scrollable = sc.scrollHeight > sc.clientHeight + 1;
+    this.el.hidden = this.hits.length === 0 || !scrollable;
+  }
+  // 現在の選択範囲と一致するヒットの印にだけ .is-active を付ける。
+  updateActive() {
+    const sel = this.view.state.selection.main;
+    let next = -1;
+    for (let i = 0; i < this.hits.length; i++) {
+      if (this.hits[i].from === sel.from && this.hits[i].to === sel.to) { next = i; break; }
+    }
+    if (next === this.activeIndex) return;
+    if (this.activeIndex >= 0 && this.marks[this.activeIndex]) this.marks[this.activeIndex].classList.remove("is-active");
+    if (next >= 0 && this.marks[next]) this.marks[next].classList.add("is-active");
+    this.activeIndex = next;
+  }
+  jumpTo(hit) {
+    const view = this.view;
+    view.dispatch({
+      selection: { anchor: hit.from, head: hit.to },
+      effects: EditorView.scrollIntoView(hit.from, { y: "center" }),
+      scrollIntoView: false,
+    });
+    view.focus();
+  }
+  destroy() {
+    this.cancelScan();
+    this.el.remove();
+  }
+});
+
 // リスト系の折り返し行のハンギングインデント(1行目のテキスト開始位置に揃える)は
 // livePreviewのbuild()内(可視範囲の行走査)でcm-hangクラスとして付与している。
 
@@ -4260,6 +4530,10 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
         typewriterComp.of([]),
         editable.of(EditorView.editable.of(true)),
         search({ top: false }),
+        // 検索ヒットのハイライトと、スクロールバー上の位置の印。search()内蔵の
+        // ハイライトはCodeMirror標準の検索パネルが開いている間しか働かず、自前UIの
+        // Paneでは一切装飾が出ないため自前に持つ(各プラグイン定義部のコメント参照)。
+        searchHighlightPlugin, searchRulerPlugin,
         EditorView.updateListener.of((u) => {
           // 実機不具合の修正(main.jsのダーティ判定見直しに伴う性能改善): 呼び出し側(main.js)は
           // 引数を使っておらず、view.state.doc.toString()は1万行規模の文書で毎回の入力時に

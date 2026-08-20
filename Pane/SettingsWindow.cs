@@ -307,7 +307,7 @@ internal sealed class SettingsWindow : Form
         base.OnHandleCreated(e);
         AppSettings settings = SettingsService.Load();
         bool isDark = MainForm.ResolveIsDarkTheme(settings.Theme);
-        WindowChrome.ApplyTheme(Handle, isDark);
+        WindowChrome.ApplyTheme(this, isDark);
     }
 
     /// <summary>
@@ -323,7 +323,7 @@ internal sealed class SettingsWindow : Form
     {
         if (!root.TryGetProperty("isDark", out JsonElement isDarkProp)) return;
         if (isDarkProp.ValueKind != JsonValueKind.True && isDarkProp.ValueKind != JsonValueKind.False) return;
-        WindowChrome.ApplyTheme(Handle, isDarkProp.GetBoolean());
+        WindowChrome.ApplyTheme(this, isDarkProp.GetBoolean());
     }
 
     /// <summary>Loadイベント(初回Show()時に1回だけ発火)の受け口。不具合修正: 以前はWebView2の
