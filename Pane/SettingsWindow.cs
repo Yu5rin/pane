@@ -87,10 +87,25 @@ internal sealed class SettingsWindow : Form
     /// ログに残すために参照する。</summary>
     public bool IsRevealed => _webViewRevealed;
 
-    public SettingsWindow(Form? owner, Action broadcastSettingsChanged)
+    /// <summary>
+    /// 更新の適用(仕様書 U-04)で使う2つの依頼。設定ウィンドウ自身はアプリ全体の状態を
+    /// 知らないため、PaneApplicationContextから受け取る。
+    ///   hasUnsavedDocuments: どれか1つでも未保存の文書が開かれているか
+    ///   shutdown: 新しいPaneを起動したあと、自分自身を終了させる
+    /// </summary>
+    private readonly Func<bool>? _hasUnsavedDocuments;
+    private readonly Action? _shutdown;
+
+    public SettingsWindow(
+        Form? owner,
+        Action broadcastSettingsChanged,
+        Func<bool>? hasUnsavedDocuments = null,
+        Action? shutdown = null)
     {
         Logger.Write("SettingsWindow: 生成開始");
         _broadcastSettingsChanged = broadcastSettingsChanged;
+        _hasUnsavedDocuments = hasUnsavedDocuments;
+        _shutdown = shutdown;
 
         Text = "Pane の設定";
         MinimumSize = new Size(640, 480);
@@ -465,6 +480,23 @@ internal sealed class SettingsWindow : Form
                 break;
             case "open-theme-folder":
                 SettingsBridge.OpenThemeFolderInExplorer();
+                break;
+            // 更新の確認と適用(仕様書 U-01・U-04)。利用者がボタンを押したときだけ通信する。
+            // どちらも待ち時間があるため非同期で走らせ、結果は update-check-result /
+            // update-progress として画面へ返す(ここでawaitするとUIが固まる)。
+            case "check-update":
+                _ = SettingsBridge.HandleCheckUpdateRequestAsync(PostToWeb);
+                break;
+            case "apply-update":
+                _ = SettingsBridge.HandleApplyUpdateRequestAsync(
+                    PostToWeb,
+                    _hasUnsavedDocuments ?? (() => false),
+                    _shutdown ?? (() => { }));
+                break;
+            // 「リリースページを開く」。開くURLはC#側が直前の確認で受け取った値だけを使う
+            // (SettingsBridge.OpenReleasePage参照)。
+            case "open-release-page":
+                SettingsBridge.OpenReleasePage();
                 break;
             case "close-settings-window":
                 // JS側(settings.js、page表示モード)がキャンセル・保存完了・Escape等で

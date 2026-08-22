@@ -1236,6 +1236,13 @@ html[data-theme="dark"] .cm-search-ruler-mark.is-active {
 .settings-license-list { display: flex; flex-direction: column; gap: 2px; }
 .settings-license-row { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; font-size: 12.5px; padding: 5px 0; border-bottom: 1px solid var(--rule); }
 .settings-license-row:last-child { border-bottom: none; }
+
+/* 更新(設定「バージョン情報」→「更新」。仕様書 U-01〜U-04)。
+   確認結果のひとことと、ダウンロード中の進捗バーだけの小さな作りにしてある。 */
+.settings-update-status { font-size: 13px; color: var(--ink); margin: 8px 0; }
+.settings-update-status.error { color: var(--danger); }
+.settings-update-bar { height: 6px; border-radius: 3px; background: var(--rule); overflow: hidden; margin: 8px 0; }
+.settings-update-bar > span { display: block; height: 100%; background: var(--accent); transition: width 120ms linear; }
 .settings-license-name { font-weight: 600; }
 .settings-license-type { color: var(--ink-sub); }
 

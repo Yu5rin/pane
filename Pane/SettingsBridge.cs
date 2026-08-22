@@ -170,6 +170,7 @@ internal static class SettingsBridge
             // ---- 詳細 ----
             enableDebug = settings.EnableDebug,
             verboseLogging = settings.VerboseLogging,
+            updateCheckUrl = settings.UpdateCheckUrl,
             showHiddenFilesInTree = settings.ShowHiddenFilesInTree,
             fileTreePatterns = settings.FileTreePatterns,
             addToPath = settings.AddToPath,
@@ -212,7 +213,118 @@ internal static class SettingsBridge
     /// そのままToString()すると "1.0.0.0" と出てしまう。利用者に見せる表記は3桁が一般的なため、
     /// csprojの&lt;Version&gt;から作られるInformationalVersion("1.0.0")を優先して使う。
     /// </summary>
-    private static string DetectAppVersion()
+    /// <summary>
+    /// { type: "check-update" } を受けて配布元へ問い合わせ、結果を設定画面へ返す
+    /// (仕様書 U-01)。利用者がボタンを押したときにだけ呼ばれる。
+    ///
+    /// 通信は待たせるとUIが固まるため非同期で行い、結果が出てから1回だけ返す。
+    /// 失敗しても例外は投げず、status="error" として理由を画面に出す。
+    /// </summary>
+    public static async Task HandleCheckUpdateRequestAsync(Action<object> postToWeb)
+    {
+        UpdateCheckResult result = await UpdateService.CheckAsync(SettingsService.Load());
+        // 「リリースページを開く」用に控えておく。URLをJS側から渡させると、そちらに
+        // 任意のURLを差し込まれた場合にそのまま既定のブラウザで開いてしまうため、
+        // 開けるのは「直前の確認でC#側が受け取ったURL」だけに限る(OpenReleasePage参照)。
+        _lastReleaseUrl = result.ReleaseUrl;
+        postToWeb(new
+        {
+            type = "update-check-result",
+            status = result.Status,
+            currentVersion = result.CurrentVersion,
+            latestVersion = result.LatestVersion,
+            message = result.Message,
+            releaseUrl = result.ReleaseUrl,
+            // ダウンロードできる配布物があるかどうか。UI側の「更新する」ボタンの出し分けに使う。
+            canApply = result.Status == "available" && !string.IsNullOrEmpty(result.DownloadUrl),
+            sizeBytes = result.SizeBytes,
+        });
+    }
+
+    /// <summary>
+    /// { type: "apply-update" } を受けて、ダウンロード・検証・入れ替え・再起動を行う
+    /// (仕様書 U-03・U-04)。
+    ///
+    /// 入れ替えは元に戻せない操作を含むため、実行前に次を確かめる。
+    ///   ・インストール先へ書き込めるか(Program Files等では行えない)
+    ///   ・未保存の文書が無いか(再起動を伴うため)
+    /// どちらかを満たさない場合は何もせず、理由を画面へ返す。
+    /// </summary>
+    public static async Task HandleApplyUpdateRequestAsync(
+        Action<object> postToWeb, Func<bool> hasUnsavedDocuments, Action shutdown)
+    {
+        void Report(string stage, string message, int percent = -1)
+            => postToWeb(new { type = "update-progress", stage, message, percent });
+
+        try
+        {
+            if (hasUnsavedDocuments())
+            {
+                Report("error", "保存されていない変更があります。更新には再起動が必要なので、先に保存してください。");
+                return;
+            }
+            if (!UpdateService.CanWriteToInstallFolder(out string folder))
+            {
+                Report("error", $"Paneが置かれている場所({folder})へ書き込めないため、自動で入れ替えられません。" +
+                                "リリースページからダウンロードして手動で入れ替えてください。");
+                return;
+            }
+
+            Report("checking", "最新版を確認しています…");
+            UpdateCheckResult info = await UpdateService.CheckAsync(SettingsService.Load());
+            if (info.Status != "available" || string.IsNullOrEmpty(info.DownloadUrl))
+            {
+                Report("error", info.Status == "latest" ? "すでに最新版です。" : info.Message);
+                return;
+            }
+
+            Report("downloading", $"新しい版 {info.LatestVersion} をダウンロードしています…", 0);
+            var progress = new Progress<int>(p => Report("downloading", $"ダウンロード中… {p}%", p));
+            string zipPath = await UpdateService.DownloadAsync(info, progress, CancellationToken.None);
+
+            Report("applying", "入れ替えています…");
+            string newExe = UpdateService.ApplyUpdate(zipPath);
+
+            Report("restarting", "更新しました。Paneを再起動します。");
+            UpdateService.StartNewVersion(newExe);
+            shutdown();
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException("更新の適用に失敗", ex);
+            Report("error", $"更新に失敗しました: {ex.Message}");
+        }
+    }
+
+    /// <summary>直前の「更新を確認」で配布元から受け取ったリリースページのURL(OpenReleasePage用)。</summary>
+    private static string _lastReleaseUrl = "";
+
+    /// <summary>
+    /// { type: "open-release-page" } を受けて、直前の確認で得たリリースページを既定のブラウザで開く。
+    ///
+    /// 開く対象はJS側から受け取らず、C#側が控えている値だけを使う。加えて、配布元の応答が
+    /// 差し替えられていた場合に備えてhttpsのURLに限る(http・file・カスタムスキームは開かない)。
+    /// </summary>
+    public static void OpenReleasePage()
+    {
+        try
+        {
+            if (!Uri.TryCreate(_lastReleaseUrl, UriKind.Absolute, out Uri? uri) || uri.Scheme != Uri.UriSchemeHttps)
+            {
+                Logger.Warn($"open-release-page: 開けるURLが無い(値=\"{_lastReleaseUrl}\")");
+                return;
+            }
+            using var proc = Process.Start(new ProcessStartInfo(uri.AbsoluteUri) { UseShellExecute = true });
+            Logger.Write($"open-release-page: リリースページを開いた: {uri.AbsoluteUri}");
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException("open-release-page失敗", ex);
+        }
+    }
+
+    /// <summary>更新の確認(UpdateService)でも「いま動いているバージョン」として使うため internal。</summary>
+    internal static string DetectAppVersion()
     {
         // 実処理は FileAssociationService.ReadOwnVersionText に一本化してある。
         // 「現在の関連付け先」表示では、ここに出るバージョンと関連付け先exeのバージョンを

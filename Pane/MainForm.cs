@@ -70,6 +70,10 @@ internal sealed class MainForm : Form
     /// 「既に開いていれば前面へ、無ければ新規に開く」処理を渡す。呼び出し元ウィンドウ(このMainForm)
     /// を中央配置の基準として渡す必要があるため、requestNewWindowと違い自分自身を渡す形。</summary>
     private readonly Action<MainForm>? _requestOpenSettingsWindow;
+    /// <summary>更新の適用(U-04)の前提確認・後始末。実体はPaneApplicationContextが持つ
+    /// (未保存の有無・終了処理はアプリ全体の話で、1ウィンドウでは判断できないため)。</summary>
+    private readonly Func<bool>? _hasUnsavedDocuments;
+    private readonly Action? _shutdownForUpdate;
     /// <summary>取扱説明書ウィンドウ(F1)を開く要求。<see cref="_requestOpenSettingsWindow"/>と
     /// 全く同じ流儀(<see cref="PaneApplicationContext.OpenHelpWindow"/>参照)。</summary>
     private readonly Action<MainForm>? _requestOpenHelpWindow;
@@ -205,7 +209,9 @@ internal sealed class MainForm : Form
         Action<MainForm>? requestOpenSettingsWindow = null,
         Action<MainForm>? requestOpenHelpWindow = null,
         DroppedFileContent? droppedFile = null,
-        string? initialFolderPath = null)
+        string? initialFolderPath = null,
+        Func<bool>? hasUnsavedDocuments = null,
+        Action? shutdownForUpdate = null)
     {
         _initialPath = initialPath;
         _initialFolderPath = initialFolderPath;
@@ -217,6 +223,8 @@ internal sealed class MainForm : Form
         _requestBroadcastSettings = requestBroadcastSettings;
         _requestOpenSettingsWindow = requestOpenSettingsWindow;
         _requestOpenHelpWindow = requestOpenHelpWindow;
+        _hasUnsavedDocuments = hasUnsavedDocuments;
+        _shutdownForUpdate = shutdownForUpdate;
         Logger.Write($"MainForm生成: initialPath={initialPath ?? "(なし)"}, recoverFrom={(recoverFrom is null ? "なし" : recoverFrom.OriginalPath ?? "無題")}, droppedFile={droppedFile?.Name ?? "なし"}");
         // カスタムCSSの参考サンプルを既定フォルダへ用意しておく(無ければ作るだけで、
         // 既にあれば何もしない。ThemeFolderService.EnsureSampleCss参照)。
@@ -1453,6 +1461,24 @@ internal sealed class MainForm : Form
                 break;
             case "reset-settings":
                 SettingsBridge.HandleResetSettingsRequest(PostToWeb, BroadcastOrRefreshSelf);
+                break;
+            // 更新の確認と適用(仕様書 U-01・U-04)。設定画面をモーダルで開いている場合は
+            // この経路を通る(独立ウィンドウで開いている場合はSettingsWindow側)。
+            // どちらも待ち時間があるため非同期で走らせ、結果は update-check-result /
+            // update-progress として画面へ返す(ここでawaitするとUIが固まる)。
+            case "check-update":
+                _ = SettingsBridge.HandleCheckUpdateRequestAsync(PostToWeb);
+                break;
+            case "apply-update":
+                _ = SettingsBridge.HandleApplyUpdateRequestAsync(
+                    PostToWeb,
+                    _hasUnsavedDocuments ?? (() => IsDirty),
+                    _shutdownForUpdate ?? (() => { }));
+                break;
+            case "open-release-page":
+                // 開くURLはC#側が直前の確認で受け取った値だけを使う
+                // (SettingsBridge.OpenReleasePage参照)。
+                SettingsBridge.OpenReleasePage();
                 break;
             case "open-settings-window":
                 // 設定画面を独立ウィンドウとして開く(または既に開いていれば前面へ)。
