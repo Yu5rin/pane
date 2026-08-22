@@ -198,7 +198,7 @@ internal static class SettingsBridge
     /// </summary>
     private static readonly object[] Licenses =
     {
-        new { name = "Pane 本体", license = "プロプライエタリ(未公開。package.jsonのlicenseは\"UNLICENSED\")" },
+        new { name = "Pane 本体", license = "MIT License" },
         new { name = "CodeMirror 6 (@codemirror/*)", license = "MIT License" },
         new { name = "Lezer (@lezer/*)", license = "MIT License" },
         new { name = "MathJax (mathjax-full)", license = "Apache License 2.0" },
