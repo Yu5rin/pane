@@ -170,6 +170,7 @@ internal static class SettingsBridge
             // ---- 詳細 ----
             enableDebug = settings.EnableDebug,
             verboseLogging = settings.VerboseLogging,
+            checkUpdateOnStartup = settings.CheckUpdateOnStartup,
             updateCheckUrl = settings.UpdateCheckUrl,
             showHiddenFilesInTree = settings.ShowHiddenFilesInTree,
             fileTreePatterns = settings.FileTreePatterns,
@@ -593,6 +594,11 @@ internal static class SettingsBridge
                 settings.VerboseLogging = verboseLogging;
                 // 保存した瞬間から効かせる(再起動を求めない)。
                 Logger.SetVerbose(verboseLogging);
+            }
+            // 起動時の更新確認(U-06)。オンに切り替えた直後の起動から効く(この場では通信しない)。
+            if (TryGetBool(s, "checkUpdateOnStartup", out bool checkUpdateOnStartup))
+            {
+                settings.CheckUpdateOnStartup = checkUpdateOnStartup;
             }
             if (TryGetBool(s, "showHiddenFilesInTree", out bool showHiddenFilesInTree)) settings.ShowHiddenFilesInTree = showHiddenFilesInTree;
             List<string>? fileTreePatterns = TryGetStringList(s, "fileTreePatterns");

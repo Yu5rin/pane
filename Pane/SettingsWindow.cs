@@ -223,8 +223,18 @@ internal sealed class SettingsWindow : Form
     /// (どちらも「これからユーザーに見せる」という同じ意味のため)。そのため、初期化の保険
     /// (<see cref="EnsureWebViewInitializedAsync"/>)とフォールバック表示タイマーの開始は
     /// どちらもここに置く。</summary>
-    public void Reveal(Form? owner)
+    /// <param name="category">開いた直後に表示する設定カテゴリ(settings.jsのカテゴリID。
+    /// 例: "versionInfo")。nullなら前回開いていたカテゴリのまま。更新の案内(U-06)から
+    /// 開くときに、利用者が探さずに済むよう「バージョン情報」を直接指定するために使う。</param>
+    public void Reveal(Form? owner, string? category = null)
     {
+        if (!string.IsNullOrEmpty(category))
+        {
+            // まだJS側の初期化が終わっていなければ、initial-render-readyを受けてから送る
+            // (RevealWebView経由。届く前に送っても設定画面側が受け取れない)。
+            _pendingCategory = category;
+            TryPostPendingCategory();
+        }
         bool wasHidden = !Visible;
         if (wasHidden)
         {
@@ -261,6 +271,18 @@ internal sealed class SettingsWindow : Form
 
     /// <summary>MainForm.RevealWebViewと同じ役割・同じ二重防御(JS側の正常な通知と
     /// フォールバックタイマーのどちらが先に来ても1回だけ表示する)。詳細はそちらのコメント参照。</summary>
+    /// <summary>開いた直後に表示するカテゴリ。まだJS側へ送れていないぶんを覚えておく。</summary>
+    private string? _pendingCategory;
+
+    /// <summary>保留中のカテゴリ指定を、送れる状態になっていればJS側へ渡す。</summary>
+    private void TryPostPendingCategory()
+    {
+        if (_pendingCategory is null || !_webViewRevealed || _webView.CoreWebView2 is null) return;
+        PostToWeb(new { type = "show-settings-category", category = _pendingCategory });
+        Logger.Write($"SettingsWindow: カテゴリ「{_pendingCategory}」を表示するよう伝えた");
+        _pendingCategory = null;
+    }
+
     private void RevealWebView(bool viaFallback)
     {
         if (_webViewRevealed) return;
@@ -271,6 +293,7 @@ internal sealed class SettingsWindow : Form
             ? $"SettingsWindow: WebView2を表示(フォールバック: {WebViewRevealFallbackMs}ms以内にinitial-render-readyが届かなかったため強制表示, 経過={_stopwatch.ElapsedMilliseconds}ms)"
             : "SettingsWindow: WebView2を表示(JS側からinitial-render-ready受信)");
         Logger.Write($"SettingsWindow: 表示 (合計 {_stopwatch.ElapsedMilliseconds}ms)");
+        TryPostPendingCategory();
     }
 
     /// <summary>既定サイズ960x760。呼び出し元(owner)が表示されている画面より大きい場合は

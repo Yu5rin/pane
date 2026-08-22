@@ -42,16 +42,35 @@ internal static class Program
         // パスとして扱う。
         bool preload = false;
         string? initialPath = null;
-        foreach (string arg in args)
+        int? afterUpdatePid = null;
+        for (int i = 0; i < args.Length; i++)
         {
+            string arg = args[i];
             if (string.Equals(arg, "--preload", StringComparison.OrdinalIgnoreCase))
             {
                 preload = true;
+            }
+            else if (string.Equals(arg, "--after-update", StringComparison.OrdinalIgnoreCase))
+            {
+                // 更新で入れ替わった新しい側として起動された。次の引数が古い側のPID
+                // (UpdateService.StartNewVersion)。値が読めなければ待たずに進む。
+                if (i + 1 < args.Length && int.TryParse(args[i + 1], out int pid))
+                {
+                    afterUpdatePid = pid;
+                    i++;
+                }
             }
             else if (initialPath is null)
             {
                 initialPath = arg;
             }
+        }
+
+        // 古い側が完全に終わるのを待つ。Mutexを取るより前・WebView2に触れるより前に
+        // 行う必要がある(理由はUpdateService.WaitForPreviousProcessExitの説明を参照)。
+        if (afterUpdatePid is int previousPid)
+        {
+            UpdateService.WaitForPreviousProcessExit(previousPid);
         }
 
         // 多重起動制御(仕様書 第8.1節): 名前付きMutexで既存プロセスの有無を判定する。

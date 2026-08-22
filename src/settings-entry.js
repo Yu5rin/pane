@@ -114,6 +114,10 @@ if (bridge) {
     } else if (msg.type === "menu-command") {
       // 入力欄の右クリックメニュー(Pane/NativeMenu.cs)で項目が選ばれた。
       routeNativeMenuCommand(msg.id);
+    } else if (msg.type === "show-settings-category") {
+      // 更新の案内(仕様書 U-06)から開かれた場合など、C#側が最初に見せたいカテゴリを
+      // 指定してくることがある。open()は開いている最中に呼んでもカテゴリを切り替えるだけ。
+      settingsUI.open(msg.category);
     } else if (msg.type === "menu-closed") {
       routeNativeMenuClosed(msg.menu);
     }
