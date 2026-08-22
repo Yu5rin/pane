@@ -54,6 +54,7 @@ export function buildCommands(ctx) {
       separatorAfter: true,
     },
     { id: "file.save", menu: "File", label: "保存", shortcut: `${MOD}+S`, run: app((c) => c.actions.save()) },
+    { id: "file.duplicate", menu: "File", label: "複製", enabled: () => !!ctx.bridge, run: app((c) => c.actions.duplicateDocument()) },
     { id: "file.saveAs", menu: "File", label: "名前を付けて保存", shortcut: `${MOD}+Shift+S`, run: app((c) => c.actions.saveAs()), separatorAfter: true },
     { id: "file.exportPdf", menu: "File", label: "エクスポート: PDF", run: app((c) => c.actions.exportAs("pdf")) },
     { id: "file.exportHtml", menu: "File", label: "エクスポート: HTML", run: app((c) => c.actions.exportAs("html")) },
@@ -75,6 +76,21 @@ export function buildCommands(ctx) {
     { id: "help.manual", label: "取扱説明書を開く", shortcut: "F1", run: app((c) => c.actions.openHelp()) },
 
     // ---- Edit(第2.2節) ----
+    // 標準の編集操作(E-01〜E-03・E-08・E-14・E-15)。キーボードでも行えるが、Typoraと同じく
+    // メニューからも辿れるようにする(仕様書 第2章はTyporaのメニュー構成に沿って整理されている)。
+    //
+    // shortcut ではなく keyHint でキー表記を出しているのは、shortcut に書くと bindShortcuts が
+    // window の捕捉フェーズでそのキーを横取りしてしまうため。Enter・Ctrl+A・Ctrl+Home などは
+    // 検索ボックス・設定画面・ダイアログといった本文以外の入力欄でも使う基本キーで、
+    // 横取りするとそれらの中で本文が操作されてしまう。キー入力そのものはCodeMirrorと
+    // 各入力欄のネイティブ動作に任せ、ここではメニューからの実行経路とキーの案内だけを出す
+    // (設定のキーバインド画面からは、必要ならユーザーが独自の割り当てを追加できる)。
+    { id: "edit.newParagraph", menu: "Edit", label: "段落を追加", keyHint: "Enter", run: () => editor().applyAction("newParagraph") },
+    { id: "edit.softBreak", menu: "Edit", label: "改行(ソフトブレーク)", keyHint: "Shift+Enter", run: () => editor().applyAction("softBreak"), separatorAfter: true },
+    { id: "edit.cut", menu: "Edit", label: "切り取り", keyHint: `${MOD}+X`, enabled: () => ctx.getState().hasSelection, run: () => document.execCommand("cut") },
+    { id: "edit.copy", menu: "Edit", label: "コピー", keyHint: `${MOD}+C`, enabled: () => ctx.getState().hasSelection, run: () => document.execCommand("copy") },
+    { id: "edit.paste", menu: "Edit", label: "貼り付け", keyHint: `${MOD}+V`, run: app((c) => c.actions.pasteRich()) },
+    { id: "edit.selectAll", menu: "Edit", label: "すべて選択", keyHint: `${MOD}+A`, run: () => editor().applyAction("selectAll"), separatorAfter: true },
     { id: "edit.copyMarkdown", menu: "Edit", label: "マークダウンとしてコピー", shortcut: `${MOD}+Shift+C`, run: app((c) => c.actions.copyAsMarkdown()) },
     { id: "edit.copyHtml", menu: "Edit", label: "HTMLとしてコピー", run: app((c) => c.actions.copyAsHtml()) },
     { id: "edit.pastePlain", menu: "Edit", label: "プレーンテキストとして貼り付け", shortcut: `${MOD}+Shift+V`, run: app((c) => c.actions.pasteAsPlainText()), separatorAfter: true },
@@ -83,6 +99,8 @@ export function buildCommands(ctx) {
     { id: "edit.selectWord", menu: "Edit", label: "単語を選択", shortcut: `${MOD}+D`, run: () => editor().applyAction("selectWord") },
     { id: "edit.deleteWord", menu: "Edit", label: "単語を削除", shortcut: `${MOD}+Shift+D`, run: () => editor().applyAction("deleteWord") },
     { id: "edit.deleteTableRow", menu: "Edit", label: "表の行を削除", shortcut: `${MOD}+Shift+Backspace`, run: () => editor().applyAction("deleteTableRow"), separatorAfter: true },
+    { id: "edit.docStart", menu: "Edit", label: "先頭へジャンプ", keyHint: `${MOD}+Home`, run: () => editor().applyAction("docStart") },
+    { id: "edit.docEnd", menu: "Edit", label: "末尾へジャンプ", keyHint: `${MOD}+End`, run: () => editor().applyAction("docEnd") },
     { id: "edit.jumpToSelection", menu: "Edit", label: "選択箇所へジャンプ", shortcut: `${MOD}+J`, run: () => editor().applyAction("scrollToSelection"), separatorAfter: true },
     { id: "edit.find", menu: "Edit", label: "検索", shortcut: `${MOD}+F`, run: app((c) => c.actions.openSearch()) },
     // ボタン(↓次を検索/↑前を検索)クリック時はsearch-ui.js内のハンドラがupdateCount()を
@@ -335,7 +353,9 @@ export function initMenuBar(container, commands, ctx) {
     const node = {
       id: item.id ?? null,
       label: item.label,
-      shortcut: item.shortcut ?? "",
+      // keyHintは「キー操作の案内だけを出し、ここではキーを横取りしない」項目用
+      // (bindShortcutsはshortcutしか見ない)。詳細はEditメニューの標準操作のコメント参照。
+      shortcut: item.shortcut ?? item.keyHint ?? "",
       enabled,
       checked: !!item.checked?.(ctx),
       separatorAfter: !!item.separatorAfter,
@@ -529,7 +549,7 @@ export function initMenuBar(container, commands, ctx) {
       const checked = item.checked?.(ctx);
       row.innerHTML = `<span class="menu-item-check">${checked ? "✓" : ""}</span>` +
         `<span class="menu-item-label">${item.label}</span>` +
-        `<span class="menu-item-shortcut">${item.submenu ? "▶" : item.shortcut ? item.shortcut : (item.note ?? "")}</span>`;
+        `<span class="menu-item-shortcut">${item.submenu ? "▶" : item.shortcut ? item.shortcut : (item.keyHint ?? item.note ?? "")}</span>`;
       if (item.submenu) {
         let subEl = null;
         row.addEventListener("mouseenter", () => {
@@ -680,7 +700,8 @@ export function initCommandPalette(root, commands, ctx) {
         const li = document.createElement("li");
         li.className = i === sel ? "sel" : "";
         const menuLabel = cmd.menu ? (MENU_LABELS[cmd.menu] ?? cmd.menu) : "";
-        li.innerHTML = `<span>${menuLabel ? menuLabel + ": " : ""}${cmd.label}</span>` + (cmd.shortcut ? `<span class="palette-shortcut">${cmd.shortcut}</span>` : "");
+        const keyText = cmd.shortcut || cmd.keyHint || "";
+        li.innerHTML = `<span>${menuLabel ? menuLabel + ": " : ""}${cmd.label}</span>` + (keyText ? `<span class="palette-shortcut">${keyText}</span>` : "");
         li.addEventListener("mousedown", (e) => { e.preventDefault(); close(); cmd.run(); });
         list.appendChild(li);
       });

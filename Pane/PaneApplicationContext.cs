@@ -238,6 +238,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
         // 起動直後(_windows.Count==0)は当然対象外(振り分け先が無いため)。
         if (_settings.DisplayMode == "tab" && recoverFrom is null && initialFolderPath is null && _windows.Count > 0)
         {
+            var tabStopwatch = System.Diagnostics.Stopwatch.StartNew();
             MainForm target = _windows[^1];
             target.OpenInNewTab(path);
             // 不具合修正: 従来はActivate()のみだったため、受信側プロセスにフォアグラウンド権が
@@ -245,9 +246,23 @@ internal sealed class PaneApplicationContext : ApplicationContext
             // (最小化復元+Activate+SetForegroundWindow)。通常起動時の呼び出しでも副作用は無い
             // (自プロセスが既にフォアグラウンド権を持つため、単にActivate相当が成功するだけ)。
             WindowChrome.ForceActivate(target);
-            Logger.Write($"OpenWindow: タブ形式のため既存ウィンドウへ新しいタブとして開く(path={path ?? "(なし)"})");
+            // [計測] 仕様書 第8.4節「既存インスタンスへのファイル追加表示 300ms以内」。
+            // タブ形式ではウィンドウを作らないため、ここで測れるのは「要求を受けて既存ウィンドウへ
+            // 渡し終えるまで」のC#側の処理時間になる(そこから先の描画はJS側で、初回のような
+            // 重い初期化は無い)。新しいウィンドウを作る経路のほうは、実際に画面へ出るまでを
+            // MainForm.ReadyToUse で測っている。
+            PerfWatch.Report("既存ウィンドウへのタブ追加", tabStopwatch.ElapsedMilliseconds, 300);
+            Logger.Write($"[計測] 既存ウィンドウへ新しいタブとして開いた: {tabStopwatch.ElapsedMilliseconds}ms (目標300ms以内, path={path ?? "(なし)"})");
             return;
         }
+
+        // [計測] 仕様書 第8.4節の数値目標のうち、これまで測る手立てが無かった2つを記録する。
+        //   ・2枚目以降のウィンドウ追加メモリ(目標60MB以内)
+        //   ・既存インスタンスへのファイル追加表示(目標300ms以内。パイプ経由の要求が対象)
+        // 1枚目は「起動」であってこの目標の対象外なので、2枚目以降だけを見る。
+        bool measureAdditionalWindow = _windows.Count > 0;
+        long memoryBeforeBytes = measureAdditionalWindow ? MeasureTotalMemoryBytes() : 0;
+        var windowStopwatch = measureAdditionalWindow ? System.Diagnostics.Stopwatch.StartNew() : null;
 
         var form = new MainForm(
             path,
@@ -315,6 +330,25 @@ internal sealed class PaneApplicationContext : ApplicationContext
         _windows.Add(form);
         form.Show();
 
+        if (measureAdditionalWindow)
+        {
+            // Show()の直後はまだWebView2の初期化が進行中で、メモリも増え切っていない。
+            // 実際に使える状態になってから測るため、そのウィンドウの初期描画完了を待って報告する
+            // (MainForm側がinitial-render-readyを受け取った時点でコールバックしてくる)。
+            long beforeBytes = memoryBeforeBytes;
+            System.Diagnostics.Stopwatch stopwatch = windowStopwatch!;
+            form.ReadyToUse += () =>
+            {
+                long afterBytes = MeasureTotalMemoryBytes();
+                long deltaMb = (afterBytes - beforeBytes) / (1024 * 1024);
+                Logger.Write($"[計測] {_windows.Count}枚目のウィンドウ: 表示まで{stopwatch.ElapsedMilliseconds}ms, " +
+                             $"メモリ増加{deltaMb}MB (目標: 表示300ms以内・メモリ60MB以内。" +
+                             $"メモリはPane本体とWebView2の各プロセスの合計。他アプリのWebView2も同じ実行ファイル名のため、" +
+                             $"それらが同時に動いていると多めに出る)");
+                PerfWatch.Report($"{_windows.Count}枚目のウィンドウの表示", stopwatch.ElapsedMilliseconds, 300);
+            };
+        }
+
         // 不具合修正: パイプ要求由来(forceActivate=true)のときだけ、確実な前面化を行う。
         // Show()呼び出しの時点でForm本体のWin32ウィンドウハンドルは既に生成されており、
         // WebView2の初期化(OnLoadAsync/EnsureCoreWebView2Async)は非同期で後から進むため、
@@ -335,6 +369,36 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// それ以外(通常起動後、またはpreloadで既に一度ウィンドウを開いたことがある場合)は
     /// 従来どおり単純に<see cref="OpenWindow"/>を呼ぶ。
     /// </summary>
+    /// <summary>
+    /// Pane本体と、WebView2が立てている各プロセスのメモリ使用量(ワーキングセット)の合計。
+    ///
+    /// WebView2はブラウザプロセス・レンダラプロセスを別プロセスとして立てるため、
+    /// 自プロセスの使用量だけを見てもウィンドウを1枚増やした実際のコストは分からない。
+    /// 実行ファイル名で拾う都合上、他のアプリが使っているWebView2まで数えてしまうが、
+    /// 「ウィンドウを開く前後の差分」を見る用途では実用上の支障は小さい。
+    /// </summary>
+    private static long MeasureTotalMemoryBytes()
+    {
+        long total = 0;
+        try
+        {
+            using (System.Diagnostics.Process self = System.Diagnostics.Process.GetCurrentProcess())
+            {
+                total += self.WorkingSet64;
+            }
+            foreach (System.Diagnostics.Process p in System.Diagnostics.Process.GetProcessesByName("msedgewebview2"))
+            {
+                using (p) total += p.WorkingSet64;
+            }
+        }
+        catch (Exception ex)
+        {
+            // 計測できなくても動作には影響しない。
+            Logger.Debug($"メモリ使用量を取得できなかった: {ex.GetType().Name}");
+        }
+        return total;
+    }
+
     public void OpenWindowFromPipeRequest(string? path)
     {
         // 不具合修正: パイプ経由の要求は常に、送信元プロセス(フォアグラウンド権を持つ)が

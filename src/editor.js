@@ -5,7 +5,7 @@ import { EditorView, keymap, Decoration, ViewPlugin, WidgetType, lineNumbers, Gu
 import { EditorState, Compartment, StateEffect, StateField, Prec, Transaction, countColumn, RangeSet, MapMode } from "@codemirror/state";
 import { markdown } from "@codemirror/lang-markdown";
 import { Strikethrough, Table, Superscript, Subscript, Emoji, Autolink } from "@lezer/markdown";
-import { defaultKeymap, history, historyKeymap, indentWithTab, insertNewline, undo, redo, moveLineUp, moveLineDown, copyLineDown, deleteLine, indentLess, indentSelection, selectAll } from "@codemirror/commands";
+import { defaultKeymap, history, historyKeymap, indentWithTab, insertNewline, undo, redo, moveLineUp, moveLineDown, copyLineDown, deleteLine, indentLess, indentSelection, selectAll, cursorDocStart, cursorDocEnd } from "@codemirror/commands";
 import { syntaxTree, syntaxHighlighting, HighlightStyle, LanguageDescription, bracketMatching, indentUnit, foldCode, unfoldCode, foldAll, unfoldAll, foldable, codeFolding, foldNodeProp, foldedRanges, foldEffect, unfoldEffect, language, foldService, StreamLanguage } from "@codemirror/language";
 import { autocompletion, closeBrackets, closeBracketsKeymap, startCompletion } from "@codemirror/autocomplete";
 import { search, setSearchQuery, getSearchQuery, SearchQuery, findNext, findPrevious, replaceNext, replaceAll } from "@codemirror/search";
@@ -5696,6 +5696,11 @@ function applyMdAction(view, action, payload) {
       break; // 仕様書 R-08
     }
     case "softBreak": insertSoftBreak(view); break; // 仕様書 E-02・M-01(共通処理はinsertSoftBreak)
+    // 仕様書 E-01。Enterキーと同じ動作を、メニューからも呼べるようにする
+    // (リスト内では次の項目、引用内では引用の継続、というCodeMirror側の判断も含めて同じ)。
+    case "newParagraph": insertNewline(view); break;
+    case "docStart": cursorDocStart(view); break; // 仕様書 E-14
+    case "docEnd": cursorDocEnd(view); break; // 仕様書 E-15
     case "selectWord": selectWordAtCursor(view); break; // 仕様書 E-12
     case "deleteWord": deleteWordAtCursor(view); break; // 仕様書 E-13
     case "selectLine": selectLineAtCursor(view); break; // 仕様書 E-09
