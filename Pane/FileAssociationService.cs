@@ -315,6 +315,10 @@ internal static class FileAssociationService
     /// </summary>
     public static AssociationTarget GetCurrentTarget(IReadOnlyCollection<string> extensions)
     {
+        // ここは設定画面を開くたび・保存するたびにUIスレッドで動く。拡張子の数だけ
+        // レジストリとディスクを触るため、遅くなったらすぐ分かるよう時間を見張る。
+        using var _ = PerfWatch.Start($"関連付けの現状確認({extensions.Count}拡張子)", 300);
+
         string currentPath = CurrentExePath;
         string? currentVersionText = ReadOwnVersionText();
         Version? currentVersion = ParseVersion(currentVersionText);
@@ -325,13 +329,28 @@ internal static class FileAssociationService
         int bestRank = int.MaxValue;
         int registeredCount = 0;
 
+        // 判定結果を登録先パスごとに覚えておく。
+        //
+        // 対象拡張子は220件を超えるが、それらが指す先はたいてい同じexe1つ(まとめて登録するため)。
+        // ClassifyRegisteredは登録先が今動いているexeと違うとき File.Exists と
+        // FileVersionInfo.GetVersionInfo でディスクを読む。キャッシュが無いと同じファイルを
+        // 220回読み直すことになり、実機のログではこの処理でUIスレッドが2.3〜4.1秒止まっていた
+        // (設定ウィンドウの事前生成が起動時に投げる get-settings がここを通るため、
+        // 本体ウィンドウの初期化までその間まるごと待たされていた)。
+        var classifiedByPath = new Dictionary<string, (string Status, string? VersionText)>(StringComparer.OrdinalIgnoreCase);
+
         foreach (string ext in Normalize(extensions))
         {
             string? registeredPath = ReadRegisteredExePath(ext);
             if (registeredPath is null) continue;
             registeredCount++;
 
-            (string status, string? versionText) = ClassifyRegistered(registeredPath, currentPath, currentVersion, currentVersionText);
+            if (!classifiedByPath.TryGetValue(registeredPath, out (string Status, string? VersionText) classified))
+            {
+                classified = ClassifyRegistered(registeredPath, currentPath, currentVersion, currentVersionText);
+                classifiedByPath[registeredPath] = classified;
+            }
+            (string status, string? versionText) = classified;
             int rank = SeverityRank(status);
             if (rank >= bestRank) continue;
 

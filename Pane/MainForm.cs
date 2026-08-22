@@ -508,6 +508,17 @@ internal sealed class MainForm : Form
     ///       ウィンドウがテーマ色一色で固まって見えてしまう)。
     /// どちらが先に来ても、2回目以降は<see cref="_webViewRevealed"/>で二重処理を防ぐ。
     /// </summary>
+    /// <summary>
+    /// このウィンドウが実際に使える状態(本文が描画され、WebView2が見えている状態)になった
+    /// ときに1度だけ発火する。PaneApplicationContextが、仕様書 第8.4節の数値目標
+    /// 「既存インスタンスへのファイル追加表示 300ms以内」「2枚目以降のウィンドウ追加メモリ
+    /// 60MB以内」を実測するために購読する。
+    ///
+    /// 初期描画完了の通知(initial-render-ready)が届かずフォールバックで表示した場合も、
+    /// 利用者から見れば「使える状態になった」ことに変わりはないため同じく発火する。
+    /// </summary>
+    public event Action? ReadyToUse;
+
     private void RevealWebView(bool viaFallback)
     {
         if (_webViewRevealed) return;
@@ -517,6 +528,16 @@ internal sealed class MainForm : Form
         Logger.Write(viaFallback
             ? $"WebView2を表示(フォールバック: {WebViewRevealFallbackMs}ms以内にinitial-render-readyが届かなかったため強制表示)"
             : "WebView2を表示(JS側からinitial-render-ready受信)");
+
+        try
+        {
+            ReadyToUse?.Invoke();
+        }
+        catch (Exception ex)
+        {
+            // 購読側(計測)の失敗で表示処理を巻き添えにしない。
+            Logger.WriteException("ReadyToUseの通知に失敗", ex);
+        }
     }
 
     /// <summary>
@@ -1107,6 +1128,47 @@ internal sealed class MainForm : Form
         _ => false,
     };
 
+    /// <summary>
+    /// { type: "duplicate", name, text } を受け取り、いま開いている文書の複製を
+    /// 新しいウィンドウ(タブ形式ならタブ)で開く(仕様書 F-08「名前を付けて保存／複製」の複製)。
+    ///
+    /// 複製はファイルとして保存はせず、内容だけを引き継いだ未保存の文書として開く。
+    /// 元のファイルには一切触れないため、元を残したまま試し書きしたい場合に使える。
+    /// D&Dのフォールバック経路と同じ「名前+中身で新しいウィンドウを開く」仕組み
+    /// (DroppedFileContent)に相乗りしており、開いた先の表示形式(ウィンドウ/タブ)の判断も
+    /// そちらと同じ扱いになる。
+    /// </summary>
+    private void HandleDuplicate(JsonElement root)
+    {
+        if (!TryGetString(root, "text", out string text))
+        {
+            Logger.Warn("duplicate: textが無いため複製できない");
+            return;
+        }
+        TryGetString(root, "name", out string name);
+        string copyName = MakeCopyName(name);
+        // UTF-8で渡す。受け取る側(TextFileService.LoadBytes)がバイト列から文字コードを
+        // 判定するため、日本語を含む文書はUTF-8として、ASCIIだけの文書はどう判定されても
+        // 同じ文字列になる。
+        byte[] bytes = System.Text.Encoding.UTF8.GetBytes(text);
+        Logger.Write($"duplicate: 「{copyName}」として複製を開く({bytes.Length}バイト)");
+        _requestNewWindowWithContent?.Invoke(new DroppedFileContent(copyName, bytes));
+    }
+
+    /// <summary>
+    /// 複製に付ける名前を作る。拡張子は元のまま残す("sample.md" → "sample のコピー.md")。
+    /// 名前が無い(無題の)場合は「無題 のコピー.md」にする。
+    /// </summary>
+    private static string MakeCopyName(string? name)
+    {
+        string source = string.IsNullOrWhiteSpace(name) ? "無題.md" : name.Trim();
+        string extension = Path.GetExtension(source);
+        string stem = Path.GetFileNameWithoutExtension(source);
+        if (string.IsNullOrEmpty(stem)) stem = "無題";
+        if (string.IsNullOrEmpty(extension)) extension = ".md";
+        return $"{stem} のコピー{extension}";
+    }
+
     private void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
     {
         // JS側から届くメッセージは外部入力として扱う。個々のcase内は共有ヘルパー
@@ -1228,6 +1290,9 @@ internal sealed class MainForm : Form
                 break;
             case "new-window":
                 _requestNewWindow?.Invoke(null);
+                break;
+            case "duplicate":
+                HandleDuplicate(root);
                 break;
             case "close":
                 Close();
