@@ -812,6 +812,19 @@ internal sealed class AppSettings
     /// 開発ビルド(DEBUG)では設定値に関わらず常に許可する(MainForm側で判定)。</summary>
     public bool EnableDebug { get; set; }
 
+    /// <summary>
+    /// 詳細ログ(<see cref="LogLevel.Debug"/>)を記録するか。既定false。
+    ///
+    /// 既定では、起動・ファイル操作・設定変更といった節目と、警告・エラーだけを記録する。
+    /// これを有効にすると、メニューへのマウス移動やJS側からのlog中継など日常操作も
+    /// 1つ残らず記録するようになる。不具合の再現手順を細かく追いたいときだけ使う想定で、
+    /// 常用するとログが読みにくくなる(1回の起動で数百行になる)。
+    ///
+    /// ログの書き出しは非同期にまとめて行うため(<see cref="Logger"/>参照)、有効にしても
+    /// 動作が目に見えて遅くなることはない。
+    /// </summary>
+    public bool VerboseLogging { get; set; }
+
     /// <summary>ファイルツリーに隠しファイルを表示するか。既定false。</summary>
     public bool ShowHiddenFilesInTree { get; set; }
 

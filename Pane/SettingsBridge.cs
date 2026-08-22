@@ -169,6 +169,7 @@ internal static class SettingsBridge
 
             // ---- 詳細 ----
             enableDebug = settings.EnableDebug,
+            verboseLogging = settings.VerboseLogging,
             showHiddenFilesInTree = settings.ShowHiddenFilesInTree,
             fileTreePatterns = settings.FileTreePatterns,
             addToPath = settings.AddToPath,
@@ -475,6 +476,12 @@ internal static class SettingsBridge
 
             // ---- 詳細 ----
             if (TryGetBool(s, "enableDebug", out bool enableDebug)) settings.EnableDebug = enableDebug;
+            if (TryGetBool(s, "verboseLogging", out bool verboseLogging))
+            {
+                settings.VerboseLogging = verboseLogging;
+                // 保存した瞬間から効かせる(再起動を求めない)。
+                Logger.SetVerbose(verboseLogging);
+            }
             if (TryGetBool(s, "showHiddenFilesInTree", out bool showHiddenFilesInTree)) settings.ShowHiddenFilesInTree = showHiddenFilesInTree;
             List<string>? fileTreePatterns = TryGetStringList(s, "fileTreePatterns");
             if (fileTreePatterns is not null) settings.FileTreePatterns = fileTreePatterns;

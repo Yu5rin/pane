@@ -110,14 +110,8 @@ internal static class PaneDialog
             BackColor = background;
             ForeColor = foreground;
 
-            try
-            {
-                Icon = new Icon(Path.Combine(AppContext.BaseDirectory, "Assets", "Pane.ico"));
-            }
-            catch
-            {
-                // 仮アイコンが見つからなくても表示は継続する(既定色のフォールバックと同じ考え方)。
-            }
+            Icon? windowIcon = AppIcon.Create();
+            if (windowIcon is not null) Icon = windowIcon;
 
             // ---- アイコン(GDI+の単純な図形で自前描画。MessageBoxIcon.Noneなら描かない) ----
             int textLeft = DialogPad;

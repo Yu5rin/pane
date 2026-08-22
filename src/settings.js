@@ -241,6 +241,7 @@ const FIELD_DEFS = {
 
   // ---- 詳細 ----
   enableDebug: { kind: "bool", def: false },
+  verboseLogging: { kind: "bool", def: false },
   showHiddenFilesInTree: { kind: "bool", def: false },
   addToPath: { kind: "bool", def: false },
 };
@@ -1980,7 +1981,8 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
   function renderAdvanced(el) {
     el.innerHTML = `
       <div class="settings-group">
-        ${fieldCheckbox("enableDebug", "デバッグモード", "開発者向けの詳細ログを有効にします")}
+        ${fieldCheckbox("enableDebug", "開発者ツールを使えるようにする", "Shift+F12 で WebView2 の開発者ツールを開けるようになります。")}
+        ${fieldCheckbox("verboseLogging", "詳細ログを記録する", "普段は起動・保存・エラーなどの節目だけを記録します。これを有効にすると、メニュー操作や画面の更新まで1つ残らず記録します。不具合の報告を求められたときだけ使ってください(ログが読みにくくなります)。")}
         ${fieldCheckbox("showHiddenFilesInTree", "隠しファイルを表示")}
       </div>
       <div class="settings-group">
