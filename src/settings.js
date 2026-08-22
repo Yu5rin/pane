@@ -242,6 +242,7 @@ const FIELD_DEFS = {
   // ---- 詳細 ----
   enableDebug: { kind: "bool", def: false },
   verboseLogging: { kind: "bool", def: false },
+  checkUpdateOnStartup: { kind: "bool", def: true },
   showHiddenFilesInTree: { kind: "bool", def: false },
   addToPath: { kind: "bool", def: false },
 };
@@ -918,6 +919,9 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     draft.logFolderPath = typeof msg.logFolderPath === "string" ? msg.logFolderPath : "";
     draft.themeFolderPath = typeof msg.themeFolderPath === "string" ? msg.themeFolderPath : "";
     draft.licenses = Array.isArray(msg.licenses) ? msg.licenses.slice() : [];
+    // 更新の問い合わせ先(仕様書 U-02)。設定画面から編集はできないため保存対象ではなく、
+    // 「どこへ通信するのか」を見せるためだけに使う。
+    draft.updateCheckUrl = typeof msg.updateCheckUrl === "string" ? msg.updateCheckUrl : "";
     // いまレジストリに登録されている関連付け先(表示専用。保存対象ではない)。
     // C#側 FileAssociationService.GetCurrentTarget の結果で、押したときだけ更新される。
     draft.fileAssociationTarget = normalizeAssocTarget(msg.fileAssociationTarget);
@@ -2193,6 +2197,8 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
       </div>
       <div class="settings-group">
         <div class="settings-group-title">更新</div>
+        ${fieldCheckbox("checkUpdateOnStartup", "起動時に新しい版があるか確認する",
+          "1日に1回だけ、起動したあとで配布元に新しい版があるかを尋ねます。見つかったときは画面上部でお知らせするだけで、断りなく更新することはありません。オフにすると、下の「更新を確認」を押したとき以外は通信しません。")}
         <div data-update-section>${updateSectionHtml()}</div>
       </div>
       <div class="settings-group">
@@ -2221,6 +2227,9 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     }
     const updateHost = el.querySelector("[data-update-section]");
     if (updateHost) bindUpdateSection(updateHost);
+    // 「起動時に新しい版があるか確認する」をdraftへ結びつける。このカテゴリは以前は
+    // 表示専用で入力欄が無かったため、共通配線を通していなかった。
+    wireCommonFields(el);
   }
 
   // ---- カテゴリ切替のディスパッチ ----

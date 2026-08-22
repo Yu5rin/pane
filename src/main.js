@@ -2714,6 +2714,15 @@ async function handleHostMessage(msg) {
     case "save-settings-result":
       settingsUI?.handleSaveResult(msg);
       break;
+    case "update-available":
+      // 起動時の更新確認(仕様書 U-06)で新しい版が見つかった。ここでは知らせるだけで、
+      // 更新そのものは利用者が設定画面で「更新する」を押したときにしか始まらない。
+      // 自動では消さない(autoHideMsを渡さない)。見逃すと次に気づくのは翌日になるため。
+      showAdBanner(msg.message || `新しい版 ${msg.latestVersion || ""} があります`, {
+        actionLabel: "更新する",
+        onAction: () => bridge?.postMessage({ type: "open-settings-window", category: "versionInfo" }),
+      });
+      break;
     case "window-state":
       // 全画面表示(V-08)・常に手前に表示(V-12)の実際の状態はC#側(WinForms)が持ち、
       // トグル操作のたび・起動直後に届く。ここは表示専用(メニューのcheckedに反映するだけ)。

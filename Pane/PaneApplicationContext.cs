@@ -27,6 +27,10 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// コストはEnsureCoreWebView2Async呼び出し程度で小さい)。</summary>
     private const int HelpPregenerateDelayMs = 3500;
 
+    /// <summary>起動時の更新確認(U-06)を始めるまでの待ち時間。起動直後の輻輳に通信を
+    /// 混ぜないよう、事前生成(上の2つ)より後ろに置く。案内が数秒遅れて出ても困らない。</summary>
+    private const int StartupUpdateCheckDelayMs = 6000;
+
     private readonly List<MainForm> _windows = new();
     private readonly AppSettings _settings;
 
@@ -54,6 +58,9 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// <summary>取扱説明書ウィンドウの事前生成用ワンショットタイマー。<see cref="_settingsPregenerateTimer"/>と
     /// 同じ考え方(UIスレッド上でForm/WebView2コントロールを直接作るため)。</summary>
     private readonly System.Windows.Forms.Timer _helpPregenerateTimer;
+
+    /// <summary>起動時の更新確認(U-06)用ワンショットタイマー。</summary>
+    private readonly System.Windows.Forms.Timer _startupUpdateCheckTimer;
 
     /// <summary>--preloadで起動されたプロセスかどうか(B-1)。trueの間は、最後のウィンドウが
     /// 閉じられてもプロセスを終了させず、ウィンドウ0枚の常駐状態へ戻す(OnWindowClosed参照)。
@@ -89,6 +96,14 @@ internal sealed class PaneApplicationContext : ApplicationContext
             PregenerateHelpWindow();
         };
         _helpPregenerateTimer.Start();
+
+        _startupUpdateCheckTimer = new System.Windows.Forms.Timer { Interval = StartupUpdateCheckDelayMs };
+        _startupUpdateCheckTimer.Tick += (_, _) =>
+        {
+            _startupUpdateCheckTimer.Stop();
+            _ = CheckUpdateOnStartupAsync();
+        };
+        _startupUpdateCheckTimer.Start();
 
         if (preload)
         {
@@ -271,7 +286,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
             requestNewWindowWithContent: content => OpenWindow(null, null, content),
             requestSwitchDocument: SwitchToNextWindow,
             requestBroadcastSettings: BroadcastSettingsChanged,
-            requestOpenSettingsWindow: OpenSettingsWindow,
+            requestOpenSettingsWindow: (form, category) => OpenSettingsWindow(form, category),
             requestOpenHelpWindow: OpenHelpWindow,
             droppedFile: droppedFile,
             initialFolderPath: initialFolderPath,
@@ -470,6 +485,45 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// 再送して反映させる(requestSwitchDocumentと同じ、コールバックとして受け取る流儀)。
     /// 呼び出し元(保存した本人のウィンドウ)を区別する必要が無いため引数は取らない。
     /// </summary>
+    /// <summary>
+    /// 起動時の更新確認(仕様書 U-06)。1日1回だけ配布元へ問い合わせ、新しい版があれば
+    /// 画面上部の帯で知らせる。実際に更新するかどうかは利用者が決める。
+    ///
+    /// ・preload起動(B-1)では行わない。利用者が見ていないログオン直後に通信したくないため。
+    ///   ウィンドウが実際に開かれたときには、その時点でこのタイマーは既に止まっている。
+    /// ・ウィンドウが1枚も無ければ知らせる先が無いので何もしない。
+    /// ・確認に失敗しても何も出さない(UpdateService.CheckOnStartupAsync参照)。
+    /// </summary>
+    private async Task CheckUpdateOnStartupAsync()
+    {
+        if (_preload)
+        {
+            Logger.Debug("起動時の更新確認: preload起動のため行わない");
+            return;
+        }
+        try
+        {
+            UpdateCheckResult? result = await UpdateService.CheckOnStartupAsync();
+            if (result is null) return;
+
+            // 開いているウィンドウのうち1枚だけに出す。全部に出すと、複数開いている人に
+            // 同じ案内が何枚も並ぶことになる。
+            MainForm? target = _windows.FirstOrDefault(w => !w.IsDisposed);
+            if (target is null)
+            {
+                Logger.Debug("起動時の更新確認: 新しい版があったが、知らせる先のウィンドウが無い");
+                return;
+            }
+            Logger.Write($"起動時の更新確認: 新しい版を画面で知らせる({result.LatestVersion})");
+            target.PostUpdateAvailable(result.LatestVersion, result.Message);
+        }
+        catch (Exception ex)
+        {
+            // 更新の案内が出せないだけでアプリの動作を妨げてはいけない。
+            Logger.WriteException("起動時の更新確認に失敗", ex);
+        }
+    }
+
     private void BroadcastSettingsChanged()
     {
         foreach (MainForm window in _windows)
@@ -483,7 +537,10 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// 中央に表示する。既に開いていれば新しく作らず前面に出してフォーカスするだけにする
     /// (同時に1つしか開かない)。
     /// </summary>
-    public void OpenSettingsWindow(Form owner)
+    public void OpenSettingsWindow(Form owner) => OpenSettingsWindow(owner, null);
+
+    /// <param name="category">開いた直後に表示するカテゴリ(SettingsWindow.Reveal参照)。</param>
+    public void OpenSettingsWindow(Form owner, string? category)
     {
         var sw = Stopwatch.StartNew();
         bool isNew = _settingsWindow is not { IsDisposed: false };
@@ -498,7 +555,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
         // Revealへ統一する。以前は新規作成時だけShow()を直接呼んでいたが、フォールバック表示
         // タイマーの開始をReveal側に一本化した(SettingsWindow.Revealのコメント参照)ため、
         // ここでもRevealを通さないとそのタイマーが一生始動しない新規作成パスができてしまう。
-        _settingsWindow!.Reveal(owner);
+        _settingsWindow!.Reveal(owner, category);
         Logger.Write(isNew
             ? $"OpenSettingsWindow: 新規に開いた(事前生成は間に合っていなかった, {sw.ElapsedMilliseconds}ms)"
             : $"OpenSettingsWindow: 既存インスタンスを表示({(_settingsWindow.IsRevealed ? "事前生成/前回分の読み込み完了済み" : "まだ読み込み中")}, {sw.ElapsedMilliseconds}ms)");

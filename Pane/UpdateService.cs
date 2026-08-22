@@ -394,13 +394,116 @@ internal static class UpdateService
     /// </summary>
     public static void StartNewVersion(string exePath)
     {
-        Logger.Write($"更新: 新しいPaneを起動する: {exePath}");
-        Process.Start(new ProcessStartInfo
+        // 自分のプロセスIDを渡し、新しい側にはこれが終わるまで待ってもらう
+        // (--after-update。Program.Main参照)。
+        //
+        // これが無いと、古い側の終了と新しい側の起動が重なる。実機のログでは
+        // Process.Startから実際に新プロセスが動き出すまで2.1秒かかっており、
+        // ちょうど古い側が終了処理に入った瞬間と重なって、新しい側のWebView2の
+        // 初期化が返ってこなくなった(ウィンドウが出ないまま止まる)。
+        // 名前付きMutex(多重起動制御)の解放も古い側のプロセス終了時のため、
+        // 待たせておかないと新しい側が「既に起動中」と誤判定しうる。
+        string arguments = $"--after-update {Environment.ProcessId}";
+        Logger.Write($"更新: 新しいPaneを起動する: {exePath} {arguments}");
+
+        using Process? started = Process.Start(new ProcessStartInfo
         {
             FileName = exePath,
+            Arguments = arguments,
             UseShellExecute = true,
             WorkingDirectory = Path.GetDirectoryName(exePath) ?? "",
         });
+
+        // 新しい側のウィンドウが前面に出られるようにする。これを呼ばないと、
+        // 起動したのが自分(前面にいるプロセス)であってもWindowsは新プロセスへ
+        // フォアグラウンド権を渡さず、ウィンドウが背面のままになる
+        // (実機ログの「TrySetForegroundWindow: 失敗」)。
+        if (started is not null)
+        {
+            try { AllowSetForegroundWindow(started.Id); }
+            catch (Exception ex) { Logger.Debug($"更新: フォアグラウンド権の譲渡に失敗: {ex.GetType().Name}"); }
+        }
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool AllowSetForegroundWindow(int dwProcessId);
+
+    /// <summary>
+    /// 更新で置き換えられた古いプロセスが終わるのを待つ(--after-update)。
+    ///
+    /// 待つのはWebView2の初期化より前、多重起動のMutexを取るより前。古い側の
+    /// WebView2の子プロセス群とMutexが残っているうちに先へ進むと、初期化が返って
+    /// こなくなったり「既に起動中」と誤判定したりする(<see cref="StartNewVersion"/>)。
+    ///
+    /// 相手が既に終わっていれば即座に戻る。何らかの理由で終わらない場合も、
+    /// 起動できないままになるよりは進んだほうがよいので、上限を設けて打ち切る。
+    /// </summary>
+    public static void WaitForPreviousProcessExit(int processId)
+    {
+        const int TimeoutMs = 15000;
+        try
+        {
+            using Process previous = Process.GetProcessById(processId);
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            if (previous.WaitForExit(TimeoutMs))
+            {
+                Logger.Write($"更新: 前のPane(PID={processId})の終了を確認した({stopwatch.ElapsedMilliseconds}ms)");
+            }
+            else
+            {
+                Logger.Warn($"更新: 前のPane(PID={processId})が{TimeoutMs}ms待っても終わらないため、待たずに続行する");
+            }
+        }
+        catch (ArgumentException)
+        {
+            // 既に終了している(GetProcessByIdが見つけられない)。待つ必要は無い。
+            Logger.Write($"更新: 前のPane(PID={processId})は既に終了していた");
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException($"更新: 前のPane(PID={processId})の終了待ちに失敗(続行する)", ex);
+        }
+    }
+
+    /// <summary>
+    /// 起動時の更新確認(仕様書 U-06)。条件を満たすときだけ問い合わせ、新しい版が
+    /// 見つかった場合にかぎり結果を返す。それ以外(設定オフ・今日は確認済み・最新だった・
+    /// 確認できなかった)はnullを返し、画面には何も出さない。
+    ///
+    /// 「確認できなかった」を黙って捨てるのは、起動のたびに通信の失敗を利用者へ見せても
+    /// できることが無いため(手動の「更新を確認」なら理由を表示する)。ログには残す。
+    ///
+    /// 確認したという記録(<see cref="AppSettings.LastUpdateCheckedOn"/>)は、結果に
+    /// かかわらず問い合わせを試みた時点で残す。配布元へ繋がらない状態が続いたときに、
+    /// 起動のたびに何度も試してしまうのを防ぐため。
+    /// </summary>
+    public static async Task<UpdateCheckResult?> CheckOnStartupAsync()
+    {
+        AppSettings settings = SettingsService.Load();
+        if (!settings.CheckUpdateOnStartup)
+        {
+            Logger.Debug("起動時の更新確認: 設定がオフのため行わない");
+            return null;
+        }
+
+        string today = DateTime.Now.ToString("yyyy-MM-dd");
+        if (string.Equals(settings.LastUpdateCheckedOn, today, StringComparison.Ordinal))
+        {
+            Logger.Debug($"起動時の更新確認: 今日({today})は確認済みのため行わない");
+            return null;
+        }
+
+        Logger.Write($"起動時の更新確認: 前回={(string.IsNullOrEmpty(settings.LastUpdateCheckedOn) ? "なし" : settings.LastUpdateCheckedOn)}, 今日={today}");
+        SettingsService.Update(s => s.LastUpdateCheckedOn = today);
+
+        UpdateCheckResult result = await CheckAsync(settings);
+        if (result.Status != "available")
+        {
+            // 最新だった/確認できなかった。どちらも画面には出さない。
+            return null;
+        }
+        return result;
     }
 
     /// <summary>

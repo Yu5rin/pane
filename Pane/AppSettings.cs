@@ -838,6 +838,26 @@ internal sealed class AppSettings
     /// </summary>
     public string UpdateCheckUrl { get; set; } = "https://api.github.com/repos/Yu5rin/pane/releases/latest";
 
+    /// <summary>
+    /// 起動時に更新を確認するか(仕様書 U-06)。既定true。
+    ///
+    /// 確認するのは1日に1回だけで(<see cref="LastUpdateCheckedOn"/>)、起動のたびではない。
+    /// 新しい版が見つかったときも、勝手に入れ替えることはせず画面に案内を出すだけで、
+    /// 実際に更新するかどうかは利用者が決める。
+    ///
+    /// この項目をオフにすると、起動時の通信は一切行われなくなる(設定「バージョン情報」の
+    /// 「更新を確認」を押したときだけ通信する状態に戻る)。
+    /// </summary>
+    public bool CheckUpdateOnStartup { get; set; } = true;
+
+    /// <summary>
+    /// 起動時の更新確認を最後に行った日(<c>yyyy-MM-dd</c>、ローカル時刻)。空なら未実施。
+    ///
+    /// 「1日1回」の判定にのみ使う。確認した結果(新しい版の有無)は覚えておかず、
+    /// 毎回その場で問い合わせる。
+    /// </summary>
+    public string LastUpdateCheckedOn { get; set; } = "";
+
     /// <summary>ファイルツリーに隠しファイルを表示するか。既定false。</summary>
     public bool ShowHiddenFilesInTree { get; set; }
 

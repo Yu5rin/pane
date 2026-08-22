@@ -69,7 +69,9 @@ internal sealed class MainForm : Form
     /// <summary>設定画面(独立ウィンドウ)を開く要求。<see cref="PaneApplicationContext"/> が
     /// 「既に開いていれば前面へ、無ければ新規に開く」処理を渡す。呼び出し元ウィンドウ(このMainForm)
     /// を中央配置の基準として渡す必要があるため、requestNewWindowと違い自分自身を渡す形。</summary>
-    private readonly Action<MainForm>? _requestOpenSettingsWindow;
+    /// <summary>設定画面を開く依頼。2つ目の引数は開いた直後に表示するカテゴリ
+    /// (nullなら前回のまま)。更新の案内(U-06)から「バージョン情報」を直接開くために使う。</summary>
+    private readonly Action<MainForm, string?>? _requestOpenSettingsWindow;
     /// <summary>更新の適用(U-04)の前提確認・後始末。実体はPaneApplicationContextが持つ
     /// (未保存の有無・終了処理はアプリ全体の話で、1ウィンドウでは判断できないため)。</summary>
     private readonly Func<bool>? _hasUnsavedDocuments;
@@ -206,7 +208,7 @@ internal sealed class MainForm : Form
         Action<DroppedFileContent>? requestNewWindowWithContent = null,
         Action<MainForm>? requestSwitchDocument = null,
         Action? requestBroadcastSettings = null,
-        Action<MainForm>? requestOpenSettingsWindow = null,
+        Action<MainForm, string?>? requestOpenSettingsWindow = null,
         Action<MainForm>? requestOpenHelpWindow = null,
         DroppedFileContent? droppedFile = null,
         string? initialFolderPath = null,
@@ -731,8 +733,20 @@ internal sealed class MainForm : Form
             string userDataFolder = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "Pane", "WebView2");
-            _cachedEnvironment = await CoreWebView2Environment.CreateAsync(userDataFolder: userDataFolder);
-            Logger.Write("CoreWebView2Environment生成完了(プロセス全体でキャッシュ)");
+
+            // CreateAsyncが返ってこないと、ウィンドウが出ないまま無言で止まる。実機では
+            // 更新直後の再起動でこれが起きたが、ログには「OnLoadAsync開始」までしか残らず
+            // 何が起きたのか分からなかった。返るまでに時間がかかっている場合はその事実を
+            // 記録しておき、次に起きたときに切り分けられるようにする。
+            Task<CoreWebView2Environment> creating = CoreWebView2Environment.CreateAsync(userDataFolder: userDataFolder);
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            if (await Task.WhenAny(creating, Task.Delay(5000)) != creating)
+            {
+                Logger.Warn($"CoreWebView2Environment生成が5秒経っても返らない(userDataFolder={userDataFolder})。" +
+                            "他のPaneがまだ終了しきっていない可能性がある。このまま待ち続ける");
+            }
+            _cachedEnvironment = await creating;
+            Logger.Write($"CoreWebView2Environment生成完了(プロセス全体でキャッシュ, {stopwatch.ElapsedMilliseconds}ms)");
             return _cachedEnvironment;
         }
         finally
@@ -1483,7 +1497,9 @@ internal sealed class MainForm : Form
             case "open-settings-window":
                 // 設定画面を独立ウィンドウとして開く(または既に開いていれば前面へ)。
                 // 実体はPaneApplicationContext.OpenSettingsWindowが持つ(同時に1つしか開かない)。
-                _requestOpenSettingsWindow?.Invoke(this);
+                // categoryは任意。更新の案内(U-06)の「更新する」からは "versionInfo" が付く。
+                _requestOpenSettingsWindow?.Invoke(
+                    this, TryGetString(root, "category", out string settingsCategory) ? settingsCategory : null);
                 break;
             case "open-help-window":
                 // 取扱説明書ウィンドウ(F1、メニューバー右上の「?」ボタン、コマンドパレットの
@@ -3196,6 +3212,13 @@ internal sealed class MainForm : Form
     /// (<see cref="ApplyAutoSaveSettings"/>)。
     /// <see cref="PaneApplicationContext"/> が全ウィンドウへ再送する際にも呼ぶため internal。
     /// </summary>
+    /// <summary>
+    /// 起動時の更新確認(仕様書 U-06)で新しい版が見つかったことを画面へ知らせる。
+    /// 受け取ったJS側は画面上部の帯に案内を出すだけで、勝手に更新は始めない。
+    /// </summary>
+    internal void PostUpdateAvailable(string latestVersion, string message)
+        => PostToWeb(new { type = "update-available", latestVersion, message });
+
     internal void PostCapabilities()
     {
         AppSettings settings = SettingsService.Load();
