@@ -1251,6 +1251,9 @@ function getState() {
     pandocAvailable,
     wordWrap: wordWrapOn,
     hasClosedFile: closedFiles.length > 0,
+    // Editメニューの「切り取り」「コピー」を、選択が無いときはグレーにするために使う
+    // (メニューを開くたびに評価されるが、選択範囲が空かどうかを見るだけなので軽い)。
+    hasSelection: !editor.view.state.selection.main.empty,
     recentFiles,
     sidebarOpen: sidebar.isOpen(),
     sidebarPanel: sidebar.currentPanel(),
@@ -1275,6 +1278,17 @@ const ctx = {
   // commands.js側のbindShortcutsがこれを見て、既存のショートカット発火を一時的に止める。
   shortcutsSuppressed: false,
   actions: {
+    // Editメニューの「貼り付け」。本文の右クリックメニューと同じ処理を通す
+    // (クリップボードにHTMLがあればMarkdownへ変換し、画像があればローカルへ保存する)。
+    pasteRich() { return pasteRichFromContextMenu(); },
+    // 複製(仕様書 F-08)。いまの内容を引き継いだ未保存の文書を新しく開く。
+    // 元のファイルには触れないため、元を残したまま別案を書きたいときに使える。
+    // ブリッジ(C#側)が新しいウィンドウ/タブを作るため、ブラウザ単体では何もしない
+    // (メニュー項目自体もcommands.js側でグレーになる)。
+    duplicateDocument() {
+      if (!bridge) return;
+      bridge.postMessage({ type: "duplicate", name: currentName, text: editor.getValue() });
+    },
     async newDocument() {
       if (bridge) { bridge.postMessage({ type: "new" }); return; }
       if (isDirty && !(await paneConfirm({ title: "新規文書を開きますか?", message: "保存されていない変更があります。新規文書を開くと失われますが、よろしいですか?", okLabel: "開く", danger: true }))) return;
