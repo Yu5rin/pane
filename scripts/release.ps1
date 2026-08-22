@@ -3,6 +3,7 @@
 # 使い方（リポジトリ直下で実行）:
 #   powershell -ExecutionPolicy Bypass -File scripts\release.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts\release.ps1 -Version 1.0.1
+#   powershell -ExecutionPolicy Bypass -File scripts\release.ps1 -ReadyToRun   # 起動短縮の比較用
 #
 # 既定では .NET ランタイムを同梱した自己完結型（self-contained）で作る。
 # 利用者側に .NET のインストールを求めないためで、インストーラを使えない環境でも
@@ -16,8 +17,13 @@
 
 [CmdletBinding()]
 param(
-    [string]$Version = "1.0.2",
+    [string]$Version = "1.0.3",
     [switch]$FrameworkDependent,
+    # 事前コンパイル(ReadyToRun)を有効にする。起動時のJITが減り「プロセス開始→Main到達」が
+    # 短くなる一方、配布物が大きくなる(win-x64 self-contained での実測:
+    # exe 180MB→238MB、Zip 71.9MB→88.2MB)。既定は無効。
+    # 起動時間への効果は実機のログ「[計測] プロセス開始→Main到達」で比較できる。
+    [switch]$ReadyToRun,
     # 既に release フォルダに同名の Zip があるとき、確認せず上書きする
     [switch]$Force
 )
@@ -29,7 +35,8 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 
 $Rid         = "win-x64"
-$PackageName = "Pane-v$Version-$Rid"
+# ReadyToRun 版は比較用に別名の Zip にする(同じ名前だとどちらを配ったか分からなくなる)。
+$PackageName = if ($ReadyToRun) { "Pane-v$Version-$Rid-r2r" } else { "Pane-v$Version-$Rid" }
 $PublishDir  = Join-Path $RepoRoot "publish"
 $ReleaseDir  = Join-Path $RepoRoot "release"
 $StageDir    = Join-Path $ReleaseDir $PackageName
@@ -112,6 +119,10 @@ if ($FrameworkDependent) {
     Write-Host "ランタイム非同梱でビルドします（利用者に .NET 8 の導入が必要）" -ForegroundColor Yellow
 } else {
     $publishArgs += "--self-contained", "true"
+}
+if ($ReadyToRun) {
+    $publishArgs += "-p:PublishReadyToRun=true"
+    Write-Host "事前コンパイル(ReadyToRun)を有効にしてビルドします（起動は速くなるがサイズが増えます）" -ForegroundColor Yellow
 }
 
 Invoke-Checked "dotnet publish" { dotnet @publishArgs }
@@ -206,5 +217,6 @@ Write-Host "出力      : $ZipPath"
 Write-Host "サイズ    : $([math]::Round($zipInfo.Length / 1MB, 1)) MB"
 Write-Host "SHA256    : $hash"
 Write-Host "ランタイム: $(if ($FrameworkDependent) { '非同梱（利用者に .NET 8 が必要）' } else { '同梱（導入不要）' })"
+Write-Host "事前コンパイル: $(if ($ReadyToRun) { '有効（ReadyToRun）' } else { '無効' })"
 Write-Host ""
 Write-Host "GitHub Releases にこの Zip をアップロードし、リリース文へ上の SHA256 を載せてください。"

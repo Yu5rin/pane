@@ -75,14 +75,8 @@ internal sealed class HelpWindow : Form
         Size = ComputeInitialSize(owner);
         StartPosition = FormStartPosition.Manual;
         Location = ComputeCenteredLocation(owner, Size);
-        try
-        {
-            Icon = new Icon(Path.Combine(AppContext.BaseDirectory, "Assets", "Pane.ico"));
-        }
-        catch
-        {
-            // 仮アイコンが見つからなくても起動は継続する(実行ファイル埋め込みアイコンが使われる)
-        }
+        Icon? icon = AppIcon.Create();
+        if (icon is not null) Icon = icon;
 
         // 起動時の白フラッシュ対策(SettingsWindowと同じ理由・同じ新方式)。
         AppSettings initialSettings = SettingsService.Load();
@@ -318,7 +312,9 @@ internal sealed class HelpWindow : Form
         using JsonDocument doc = JsonDocument.Parse(e.WebMessageAsJson);
         JsonElement root = doc.RootElement;
         string type = root.TryGetProperty("type", out JsonElement typeProp) ? typeProp.GetString() ?? "" : "";
-        Logger.Write($"[取扱説明書ウィンドウ] JSからのメッセージ受信: type={type}");
+        // "log" は内容が直後に別の行として出るため、タイプ名の記録は完全に重複する。
+        if (type == "log") Logger.Debug($"[取扱説明書ウィンドウ] JSからのメッセージ受信: type={type}");
+        else Logger.Write($"[取扱説明書ウィンドウ] JSからのメッセージ受信: type={type}");
 
         switch (type)
         {
@@ -348,7 +344,7 @@ internal sealed class HelpWindow : Form
             case "log":
                 string level = root.TryGetProperty("level", out JsonElement levelProp) ? levelProp.GetString() ?? "log" : "log";
                 string logMessage = root.TryGetProperty("message", out JsonElement msgProp) ? msgProp.GetString() ?? "" : "";
-                Logger.Write($"[取扱説明書ウィンドウ JS:{level}] {logMessage}");
+                Logger.WriteFromWeb("取扱説明書ウィンドウ JS", level, logMessage);
                 break;
         }
     }

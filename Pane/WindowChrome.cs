@@ -96,6 +96,11 @@ internal static class WindowChrome
         public long LastAppliedTick;
         /// <summary>前回の適用以降、同じ値だったために抑止した回数。</summary>
         public long SkipCount;
+        /// <summary>最初に抑止した時刻(Environment.TickCount64)。抑止が異常な頻度で
+        /// 起きていないかを判定するために使う(<see cref="RunawayCallWarnThreshold"/>参照)。</summary>
+        public long FirstSkipTick;
+        /// <summary>暴走を疑う警告を既に出したか。同じウィンドウで何度も出さないための印。</summary>
+        public bool RunawayWarned;
     }
 
     private static readonly ConditionalWeakTable<Form, AppliedTheme> AppliedThemes = new();
@@ -103,6 +108,22 @@ internal static class WindowChrome
     /// <summary>抑止ログを出す間隔(抑止回数)。ログ出力自体が次の呼び出しを誘発しうる構造なので、
     /// 抑止の1回目と、それ以降はこの回数ごとに1行だけ残す。0.37秒周期なら約74秒に1行。</summary>
     private const long SkipLogInterval = 200;
+
+    /// <summary>
+    /// 「同じ配色の再適用要求」がこの回数を超え、かつ<see cref="RunawayCallWindowMs"/>以内に
+    /// 起きていたら、誰かがタイトルバー配色の適用を呼び続けている(暴走している)とみなして
+    /// 警告を1回だけ出す。
+    ///
+    /// v1.0.2以前に、ログファイルをPaneで開くと配色の適用が0.37秒ごとに延々と繰り返される
+    /// 不具合があった(適用→ログ出力→外部変更検知→再適用、の自己駆動ループ)。同じ値なら
+    /// 適用しないガードを入れて症状は止まったが、そもそも誰が呼び続けているのかは未特定のまま。
+    /// ガードで見えなくなっただけで呼び出し自体は続いている可能性があるため、異常な頻度に
+    /// なったらログへ「呼出元」つきで警告を残し、次に再発したとき原因をすぐ追えるようにする。
+    /// </summary>
+    private const long RunawayCallWarnThreshold = 50;
+
+    /// <summary>暴走判定の観測窓(ミリ秒)。この時間内に閾値を超えたら警告する。</summary>
+    private const long RunawayCallWindowMs = 30_000;
 
     /// <summary>
     /// タイトルバーの配色を適用する。isDarkに応じてDWMWA_USE_IMMERSIVE_DARK_MODEを設定したうえで、
@@ -157,11 +178,28 @@ internal static class WindowChrome
             // 前回とまったく同じ内容。DWMもログも触らない(=自己駆動ループを断つ)。
             // ただし「呼ばれ続けていること」自体は調査に必要なので、ごく低頻度で1行だけ残す。
             state.SkipCount++;
+            long now = Environment.TickCount64;
+            if (state.SkipCount == 1) state.FirstSkipTick = now;
+
             if (state.SkipCount == 1 || state.SkipCount % SkipLogInterval == 0)
             {
-                Logger.Write(
+                Logger.Debug(
                     $"WindowChrome: 前回と同じ配色のため再適用を抑止 (呼出元={DescribeCaller(callerMember, callerFile, callerLine)}, " +
-                    $"hwnd=0x{handle.ToInt64():X}, 抑止={state.SkipCount}回目, 前回適用から={Environment.TickCount64 - state.LastAppliedTick}ms)");
+                    $"hwnd=0x{handle.ToInt64():X}, 抑止={state.SkipCount}回目, 前回適用から={now - state.LastAppliedTick}ms)");
+            }
+
+            // 異常な頻度で呼ばれ続けていないか(=止めたはずのループが別経路で再発していないか)。
+            // 一度警告したら以後は黙る。警告そのものがログ出力→再適用の引き金になっては
+            // 元も子もないため。
+            if (!state.RunawayWarned
+                && state.SkipCount >= RunawayCallWarnThreshold
+                && now - state.FirstSkipTick <= RunawayCallWindowMs)
+            {
+                state.RunawayWarned = true;
+                Logger.Warn(
+                    $"WindowChrome: タイトルバー配色の適用要求が異常な頻度で来ている " +
+                    $"(直近{now - state.FirstSkipTick}msで{state.SkipCount}回, 呼出元={DescribeCaller(callerMember, callerFile, callerLine)}, " +
+                    $"hwnd=0x{handle.ToInt64():X})。同じ配色なので実際の適用は抑止しているが、呼び出し側にループがある可能性がある");
             }
             return;
         }

@@ -10,10 +10,18 @@ internal static class Program
     {
         // 実機での不具合調査用ログ(%LOCALAPPDATA%\Pane\logs\)。ハンドルされない例外を
         // JITデバッグダイアログだけでなくログにも残し、後から原因を追いやすくする。
+        // Logger.Errorは書き込みを後回しにせずその場で出し切るため、直後にプロセスが
+        // 落ちても記録が残る(Logger参照)。
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
-            Logger.Write($"未処理例外(AppDomain): {e.ExceptionObject}");
+        {
+            Logger.Error($"未処理例外(AppDomain): {e.ExceptionObject}");
+            Logger.Shutdown();
+        };
         Application.ThreadException += (_, e) =>
             Logger.WriteException("未処理例外(UIスレッド)", e.Exception);
+        // 自分の起動行を書く前に、前回の起動で警告・エラーが出ていなかったかを読み返す
+        // (書いた後だと集計範囲が自分自身になってしまう。StartupLogReview参照)。
+        StartupLogReview.ReviewPreviousRun();
         Logger.Write($"=== Pane起動 args=[{string.Join(",", args)}] ===");
         LogProcessStartToMainElapsed();
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
@@ -23,6 +31,7 @@ internal static class Program
         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 
         ApplyWebView2DefaultBackgroundColorEnvironmentVariable();
+        ApplyVerboseLoggingSetting();
 
         // コマンドライン引数でのファイル・フォルダ指定(仕様書 N-25 / F-14):
         // Pane.exe <file> / Pane.exe <folder> 。フォルダかどうかの判定は実際に開く段階
@@ -92,6 +101,29 @@ internal static class Program
         Application.Run(context);
 
         server.Stop();
+
+        // 書き残しを出し切ってから終わる(Loggerのワーカーはバックグラウンドスレッドのため、
+        // これが無いと終了直前の数百ms分のログが失われる)。
+        Logger.Shutdown();
+    }
+
+    /// <summary>
+    /// 設定「詳細ログを記録する」をLoggerへ反映する。
+    ///
+    /// 設定ファイルの読み込みより前に出るログ(=このメソッドより上の行)は必ずInfo以上のため、
+    /// ここより前の記録が詳細ログ設定によって欠けることはない。
+    /// </summary>
+    private static void ApplyVerboseLoggingSetting()
+    {
+        try
+        {
+            Logger.SetVerbose(SettingsService.Load().VerboseLogging);
+        }
+        catch (Exception ex)
+        {
+            // 設定が読めなくても既定(Info以上)のまま起動を続ける。
+            Logger.WriteException("詳細ログ設定の読み込みに失敗", ex);
+        }
     }
 
     /// <summary>

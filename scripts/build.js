@@ -224,6 +224,34 @@ const buildOptions = {
   format: "esm",
   splitting: true,
   outdir: "dist",
+
+  // ---- 圧縮 ----
+  // これまで一切圧縮せずに出していたため main.js が424KBあり、仕様書 第8.4節の
+  // 「初期ロードJS 分割後300KB以内」を満たしていなかった。JSはダウンロードだけでなく
+  // 構文解析とコンパイルの時間もソースの量にほぼ比例するため、起動時間(実機の計測では
+  // Navigateから初期描画完了までの約2.7秒が起動全体の8割)に直接効く。
+  //
+  // esbuildの minify: true は3つの処理をまとめて有効にするが、ここでは
+  // minifyIdentifiers(ローカル変数・関数名を1〜2文字へ短縮する処理)だけを外している。
+  // 理由は2つ:
+  //
+  //   1. 例外のスタックトレースが読めなくなる。実機の不具合調査はログが頼りで、
+  //      JSエラーの発生箇所が1文字の名前だらけになると原因を追えない。
+  //
+  //   2. 名前を保つesbuildの機能(keepNames: true)は使えない。keepNamesは関数定義ごとに
+  //      __name(fn, "名前")というラッパーを挟む実装で、CodeMirrorのように更新のたび
+  //      大量のクロージャを生成するコードでは実行時のコストになる。実測すると
+  //      1万行文書での1文字入力が 5.8ms → 13.2ms と2倍以上に悪化し、
+  //      仕様書 第8.4節の入力遅延の要件を脅かした(.verify-blockfield-recompute.mjsで検出)。
+  //
+  // 空白・コメントの除去と構文の圧縮だけでも 424KB → 290KB になり、300KB以内に収まる。
+  // 入力遅延にも悪化はない(実測 5.6〜5.8ms)。
+  //
+  // legalComments は既定("eof")のまま。OSSライセンスの表記コメントはファイル末尾へ
+  // まとめられ、消えはしない。
+  minifyWhitespace: true,
+  minifySyntax: true,
+  minifyIdentifiers: false,
   define: { PACKAGE_VERSION: JSON.stringify(mathjaxVersion) },
   plugins: [patchLezerMarkdownTable],
 };

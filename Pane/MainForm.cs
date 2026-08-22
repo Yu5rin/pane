@@ -226,14 +226,10 @@ internal sealed class MainForm : Form
         Width = 960;
         Height = 720;
         StartPosition = FormStartPosition.WindowsDefaultLocation;
-        try
-        {
-            Icon = new Icon(Path.Combine(AppContext.BaseDirectory, "Assets", "Pane.ico"));
-        }
-        catch
-        {
-            // 仮アイコンが見つからなくても起動は継続する(実行ファイル埋め込みアイコンが使われる)
-        }
+        // アイコンはアセンブリへ埋め込んである(AppIcon参照)。読めなかった場合は
+        // 代入せずWinFormsの既定アイコンのままにする。
+        Icon? icon = AppIcon.Create();
+        if (icon is not null) Icon = icon;
 
         // 起動時の白フラッシュ対策(実機不具合の修正)。WebView2がHTMLを描画する時点では
         // まだC#側から設定(テーマ)が届いておらず、既定のライト配色(またはWebView2自体の
@@ -309,7 +305,7 @@ internal sealed class MainForm : Form
         // 起動直後・ウィンドウ切替後の初回キー入力がWebView2内のコンテンツへ届かない
         // (フォーカスがネイティブのフォーム側に留まる)ことがあるため、明示的にフォーカスを移す。
         Shown += (_, _) => { Logger.Write("Form.Shown: _webView.Focus()"); _webView.Focus(); };
-        Activated += (_, _) => { Logger.Write("Form.Activated: _webView.Focus()"); _webView.Focus(); };
+        Activated += (_, _) => { Logger.Debug("Form.Activated: _webView.Focus()"); _webView.Focus(); };
 
         _autoSaveTimer = new System.Windows.Forms.Timer { Interval = AutoSaveIntervalMs };
         _autoSaveTimer.Tick += (_, _) => RequestAutoSaveSnapshot();
@@ -673,7 +669,14 @@ internal sealed class MainForm : Form
             $"document.documentElement.dataset.theme = '{initialThemeAttr}';");
 
         string distPath = ResolveDistPath();
-        Logger.Write($"distPath={distPath} (存在={Directory.Exists(distPath)}, index.html存在={File.Exists(Path.Combine(distPath, "index.html"))})");
+        bool distExists = Directory.Exists(distPath);
+        bool indexExists = File.Exists(Path.Combine(distPath, "index.html"));
+        string distLine = $"distPath={distPath} (存在={distExists}, index.html存在={indexExists})";
+        // dist/ が無いとエディタ本体がまったく表示されない(利用者から見れば「起動しない」)。
+        // 配布物からdistフォルダだけ移動・削除された場合に起きるため、原因がすぐ分かるよう
+        // エラーとして残す。
+        if (distExists && indexExists) Logger.Write(distLine);
+        else Logger.Error($"{distLine} ← dist/が見つからないため画面を表示できない。Pane.exeとdistフォルダは同じ場所に置く必要がある");
         _webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
             VirtualHostName, distPath, CoreWebView2HostResourceAccessKind.Allow);
         _webView.CoreWebView2.Navigate($"https://{VirtualHostName}/index.html");
@@ -1076,6 +1079,34 @@ internal sealed class MainForm : Form
         }
     }
 
+    /// <summary>
+    /// 「届いたこと自体」の記録価値が低く、量だけが多いメッセージ種別かどうか。
+    ///
+    /// 入力・スクロール・ドラッグのたびに飛んでくるもの(dirty/set-font-size/set-sidebar-width)、
+    /// 内容が直後に別の行として出るためタイプ名の記録が完全に重複するもの(log)、
+    /// こちらからの要求に対する応答で要求側の行を見れば足りるもの(*-response)が対象。
+    /// これらを常に記録していると、1回の起動で数百行のうち大半がこれで埋まり、
+    /// 肝心の不具合の手がかりが読み取れなくなる(実機ログの実測で185行/1275行が
+    /// "type=log" の1種類だけで占められていた)。
+    ///
+    /// 出さないのではなく詳細ログ(<see cref="Logger.Debug"/>)へ落としているだけなので、
+    /// 設定「詳細ログを記録する」を有効にすればすべて記録される。
+    /// </summary>
+    private static bool IsHighFrequencyMessageType(string type) => type switch
+    {
+        "dirty" => true,
+        "log" => true,
+        "titlebar-color" => true,
+        "set-font-size" => true,
+        "set-sidebar-width" => true,
+        "open-menu" => true,
+        "close-menu" => true,
+        "text-response" => true,
+        "all-tabs-text-response" => true,
+        "is-document-empty-response" => true,
+        _ => false,
+    };
+
     private void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
     {
         // JS側から届くメッセージは外部入力として扱う。個々のcase内は共有ヘルパー
@@ -1090,8 +1121,12 @@ internal sealed class MainForm : Form
             using JsonDocument doc = JsonDocument.Parse(e.WebMessageAsJson);
             JsonElement root = doc.RootElement;
             TryGetString(root, "type", out type);
-            // "dirty"は入力のたびに飛んでくるため、ログが埋もれないよう対象外にする。
-            if (type != "dirty") Logger.Write($"JSからのメッセージ受信: type={type}");
+            // 入力のたび・スクロールのたびに飛んでくる種類は詳細ログ(既定では出さない)へ回す。
+            // 以前は "dirty" だけを完全に握りつぶしていたが、それでは詳細に追いたいときにも
+            // 一切見られなかった。レベルを下げるだけにして、設定「詳細ログを記録する」を
+            // 有効にすれば全部見えるようにしてある。
+            if (IsHighFrequencyMessageType(type)) Logger.Debug($"JSからのメッセージ受信: type={type}");
+            else Logger.Write($"JSからのメッセージ受信: type={type}");
 
             switch (type)
             {
@@ -1247,7 +1282,8 @@ internal sealed class MainForm : Form
                 // JS側の不具合調査ログ(main.jsのlogToHost)をC#側と同じログファイルへ集約する。
                 string level = TryGetString(root, "level", out string levelValue) ? levelValue : "log";
                 TryGetString(root, "message", out string logMessage);
-                Logger.Write($"[JS:{level}] {logMessage}");
+                // JS側のレベルに応じた重要度で記録する(振り分けはLogger.WriteFromWeb)。
+                Logger.WriteFromWeb("JS", level, logMessage);
                 break;
             case "set-theme":
                 if (TryGetString(root, "theme", out string themeValue))
@@ -1261,7 +1297,8 @@ internal sealed class MainForm : Form
                 // { type: "titlebar-color", background: "#RRGGBB", foreground: "#RRGGBB" }
                 string? titlebarBackground = TryGetNullableString(root, "background");
                 string? titlebarForeground = TryGetNullableString(root, "foreground");
-                Logger.Write($"titlebar-color受信: background={titlebarBackground ?? "(なし)"}, foreground={titlebarForeground ?? "(なし)"}");
+                // テーマ適用のたびに飛んでくる(実際に色が変わったかどうかはWindowChrome側が判定する)。
+                Logger.Debug($"titlebar-color受信: background={titlebarBackground ?? "(なし)"}, foreground={titlebarForeground ?? "(なし)"}");
                 if (!string.IsNullOrWhiteSpace(titlebarBackground)) _titlebarBackgroundOverride = titlebarBackground;
                 if (!string.IsNullOrWhiteSpace(titlebarForeground)) _titlebarForegroundOverride = titlebarForeground;
                 ApplyTitleBarTheme();
