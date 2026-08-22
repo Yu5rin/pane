@@ -2198,7 +2198,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
       <div class="settings-group">
         <div class="settings-group-title">更新</div>
         ${fieldCheckbox("checkUpdateOnStartup", "起動時に新しい版があるか確認する",
-          "1日に1回だけ、起動したあとで配布元に新しい版があるかを尋ねます。見つかったときは画面上部でお知らせするだけで、断りなく更新することはありません。オフにすると、下の「更新を確認」を押したとき以外は通信しません。")}
+          "起動するたびに、配布元へ新しい版があるかを尋ねます。見つかったときは画面上部でお知らせするだけで、断りなく更新することはありません。オフにすると、下の「更新を確認」を押したとき以外は通信しません。")}
         <div data-update-section>${updateSectionHtml()}</div>
       </div>
       <div class="settings-group">
