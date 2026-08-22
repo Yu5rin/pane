@@ -17,7 +17,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$Version = "1.0.6",
+    [string]$Version = "1.0.7",
     [switch]$FrameworkDependent,
     # 事前コンパイル(ReadyToRun)を有効にする。起動時のJITが減り「プロセス開始→Main到達」が
     # 短くなる一方、配布物が大きくなる(win-x64 self-contained での実測:

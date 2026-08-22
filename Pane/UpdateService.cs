@@ -363,11 +363,16 @@ internal static class UpdateService
 
             File.Move(currentExe, exeBackup);
             exeMoved = true;
+            // 退避した時刻を「今」にしておく。リネームは元の更新時刻(=その版をビルドした
+            // 日時)を引き継ぐため、そのままだと次の起動で「たった今更新された」と
+            // 判断できない(LooksLikeJustUpdated参照)。
+            TrySetJustMovedTimestamp(exeBackup, isDirectory: false);
 
             if (Directory.Exists(currentDist))
             {
                 Directory.Move(currentDist, distBackup);
                 distMoved = true;
+                TrySetJustMovedTimestamp(distBackup, isDirectory: true);
             }
 
             File.Copy(newExe, currentExe);
@@ -464,6 +469,125 @@ internal static class UpdateService
         {
             Logger.WriteException($"更新: 前のPane(PID={processId})の終了待ちに失敗(続行する)", ex);
         }
+    }
+
+    /// <summary>
+    /// 「たった今更新された」とみなす猶予。これを過ぎた退避ファイルは、消しそこねた
+    /// 古い残骸として扱う(下の<see cref="LooksLikeJustUpdated"/>参照)。
+    /// </summary>
+    private static readonly TimeSpan JustUpdatedWindow = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// 直前に更新が行われた形跡があるかどうか(退避ファイルが残っているか)。
+    ///
+    /// <see cref="ApplyUpdate"/>が退避したファイルは、次の起動で
+    /// <see cref="CleanupLeftovers"/>が消すまで残る。つまり起動時にこれが在るということは、
+    /// 「更新のあと初めての起動」だと判断できる。
+    ///
+    /// ただし、何らかの理由で削除が失敗し続けると残骸がずっと居座ることになる。それを
+    /// 「更新直後」と見なしてしまうと、通常の多重起動(2枚目のウィンドウを開く等)のたびに
+    /// 他プロセスの終了を待って何秒も足止めしてしまう。そうならないよう、置かれてから
+    /// <see cref="JustUpdatedWindow"/>以内のものだけを対象にする。
+    /// </summary>
+    private static bool LooksLikeJustUpdated(string folder)
+    {
+        DateTime threshold = DateTime.UtcNow - JustUpdatedWindow;
+
+        // 退避ファイルの時刻。退避する側(ApplyUpdate)が「今」に直しているのが前提だが、
+        // その処理が無い版(v1.0.6以前)から更新された場合は元のビルド日時のままになる。
+        // そのため、これだけに頼らず下の判定も併せて見る。
+        string exeBackup = Path.Combine(folder, "Pane.exe" + BackupSuffix);
+        bool exeBackupExists = File.Exists(exeBackup);
+        if (exeBackupExists && File.GetLastWriteTimeUtc(exeBackup) > threshold) return true;
+
+        string distBackup = Path.Combine(folder, "dist" + BackupSuffix);
+        bool distBackupExists = Directory.Exists(distBackup);
+        if (distBackupExists && Directory.GetLastWriteTimeUtc(distBackup) > threshold) return true;
+
+        // 退避ファイルが在るのに時刻が古い場合の受け皿。いま動いている自分自身が、
+        // ついさっき置かれたファイルかどうかを見る。入れ替えはFile.Copyで新しく作るため、
+        // 更新直後であれば作成時刻が「今」になっている。
+        if (!exeBackupExists && !distBackupExists) return false;
+        try
+        {
+            string? self = Environment.ProcessPath;
+            return self is not null && File.GetCreationTimeUtc(self) > threshold;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 更新直後の起動で、入れ替えられた古いPaneがまだ動いていれば、その終了を待つ。
+    ///
+    /// <see cref="StartNewVersion"/>は起動する側が新しい側へPIDを伝える仕組み(--after-update)
+    /// だが、それが効くのは「更新を実行する側」にこの仕組みが入っている場合だけ。
+    /// v1.0.5からv1.0.6へ更新したときのように、古い側にまだ無い版から起動されると
+    /// 引数は渡ってこない。実機ではそれで新しい側のWebView2の初期化が返らなくなった。
+    ///
+    /// そこで、引数に頼らず自分で気づけるようにしておく。判断材料は2つ。
+    ///   ・退避ファイルが残っている(=更新のあと初めての起動)
+    ///   ・同じ場所のPane.exeで動いている別のプロセスがいる
+    /// 両方そろったときだけ待つ。通常の多重起動(2枚目のウィンドウを開く等)では
+    /// 退避ファイルが無いので、ここで待たされることはない。
+    /// </summary>
+    public static void WaitForPreviousProcessExitAfterUpdate()
+    {
+        try
+        {
+            string? folder = Path.GetDirectoryName(Environment.ProcessPath ?? "");
+            if (string.IsNullOrEmpty(folder) || !LooksLikeJustUpdated(folder)) return;
+
+            int selfId = Environment.ProcessId;
+            Process[] candidates = Process.GetProcessesByName("Pane");
+            try
+            {
+                foreach (Process other in candidates)
+                {
+                    if (other.Id == selfId) continue;
+                    // 別の場所に置かれたPaneは無関係なので、実行ファイルの場所で絞る。
+                    // MainModuleは権限等で読めないことがあるため、読めなければ対象外にする。
+                    string? otherPath = TryGetProcessPath(other);
+                    if (otherPath is null) continue;
+                    if (!string.Equals(Path.GetDirectoryName(otherPath), folder, StringComparison.OrdinalIgnoreCase)) continue;
+
+                    Logger.Write($"更新直後の起動: 同じ場所の古いPane(PID={other.Id})がまだ動いているので終了を待つ");
+                    WaitForPreviousProcessExit(other.Id);
+                }
+            }
+            finally
+            {
+                foreach (Process p in candidates) p.Dispose();
+            }
+        }
+        catch (Exception ex)
+        {
+            // 待てなくても起動は続ける(待つのはあくまで安全側の措置)。
+            Logger.WriteException("更新直後の起動: 古いPaneの確認に失敗(続行する)", ex);
+        }
+    }
+
+    /// <summary>退避したファイル・フォルダの最終更新時刻を「今」にする。失敗しても
+    /// 待機の判断材料が1つ減るだけなので、入れ替え自体は続ける。</summary>
+    private static void TrySetJustMovedTimestamp(string path, bool isDirectory)
+    {
+        try
+        {
+            if (isDirectory) Directory.SetLastWriteTimeUtc(path, DateTime.UtcNow);
+            else File.SetLastWriteTimeUtc(path, DateTime.UtcNow);
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug($"更新の適用: 退避先の時刻を更新できなかった({path}): {ex.GetType().Name}");
+        }
+    }
+
+    private static string? TryGetProcessPath(Process process)
+    {
+        try { return process.MainModule?.FileName; }
+        catch { return null; }
     }
 
     /// <summary>

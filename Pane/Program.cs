@@ -68,9 +68,17 @@ internal static class Program
 
         // 古い側が完全に終わるのを待つ。Mutexを取るより前・WebView2に触れるより前に
         // 行う必要がある(理由はUpdateService.WaitForPreviousProcessExitの説明を参照)。
+        //
+        // PIDが渡ってくるのは、更新を実行した側にその仕組みが入っている場合だけ。
+        // 入っていない版(v1.0.5以前)から更新されたときは引数が空で届くため、
+        // 退避ファイルの有無から自分で気づいて待つ経路も併せて用意してある。
         if (afterUpdatePid is int previousPid)
         {
             UpdateService.WaitForPreviousProcessExit(previousPid);
+        }
+        else
+        {
+            UpdateService.WaitForPreviousProcessExitAfterUpdate();
         }
 
         // 多重起動制御(仕様書 第8.1節): 名前付きMutexで既存プロセスの有無を判定する。
