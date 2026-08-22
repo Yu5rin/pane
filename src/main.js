@@ -63,12 +63,116 @@ function logToHost(level, message) {
   console[level === "error" ? "error" : "log"](message);
   bridge?.postMessage({ type: "log", level, message: String(message) });
 }
+// ---- 起動時間の内訳の計測(実機で起動が遅い件の調査用) ----
+// C#側のログには「Navigate呼び出し完了」から「initial-render-ready受信」までの時間が
+// 既に出ているが、その間(実測で全体の約8割)の中身がまったく見えていなかった。
+// performance.now() はこのページの読み込み開始を 0 とするため、値そのものが
+// Navigate からの経過msになる。区切りごとに時刻を控えておき、最後にまとめて1行で出す。
+//
+// 途中で1行ずつ出さないのは、ログの往復(postMessage)自体が計測対象の時間に混ざるのを
+// 避けるため。マークを打つだけなら配列へ push するだけで済む。
+const startupMarks = [];
+function markStartup(label) {
+  startupMarks.push([label, performance.now()]);
+}
+// ここに到達した時点で、importしたモジュール(CodeMirror本体・言語・拡張など)の
+// 評価はすべて終わっている。バンドル全体の読み込みと評価にどれだけかかったかが分かる。
+markStartup("バンドル評価");
+
+function reportStartupMetrics() {
+  try {
+    const round = (v) => Math.round(v);
+    const nav = performance.getEntriesByType("navigation")[0];
+    const resources = performance.getEntriesByType("resource");
+    const findResource = (suffix) =>
+      resources.find((r) => r.name.endsWith(suffix) || r.name.includes(`${suffix}?`));
+
+    const parts = [];
+    // index.html の取得完了までを最初の区間にする。ここが大きければWebView2の
+    // 仮想ホストマッピング経由のファイル配信側が遅いということになる。
+    let prev = 0;
+    if (nav && nav.responseEnd > 0) {
+      parts.push(`HTML取得=${round(nav.responseEnd)}ms`);
+      prev = nav.responseEnd;
+    }
+    // 区間はマーク間の差分。最初のマーク(バンドル評価)だけはHTML取得の完了が起点。
+    for (const [label, at] of startupMarks) {
+      parts.push(`${label}=${round(at - prev)}ms`);
+      prev = at;
+    }
+
+    // 参考値: 起動時に必ず読み込むファイルの取得時間とサイズ。バンドル評価の区間が
+    // 大きかったとき、それがダウンロード待ちなのかJSの実行なのかを切り分ける。
+    const detail = [];
+    for (const [name, suffix] of [["main.js", "/main.js"], ["style.css", "/style.css"]]) {
+      const r = findResource(suffix);
+      if (!r) continue;
+      const kb = r.encodedBodySize ? `${round(r.encodedBodySize / 1024)}KB` : "サイズ不明";
+      detail.push(`${name}=${round(r.duration)}ms/${kb}`);
+    }
+
+    logToHost(
+      "info",
+      `[計測:JS] 起動の内訳 合計=${round(performance.now())}ms | ${parts.join(", ")}` +
+        (detail.length ? ` | 読み込み: ${detail.join(", ")}` : ""));
+  } catch (e) {
+    // 計測に失敗しても起動には影響しない。Performance APIが期待どおり揃っていない
+    // 環境(素のブラウザでの検証など)でここが例外を投げても黙って諦める。
+    logToHost("log", `[計測:JS] 起動の内訳を出せなかった: ${e}`);
+  }
+}
+
+// ---- 未処理エラーの記録(同じものは打ち切る) ----
+// 描画やイベント処理の中で起きたエラーは、原因が直らないかぎり同じものが何度でも発生する。
+// 毎回そのまま記録するとログがそれだけで埋まり、他の手がかりが読めなくなる(実機で
+// 「ログを開くとエラーがループする」不具合が実際に起きている)。同じ内容は上限まで記録し、
+// 超えたら1度だけ打ち切りを知らせて以後は黙る。
+const MAX_SAME_ERROR_REPORTS = 5;
+const errorReportCounts = new Map();
+function logErrorLimited(key, message) {
+  const count = (errorReportCounts.get(key) ?? 0) + 1;
+  errorReportCounts.set(key, count);
+  if (count <= MAX_SAME_ERROR_REPORTS) {
+    logToHost("error", message);
+    return;
+  }
+  if (count === MAX_SAME_ERROR_REPORTS + 1) {
+    logToHost("warn", `同じエラーが${MAX_SAME_ERROR_REPORTS}回を超えたため、以後は記録しない: ${key}`);
+  }
+}
+
 window.addEventListener("error", (e) => {
-  logToHost("error", `JS未処理エラー: ${e.message} (${e.filename}:${e.lineno}:${e.colno})`);
+  logErrorLimited(
+    `${e.message}@${e.filename}:${e.lineno}`,
+    `JS未処理エラー: ${e.message} (${e.filename}:${e.lineno}:${e.colno})`);
 });
 window.addEventListener("unhandledrejection", (e) => {
-  logToHost("error", `JS未処理のPromise拒否: ${e.reason}`);
+  logErrorLimited(`rejection:${e.reason}`, `JS未処理のPromise拒否: ${e.reason}`);
 });
+
+// ---- 画面が固まった時間の検知 ----
+// 「たまに重い」「一瞬固まる」という不具合は、後からログを見ても何も残っていないため
+// 追いようがなかった。一定間隔のタイマーが予定よりどれだけ遅れて発火したかを見ると、
+// その間メインスレッドが何かに占有されていたことが分かる。閾値を超えたときだけ記録する。
+//
+// 記録を始めるのは起動が一段落してから(reportStartupMetricsの直後)。起動処理そのものは
+// 重くて当たり前で、その内訳は別途[計測:JS]で出しているため、ここで二重に警告しない。
+const STALL_CHECK_INTERVAL_MS = 1000;
+const STALL_WARN_MS = 500;
+function startStallWatch() {
+  let previous = performance.now();
+  setInterval(() => {
+    const now = performance.now();
+    const delay = now - previous - STALL_CHECK_INTERVAL_MS;
+    previous = now;
+    // ウィンドウが非表示・最小化のときブラウザはタイマーの発火間隔を意図的に間引くため、
+    // その遅れは不具合ではない。見えている間だけを対象にする。
+    if (document.hidden) return;
+    if (delay >= STALL_WARN_MS) {
+      logToHost("warn", `画面の応答が${Math.round(delay)}ms止まっていた(この間、何かの処理がメインスレッドを占有していた)`);
+    }
+  }, STALL_CHECK_INTERVAL_MS);
+}
 
 // ---- 起動時の白フラッシュ対策(新方式) ----
 // C#側(Pane/MainForm.cs)はWebView2コントロール自体を"initial-render-ready"を受け取るまで
@@ -84,10 +188,13 @@ let initialSettingsApplied = false;
 let initialDocumentApplied = false;
 let initialRenderReadySent = false;
 function markInitialSettingsApplied() {
+  // 2回目以降(設定変更による再送)は計測に混ぜない。
+  if (!initialSettingsApplied) markStartup("設定反映(apply-settings)");
   initialSettingsApplied = true;
   trySignalInitialRenderReady();
 }
 function markInitialDocumentApplied() {
+  if (!initialDocumentApplied) markStartup("本文反映(new-document/file-opened)");
   initialDocumentApplied = true;
   trySignalInitialRenderReady();
 }
@@ -113,6 +220,8 @@ function trySignalInitialRenderReady() {
   // WebView2が行うため、JS側はrAFはおろかsetTimeoutの1tickすら待たず、条件が
   // 揃った瞬間に即座に通知する(非表示中でも確実に送られることをコード上で保証する:
   // requestAnimationFrame/setTimeoutを一切使わない同期呼び出しにした)。
+  reportStartupMetrics();
+  startStallWatch();
   logToHost("log", "initial-render-ready送信(テーマ・メニューバー・ステータスバー・本文エリアの初期描画完了)");
   bridge?.postMessage({ type: "initial-render-ready" });
 }
@@ -389,14 +498,14 @@ function applyFontSetting(rootStyle, cssVar, rawName, label) {
   const name = typeof rawName === "string" ? rawName.trim() : "";
   if (!name) {
     rootStyle.removeProperty(cssVar);
-    logToHost("info", `${label}: 未設定(テーマ既定に戻す)`);
+    logToHost("log", `${label}: 未設定(テーマ既定に戻す)`);
     return;
   }
   const value = CSS_GENERIC_FONT_FAMILIES.has(name.toLowerCase())
     ? name
     : `"${name.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
   rootStyle.setProperty(cssVar, value);
-  logToHost("info", `${label}: ${value} を適用`);
+  logToHost("log", `${label}: ${value} を適用`);
 }
 
 // 本文の左右余白(仕様書 editorPaddingLeft/editorPaddingRight)用。数値として解釈できない
@@ -1122,6 +1231,8 @@ const editor = createEditor(host, {
     return true;
   },
 });
+// CodeMirrorのEditorView生成が終わった時点。ここまでが「エディタ本体の組み立て」。
+markStartup("エディタ生成");
 updateCount();
 updatePosition();
 updateStatusMeta();
@@ -1437,6 +1548,9 @@ const commandPalette = initCommandPalette(document.body, commands, ctx);
 // それ以外は本文(CodeMirror)の上かどうかで判定する(サイドバーの行別メニューは
 // sidebar.js自身がshowContextMenuを使って個別に配線しており、ここには含めない)。
 initContextMenu(document, ctx, (c, e) => (host.contains(e.target) ? buildEditorContextMenuTree(c, e) : null));
+// サイドバー・検索UI・コマンド・メニューバー・コマンドパレット・右クリックメニューまで
+// 組み上がった時点。ここから先はC#側からのメッセージ待ちになる。
+markStartup("UI初期化");
 
 // ステータスバーの文字コード・改行コード(仕様書 第6.1/6.2節)。クリックでネイティブ
 // ポップアップのメニューを出す(docs/コンテキストメニュー仕様.mdの作法どおりshowContextMenuを

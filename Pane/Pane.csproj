@@ -13,9 +13,9 @@
     <!-- バージョン。利用者に見せる表記は3桁(セマンティックバージョニング)に揃える。
          .NETのAssemblyVersion/FileVersionは仕様上どうしても4桁(Major.Minor.Build.Revision)に
          なりexeのプロパティにもその形で出るが、設定の「バージョン情報」に表示するのは
-         ここで指定した<Version>から作られるInformationalVersion("1.0.2")を使う
+         ここで指定した<Version>から作られるInformationalVersion("1.0.3")を使う
          (SettingsBridge.DetectAppVersion参照)。 -->
-    <Version>1.0.2</Version>
+    <Version>1.0.3</Version>
 
     <!-- Windowsデスクトップワークロードが無い環境(Linux/mac上のCIやこのリポジトリの
          開発環境)でもビルド検証できるようにする。Windows上のビルドには影響しない。 -->
@@ -25,8 +25,39 @@
     <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <PublishSingleFile>true</PublishSingleFile>
+
+    <!-- ネイティブDLL(WebView2Loader.dll等)は仕組み上メモリから直接ロードできないため、
+         起動時に一時フォルダへ展開する必要がある。ここはtrueのまま。 -->
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+
+    <!-- IncludeAllContentForSelfExtract は「マネージドアセンブリも含めて全部を一時フォルダへ
+         展開してから実行する」という .NET Core 3.x 互換の動作で、Microsoftの公式ドキュメントでも
+         非推奨とされている(既定のfalseでは、マネージドアセンブリはexeから直接メモリへ読み込まれ、
+         展開そのものが起きない)。
+
+         これを有効にしていたため、self-contained(約190MB)の中身をまるごとディスクへ書き出す
+         処理が起動のたびに走っていた。実機ログの計測では、OSのファイルキャッシュに乗っていない
+         初回起動で「プロセス開始→Main到達」に1968ms、その後のWebView2アセンブリ読み込みに
+         3134msかかっており、合計13.3秒という起動時間の主因になっていた
+         (キャッシュに乗った2回目以降は同区間が約290ms/0msまで縮む)。
+
+         外すにあたって確認したこと:
+           - dist/ の解決は AppContext.BaseDirectory ではなく Environment.ProcessPath を
+             使っている(MainForm.ResolveDistPath)ため、展開先が変わっても影響しない。
+           - 唯一 AppContext.BaseDirectory 配下のファイルを読んでいたウィンドウアイコンは、
+             アセンブリへの埋め込み(下のEmbeddedResource + Pane/AppIcon.cs)へ移した。 -->
+
+    <!-- 事前コンパイル(ReadyToRun)。起動時にJITでネイティブコードへ変換していた分を
+         ビルド時に済ませておき、「プロセス開始→Main到達」を短くする。
+         PublishTrimmedはWinFormsがCOMマーシャリングに依存するためSDK側で無効化されており、
+         こちらは併用できない。
+
+         既定はfalse。有効にすると配布物が目に見えて大きくなるため
+         (win-x64 self-contained での実測: exe 180MB→238MB、Zip 71.9MB→88.2MB)、
+         得られる短縮幅(実機の計測ログで「プロセス開始→Main到達」がどれだけ縮むか)を
+         測ったうえで判断する。切り替えは scripts\release.ps1 の -ReadyToRun スイッチ、
+         または `dotnet publish -p:PublishReadyToRun=true` で行う。 -->
+    <PublishReadyToRun>false</PublishReadyToRun>
   </PropertyGroup>
 
   <ItemGroup>
@@ -37,9 +68,13 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Content Include="Assets\Pane.ico">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
+    <!-- ウィンドウアイコン。exeの隣にファイルとして置くのではなくアセンブリへ埋め込む。
+         単一ファイル発行の展開方式(IncludeAllContentForSelfExtract)に左右されず、
+         開発ビルドでも配布ビルドでも同じ経路で読めるようにするため(Pane/AppIcon.cs参照)。
+         LogicalNameはAppIcon.ResourceNameと一致させること。
+         なお、exe自体のアイコン(エクスプローラーに出るもの)は上の<ApplicationIcon>が担当しており、
+         こちらとは別の仕組み。 -->
+    <EmbeddedResource Include="Assets\Pane.ico" LogicalName="Pane.Assets.Pane.ico" />
   </ItemGroup>
 
   <!-- FileTypes.generated.cs は `npm run build`(scripts/build.js)が src/file-types.js から

@@ -98,14 +98,8 @@ internal sealed class SettingsWindow : Form
         StartPosition = FormStartPosition.Manual;
         Location = ComputeCenteredLocation(owner, Size);
         // 既定でリサイズ可能(FormBorderStyle.Sizableが既定値のため明示設定は不要)。
-        try
-        {
-            Icon = new Icon(Path.Combine(AppContext.BaseDirectory, "Assets", "Pane.ico"));
-        }
-        catch
-        {
-            // 仮アイコンが見つからなくても起動は継続する(実行ファイル埋め込みアイコンが使われる)
-        }
+        Icon? icon = AppIcon.Create();
+        if (icon is not null) Icon = icon;
 
         // 起動時の白フラッシュ対策(実機不具合の修正): MainFormと同じ問題(WebView2が
         // HTML/CSSを読み込み終える前は既定のライト配色、あるいは白が一瞬見える)がこの
@@ -151,7 +145,7 @@ internal sealed class SettingsWindow : Form
         if (_realCloseAllowed) return; // アプリ終了時: 本当に閉じる(FormClosedまで進める)
         e.Cancel = true;
         Hide();
-        Logger.Write("SettingsWindow: 閉じる操作 -> 非表示化のみ(インスタンスは再利用のため破棄しない)");
+        Logger.Debug("SettingsWindow: 閉じる操作 -> 非表示化のみ(インスタンスは再利用のため破棄しない)");
     }
 
     /// <summary>アプリ終了時(<see cref="PaneApplicationContext.OnWindowClosed"/>)専用。
@@ -247,7 +241,7 @@ internal sealed class SettingsWindow : Form
         if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
         Show();
         Activate();
-        Logger.Write($"SettingsWindow: Reveal (既存インスタンスを表示, wasHidden={wasHidden}, 読み込み完了済み={_webViewRevealed})");
+        Logger.Debug($"SettingsWindow: Reveal (既存インスタンスを表示, wasHidden={wasHidden}, 読み込み完了済み={_webViewRevealed})");
     }
 
     /// <summary>MainForm.RevealWebViewと同じ役割・同じ二重防御(JS側の正常な通知と
@@ -414,7 +408,10 @@ internal sealed class SettingsWindow : Form
         using JsonDocument doc = JsonDocument.Parse(e.WebMessageAsJson);
         JsonElement root = doc.RootElement;
         string type = root.TryGetProperty("type", out JsonElement typeProp) ? typeProp.GetString() ?? "" : "";
-        Logger.Write($"[設定ウィンドウ] JSからのメッセージ受信: type={type}");
+        // "log" は内容が直後に別の行として出るため、タイプ名の記録は完全に重複する。
+        // 詳細ログ側へ落として、既定のログが埋もれないようにする。
+        if (type == "log") Logger.Debug($"[設定ウィンドウ] JSからのメッセージ受信: type={type}");
+        else Logger.Write($"[設定ウィンドウ] JSからのメッセージ受信: type={type}");
 
         switch (type)
         {
@@ -485,7 +482,7 @@ internal sealed class SettingsWindow : Form
             case "log":
                 string level = root.TryGetProperty("level", out JsonElement levelProp) ? levelProp.GetString() ?? "log" : "log";
                 string logMessage = root.TryGetProperty("message", out JsonElement msgProp) ? msgProp.GetString() ?? "" : "";
-                Logger.Write($"[設定ウィンドウ JS:{level}] {logMessage}");
+                Logger.WriteFromWeb("設定ウィンドウ JS", level, logMessage);
                 break;
         }
     }

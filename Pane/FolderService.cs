@@ -56,9 +56,14 @@ internal static class FolderService
             var entries = new List<FolderEntry>();
             bool truncated = false;
 
-            Logger.Write($"FolderService.ScanAsync開始: {fullRoot}, showHiddenFiles={showHiddenFiles}, excludePatterns={excludePatterns.Count}件");
+            // フォルダの走査はファイル数しだいでいくらでも重くなる。所要時間を必ず添え、
+            // 一定を超えたらPerfWatchが警告として別行を残す。
+            long startTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
             ScanDirectory(fullRoot, fullRoot, entries, ref truncated, showHiddenFiles, excludePatterns, ct);
-            Logger.Write($"FolderService.ScanAsync完了: {fullRoot}, 件数={entries.Count}, truncated={truncated}");
+            long elapsedMs = (long)System.Diagnostics.Stopwatch.GetElapsedTime(startTimestamp).TotalMilliseconds;
+            Logger.Write($"FolderService.ScanAsync: {fullRoot}, 件数={entries.Count}, truncated={truncated}, " +
+                         $"showHiddenFiles={showHiddenFiles}, excludePatterns={excludePatterns.Count}件, {elapsedMs}ms");
+            PerfWatch.Report($"フォルダの走査({entries.Count}件)", elapsedMs, 1000);
 
             // ディレクトリ優先→名前順(大小文字を区別しない)で安定した表示順にする。
             entries.Sort((a, b) =>
