@@ -46,7 +46,15 @@ internal static class TextFileService
     private static readonly byte[] Utf16LeBomBytes = { 0xFF, 0xFE };
     private static readonly byte[] Utf16BeBomBytes = { 0xFE, 0xFF };
 
-    public static LoadResult Load(string path) => LoadBytes(File.ReadAllBytes(path));
+    public static LoadResult Load(string path)
+    {
+        // 読み込みが遅いのはファイルが大きいときだけとは限らない(ネットワークドライブ、
+        // 同期フォルダ、ウイルス対策ソフトの介在)。閾値を超えたときだけ記録が残る。
+        using (PerfWatch.Start($"ファイルの読み込み: {Path.GetFileName(path)}"))
+        {
+            return LoadBytes(File.ReadAllBytes(path));
+        }
+    }
 
     /// <summary>
     /// バイト列から直接読み込む(仕様書外: WebView2の本文エリアへドラッグ&ドロップされた
@@ -94,14 +102,49 @@ internal static class TextFileService
 
         try
         {
-            File.WriteAllBytes(tempPath, bytes);
-            // 同一ボリューム内であればアトミックな置き換えとして扱える。
-            File.Move(tempPath, path, overwrite: true);
+            using (PerfWatch.Start($"ファイルの保存({bytes.Length}バイト)"))
+            {
+                File.WriteAllBytes(tempPath, bytes);
+                // 同一ボリューム内であればアトミックな置き換えとして扱える。
+                File.Move(tempPath, path, overwrite: true);
+            }
         }
         catch
         {
             TryDelete(tempPath);
             throw;
+        }
+
+        VerifySavedSize(path, bytes.Length, editorText.Length);
+    }
+
+    /// <summary>
+    /// 保存直後に、書けたはずのバイト数が実際にファイルへ入っているかを確かめる。
+    ///
+    /// 保存はアプリの一番の役目で、失敗が最も高くつく。File.WriteAllBytes と File.Move が
+    /// どちらも例外を投げなければ普通は成功しているが、ネットワークドライブ・同期フォルダ・
+    /// ウイルス対策ソフトが介在すると、例外なしで内容が欠ける・0バイトになるという報告が
+    /// 一般に知られている。そうなったとき利用者は「保存できたはず」と思ったまま作業を続け、
+    /// 後になって初めて失われたことに気づく。
+    ///
+    /// ここで気づけてもファイルを元へは戻せないため、保存自体は失敗扱いにせず(ダイアログを
+    /// 出すと、実際には無事だった場合に無用な混乱を招く)、食い違いをログへ警告として残す。
+    /// 「保存したのに内容が消えた」という報告を受けたとき、それが実際に起きていたのかを
+    /// ログで確かめられるようにするのが目的。
+    /// </summary>
+    private static void VerifySavedSize(string path, int expectedBytes, int textLength)
+    {
+        try
+        {
+            long actual = new FileInfo(path).Length;
+            if (actual == expectedBytes) return;
+            Logger.Warn($"保存の検証: 書き込んだはずのサイズと実際のファイルサイズが違う " +
+                        $"(想定={expectedBytes}バイト, 実際={actual}バイト, 本文={textLength}文字): {path}");
+        }
+        catch (Exception ex)
+        {
+            // 検証できなくても保存自体は完了している。
+            Logger.Debug($"保存の検証: ファイルサイズを確認できなかった: {path} ({ex.GetType().Name})");
         }
     }
 

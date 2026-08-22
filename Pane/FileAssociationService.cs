@@ -343,12 +343,22 @@ internal static class FileAssociationService
 
         if (registeredCount == 0)
         {
-            Logger.Write("FileAssociationService.GetCurrentTarget: 関連付けの登録は見つからなかった");
+            // 「1つも登録していない」は初期状態そのもので異常ではない。設定画面を開くたびに
+            // 出るため詳細ログへ回す。
+            Logger.Debug("FileAssociationService.GetCurrentTarget: 関連付けの登録は見つからなかった");
             return new AssociationTarget("none", string.Empty, currentPath, 0, string.Empty, currentVersionText ?? string.Empty);
         }
 
-        Logger.Write($"FileAssociationService.GetCurrentTarget: status={bestStatus}, 登録先={bestPath}, " +
-                     $"登録先バージョン={bestVersionText ?? "不明"}, 現在={currentPath}({currentVersionText ?? "不明"}), 対象拡張子数={registeredCount}");
+        string summary = $"FileAssociationService.GetCurrentTarget: status={bestStatus}, 登録先={bestPath}, " +
+                         $"登録先バージョン={bestVersionText ?? "不明"}, 現在={currentPath}({currentVersionText ?? "不明"}), 対象拡張子数={registeredCount}";
+        // 状態によって重要度を変える。"same"(今のexeが関連付けられている=正常)は設定画面を
+        // 開くたび・保存するたびに出るため詳細ログへ落とし、そうでないものは既定のログに残す。
+        // 特に "older"/"missing" は、ファイルをダブルクリックすると古い版や存在しないexeが
+        // 起動しようとする状態で、実機で実際に起きた不具合そのもの。ログを一目見て
+        // 気づけるよう警告として記録する。
+        if (bestStatus is "older" or "missing") Logger.Warn(summary);
+        else if (bestStatus == "same") Logger.Debug(summary);
+        else Logger.Write(summary);
 
         return new AssociationTarget(
             bestStatus,
