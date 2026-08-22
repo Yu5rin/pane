@@ -377,8 +377,15 @@ internal static class UpdateService
 
             File.Copy(newExe, currentExe);
             CopyDirectory(newDist, currentDist);
+            WarmUpDist(currentDist);
 
             Logger.Write("更新の適用: 入れ替えが完了した");
+
+            // ダウンロードしたZipと展開した中身を片付ける。ここで消さないと、更新のたびに
+            // 一時フォルダへ数百MB(Zip 75MB + 展開後のexe・dist)が残り続ける。
+            // 加えて、更新直後は置いたばかりのファイルがウイルス対策の走査対象になるため、
+            // 不要な分を先に減らしておくと新しいPaneの初回起動が軽くなる。
+            TryDeleteDirectory(Path.GetDirectoryName(zipPath) ?? "");
             return currentExe;
         }
         catch (Exception ex)
@@ -591,16 +598,12 @@ internal static class UpdateService
     }
 
     /// <summary>
-    /// 起動時の更新確認(仕様書 U-06)。条件を満たすときだけ問い合わせ、新しい版が
-    /// 見つかった場合にかぎり結果を返す。それ以外(設定オフ・今日は確認済み・最新だった・
-    /// 確認できなかった)はnullを返し、画面には何も出さない。
+    /// 起動時の更新確認(仕様書 U-06)。設定が有効なら毎回の起動で問い合わせ、新しい版が
+    /// 見つかった場合にかぎり結果を返す。それ以外(設定オフ・最新だった・確認できなかった)は
+    /// nullを返し、画面には何も出さない。
     ///
     /// 「確認できなかった」を黙って捨てるのは、起動のたびに通信の失敗を利用者へ見せても
     /// できることが無いため(手動の「更新を確認」なら理由を表示する)。ログには残す。
-    ///
-    /// 確認したという記録(<see cref="AppSettings.LastUpdateCheckedOn"/>)は、結果に
-    /// かかわらず問い合わせを試みた時点で残す。配布元へ繋がらない状態が続いたときに、
-    /// 起動のたびに何度も試してしまうのを防ぐため。
     /// </summary>
     public static async Task<UpdateCheckResult?> CheckOnStartupAsync()
     {
@@ -611,16 +614,7 @@ internal static class UpdateService
             return null;
         }
 
-        string today = DateTime.Now.ToString("yyyy-MM-dd");
-        if (string.Equals(settings.LastUpdateCheckedOn, today, StringComparison.Ordinal))
-        {
-            Logger.Debug($"起動時の更新確認: 今日({today})は確認済みのため行わない");
-            return null;
-        }
-
-        Logger.Write($"起動時の更新確認: 前回={(string.IsNullOrEmpty(settings.LastUpdateCheckedOn) ? "なし" : settings.LastUpdateCheckedOn)}, 今日={today}");
-        SettingsService.Update(s => s.LastUpdateCheckedOn = today);
-
+        Logger.Write("起動時の更新確認: 開始");
         UpdateCheckResult result = await CheckAsync(settings);
         if (result.Status != "available")
         {
@@ -650,10 +644,109 @@ internal static class UpdateService
             if (File.Exists(exeBackup)) { removed |= TryDelete(exeBackup); }
             if (Directory.Exists(distBackup)) { removed |= TryDeleteDirectory(distBackup); }
             if (removed) Logger.Write("更新: 前回の更新で退避した古いファイルを削除した");
+
+            CleanupTempFolders();
         }
         catch (Exception ex)
         {
             Logger.Debug($"更新: 退避ファイルの掃除に失敗(次回また試す): {ex.GetType().Name}");
+        }
+    }
+
+    /// <summary>
+    /// 置いたばかりのdistを一度読み通しておく。
+    ///
+    /// 更新直後の初回起動が目に見えて遅くなる実測があった(実機ログでJS側の「バンドル評価」が
+    /// 68ms→3255ms、WebView2コントロールの生成が280ms→2465ms)。置いたばかりのファイルは
+    /// ウイルス対策の走査対象になり、初めて読むときにその完了を待たされるためと考えられる。
+    ///
+    /// ここで先に読み通しておくと、その待ちを「まだ画面を出していない今」に寄せられる。
+    /// 新しいPaneが読む頃には走査が済んでいるので、初回起動の待ちが減る。
+    /// 効果は実機ログの同じ2つの数字で確認できる。
+    ///
+    /// 失敗しても入れ替え自体には影響しないため、例外は握りつぶす。
+    /// </summary>
+    private static void WarmUpDist(string distFolder)
+    {
+        try
+        {
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            long total = 0;
+            int count = 0;
+            var buffer = new byte[81920];
+            foreach (string file in Directory.EnumerateFiles(distFolder, "*", SearchOption.AllDirectories))
+            {
+                try
+                {
+                    using FileStream stream = File.OpenRead(file);
+                    while (stream.Read(buffer, 0, buffer.Length) > 0) { }
+                    total += stream.Length;
+                    count++;
+                }
+                catch { /* 1つ読めなくても続ける */ }
+            }
+            Logger.Write($"更新の適用: distを読み通した({count}ファイル, 約{total / (1024 * 1024)}MB, {stopwatch.ElapsedMilliseconds}ms)");
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug($"更新の適用: distの読み通しに失敗(続行する): {ex.GetType().Name}");
+        }
+    }
+
+    /// <summary>
+    /// 更新に使った一時フォルダ(<c>%TEMP%\pane-update-*</c>)のうち、残っているものを消す。
+    ///
+    /// 通常は入れ替えの直後に消えるが、その前に落ちた場合などは残る。1つあたり数百MBに
+    /// なるので、起動のたびに拾って片付ける。今まさに別のPaneが使っている最中かもしれない
+    /// ため、置かれてから1時間以上経ったものだけを対象にする。
+    /// </summary>
+    private static void CleanupTempFolders()
+    {
+        try
+        {
+            DateTime threshold = DateTime.UtcNow - TimeSpan.FromHours(1);
+            int removed = 0;
+            long freed = 0;
+            foreach (string dir in Directory.EnumerateDirectories(Path.GetTempPath(), "pane-update-*"))
+            {
+                try
+                {
+                    if (Directory.GetCreationTimeUtc(dir) > threshold) continue;
+                    long size = MeasureDirectorySize(dir);
+                    if (!TryDeleteDirectory(dir)) continue;
+                    removed++;
+                    freed += size;
+                }
+                catch (Exception ex)
+                {
+                    Logger.Debug($"更新: 一時フォルダの削除に失敗({dir}): {ex.GetType().Name}");
+                }
+            }
+            if (removed > 0)
+            {
+                Logger.Write($"更新: 残っていた一時フォルダを{removed}個削除した(約{freed / (1024 * 1024)}MB)");
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug($"更新: 一時フォルダの掃除に失敗(次回また試す): {ex.GetType().Name}");
+        }
+    }
+
+    private static long MeasureDirectorySize(string dir)
+    {
+        try
+        {
+            long total = 0;
+            foreach (string file in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
+            {
+                try { total += new FileInfo(file).Length; } catch { /* 消えた等は数えない */ }
+            }
+            return total;
+        }
+        catch
+        {
+            return 0;
         }
     }
 

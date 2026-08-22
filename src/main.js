@@ -111,6 +111,18 @@ function reportStartupMetrics() {
       detail.push(`${name}=${round(r.duration)}ms/${kb}`);
     }
 
+    // 「バンドル評価」の区間が大きかったときの切り分け材料。この区間には、main.jsから
+    // 芋づるに読み込まれるチャンクの取得と、JSを実際に走らせる時間の両方が入っている。
+    // 取得がすべて終わった時刻を出しておけば、待たされていたのがディスク側なのか
+    // JSの実行側なのかが後から分かる(更新直後の初回起動が遅い件の調査用。
+    // 実機では通常68msのところが3255msになっていた)。
+    const firstMarkAt = startupMarks.length ? startupMarks[0][1] : performance.now();
+    const startupResources = resources.filter((r) => r.startTime < firstMarkAt && r.responseEnd > 0);
+    if (startupResources.length) {
+      const lastEnd = Math.max(...startupResources.map((r) => r.responseEnd));
+      detail.push(`起動までに${startupResources.length}件取得(最後の完了=${round(lastEnd)}ms)`);
+    }
+
     logToHost(
       "info",
       `[計測:JS] 起動の内訳 合計=${round(performance.now())}ms | ${parts.join(", ")}` +
