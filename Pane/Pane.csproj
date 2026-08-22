@@ -13,9 +13,9 @@
     <!-- バージョン。利用者に見せる表記は3桁(セマンティックバージョニング)に揃える。
          .NETのAssemblyVersion/FileVersionは仕様上どうしても4桁(Major.Minor.Build.Revision)に
          なりexeのプロパティにもその形で出るが、設定の「バージョン情報」に表示するのは
-         ここで指定した<Version>から作られるInformationalVersion("1.0.4")を使う
+         ここで指定した<Version>から作られるInformationalVersion("1.0.5")を使う
          (SettingsBridge.DetectAppVersion参照)。 -->
-    <Version>1.0.4</Version>
+    <Version>1.0.5</Version>
 
     <!-- Windowsデスクトップワークロードが無い環境(Linux/mac上のCIやこのリポジトリの
          開発環境)でもビルド検証できるようにする。Windows上のビルドには影響しない。 -->
