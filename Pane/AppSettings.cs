@@ -825,6 +825,19 @@ internal sealed class AppSettings
     /// </summary>
     public bool VerboseLogging { get; set; }
 
+    /// <summary>
+    /// 更新の確認先(仕様書 U-02)。設定「バージョン情報」の「更新を確認」を押したときだけ、
+    /// このURLへ問い合わせる。押さないかぎり通信は起こらない。
+    ///
+    /// コードに直書きせず設定に持たせているのは2つの理由から。
+    ///   ・どこへ通信するのかを利用者がいつでも確認できるようにするため
+    ///     (「外部通信は利用者が指示したときだけ」という方針を、目に見える形で担保する)
+    ///   ・配布場所を移したときに、設定を書き換えるだけで追随できるようにするため
+    ///
+    /// 空にすると更新の確認そのものを無効にできる。https以外は拒否する(UpdateService参照)。
+    /// </summary>
+    public string UpdateCheckUrl { get; set; } = "https://api.github.com/repos/Yu5rin/pane/releases/latest";
+
     /// <summary>ファイルツリーに隠しファイルを表示するか。既定false。</summary>
     public bool ShowHiddenFilesInTree { get; set; }
 

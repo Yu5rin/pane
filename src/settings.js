@@ -551,6 +551,17 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
   let fmRowIdSeq = 0;
   let fmRowEls = new Map(); // id -> {rowEl, extInput, modeSelect, warnEl}(入力中の全行再描画を避けるため)
 
+  // 更新(バージョン情報タブ)の状態。phaseは
+  //   idle      … まだ何も押していない
+  //   checking  … 「更新を確認」の返事待ち
+  //   checked   … 確認が終わった(checkResultに結果が入っている)
+  //   applying  … 「更新する」を押してダウンロード〜入れ替え中
+  //   failed    … 適用の途中で失敗した(progressMessageに理由が入っている)
+  // 設定ウィンドウを開いている間だけ保持すればよいので、保存はしない。
+  let updatePhase = "idle";
+  let updateCheckResult = null;
+  let updateProgress = null; // { message, percent } percentが0未満なら進捗バーを出さない
+
   // キーバインドタブの状態。
   let capturingCommandId = null;
   let activeCaptureCleanup = null; // タブ切替・保存・閉じる際に捕捉を強制終了させるための解除関数
@@ -572,6 +583,11 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
         settingsCache = null;
         schedulePrefetch();
       }
+      // 更新の確認・適用(仕様書 U-01〜U-04)の返信。バージョン情報タブを開いている
+      // ときだけ意味を持つが、閉じている間に届いても状態だけ更新しておけば、
+      // 開き直したときにそのまま最後の結果が出る。
+      if (msg.type === "update-check-result") { handleUpdateCheckResult(msg); return; }
+      if (msg.type === "update-progress") { handleUpdateProgress(msg); return; }
     });
   }
 
@@ -2049,6 +2065,119 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
   // "settings"応答に含める(appVersion/webView2Version/dotNetVersion/logFolderPath/
   // themeFolderPath/licenses。既存のsettingsFilePathも流用)。ボタンはブリッジへ
   // メッセージを送るだけで、応答を待たず押した側だけ完結する(advanced操作ボタンと同じ作法)。
+  // ---- 更新(仕様書 U-01〜U-04) ----
+  // 通信するのは利用者がボタンを押したときだけで、起動時や定期的な確認は行わない。
+  // 画面はupdatePhase/updateCheckResult/updateProgressの3つだけを見て組み立て、
+  // C#からの返信が届くたびにこのセクションだけを描き直す(入力欄が無いので作り直してよい)。
+  function updateSectionHtml() {
+    if (!ctx.bridge) {
+      return '<div class="settings-field-desc">この画面単体では更新を確認できません。</div>';
+    }
+    const busy = updatePhase === "checking" || updatePhase === "applying";
+    const checkLabel = updatePhase === "checking" ? "確認しています…" : "更新を確認";
+    let body = "";
+
+    if (updatePhase === "applying" || updatePhase === "failed") {
+      const percent = updateProgress && typeof updateProgress.percent === "number" ? updateProgress.percent : -1;
+      const isError = updatePhase === "failed";
+      body = `
+        <div class="settings-update-status${isError ? " error" : ""}">${escapeHtml((updateProgress && updateProgress.message) || "")}</div>
+        ${percent >= 0 ? `<div class="settings-update-bar"><span style="width:${Math.max(0, Math.min(100, percent))}%"></span></div>` : ""}`;
+    } else if (updatePhase === "checked" && updateCheckResult) {
+      const r = updateCheckResult;
+      const sizeText = r.sizeBytes > 0 ? `（約${Math.round(r.sizeBytes / (1024 * 1024))}MB）` : "";
+      body = `
+        <div class="settings-update-status${r.status === "error" ? " error" : ""}">${escapeHtml(r.message || "")}</div>
+        <div class="settings-info-row">
+          ${r.canApply ? `<button type="button" class="btn tiny primary" data-update-action="apply">更新する${escapeHtml(sizeText)}</button>` : ""}
+          ${r.releaseUrl ? '<button type="button" class="btn tiny" data-update-action="open-release">リリースページを開く</button>' : ""}
+        </div>`;
+    }
+
+    // 問い合わせ先を隠さずに出す(仕様書 U-02)。どこへ通信するのかを、設定ファイルを
+    // 開かなくてもこの画面で確かめられるようにするため。
+    const url = draft.updateCheckUrl || "";
+    return `
+      <p class="settings-intro">確認と更新は、下のボタンを押したときにだけ行います。自動では通信しません。</p>
+      <div class="settings-info-row">
+        <button type="button" class="btn tiny" data-update-action="check"${busy ? " disabled" : ""}>${escapeHtml(checkLabel)}</button>
+      </div>
+      ${body}
+      ${url ? `<div class="settings-field-desc">問い合わせ先: ${escapeHtml(url)}</div>` : ""}`;
+  }
+
+  // 更新セクションだけを描き直す。バージョン情報タブを開いていなければ何もしない
+  // (状態は残るので、開き直したときに最後の結果がそのまま出る)。
+  function refreshUpdateSection() {
+    const host = contentEl && contentEl.querySelector("[data-update-section]");
+    if (!host) return;
+    host.innerHTML = updateSectionHtml();
+    bindUpdateSection(host);
+  }
+
+  function bindUpdateSection(host) {
+    for (const btn of host.querySelectorAll("[data-update-action]")) {
+      btn.addEventListener("click", () => onUpdateAction(btn.dataset.updateAction));
+    }
+  }
+
+  async function onUpdateAction(action) {
+    if (!ctx.bridge) return;
+    if (action === "check") {
+      updatePhase = "checking";
+      updateCheckResult = null;
+      updateProgress = null;
+      refreshUpdateSection();
+      ctx.bridge.postMessage({ type: "check-update" });
+      return;
+    }
+    if (action === "open-release") {
+      ctx.bridge.postMessage({ type: "open-release-page" });
+      return;
+    }
+    if (action === "apply") {
+      // 入れ替えのあと自動で再起動するため、始める前に必ず確認する
+      // (押し間違いで作業中のウィンドウが閉じてしまうのを防ぐ)。
+      const version = (updateCheckResult && updateCheckResult.latestVersion) || "新しい版";
+      const ok = await paneConfirm({
+        title: "更新しますか?",
+        message: `${version} をダウンロードして入れ替えます。入れ替えのあとPaneは再起動します。` +
+          "保存していない文書があると更新できないので、先に保存してください。",
+        okLabel: "更新する",
+      });
+      if (!ok) return;
+      updatePhase = "applying";
+      updateProgress = { message: "準備しています…", percent: -1 };
+      refreshUpdateSection();
+      ctx.bridge.postMessage({ type: "apply-update" });
+    }
+  }
+
+  function handleUpdateCheckResult(msg) {
+    updatePhase = "checked";
+    updateCheckResult = {
+      status: msg.status || "error",
+      currentVersion: msg.currentVersion || "",
+      latestVersion: msg.latestVersion || "",
+      message: msg.message || "",
+      releaseUrl: msg.releaseUrl || "",
+      canApply: !!msg.canApply,
+      sizeBytes: typeof msg.sizeBytes === "number" ? msg.sizeBytes : 0,
+    };
+    refreshUpdateSection();
+  }
+
+  function handleUpdateProgress(msg) {
+    // stage="error"は適用の失敗。それ以外(checking/downloading/applying/restarting)は
+    // 進行中で、restartingまで来たらこの画面は間もなく閉じられる。
+    updatePhase = msg.stage === "error" ? "failed" : "applying";
+    updateProgress = {
+      message: msg.message || "",
+      percent: typeof msg.percent === "number" ? msg.percent : -1,
+    };
+    refreshUpdateSection();
+  }
+
   function renderVersionInfo(el) {
     const licensesHtml = (draft.licenses ?? []).map((lic) => `
       <div class="settings-license-row">
@@ -2061,6 +2190,10 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
         <div class="settings-field-desc">バージョン: ${escapeHtml(draft.appVersion || "不明")}</div>
         <div class="settings-field-desc">WebView2ランタイム: ${escapeHtml(draft.webView2Version || "不明")}</div>
         <div class="settings-field-desc">.NET: ${escapeHtml(draft.dotNetVersion || "不明")}</div>
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title">更新</div>
+        <div data-update-section>${updateSectionHtml()}</div>
       </div>
       <div class="settings-group">
         <div class="settings-group-title">場所</div>
@@ -2086,6 +2219,8 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     for (const btn of el.querySelectorAll("[data-action]")) {
       btn.addEventListener("click", () => ctx.bridge?.postMessage({ type: btn.dataset.action }));
     }
+    const updateHost = el.querySelector("[data-update-section]");
+    if (updateHost) bindUpdateSection(updateHost);
   }
 
   // ---- カテゴリ切替のディスパッチ ----

@@ -274,7 +274,9 @@ internal sealed class PaneApplicationContext : ApplicationContext
             requestOpenSettingsWindow: OpenSettingsWindow,
             requestOpenHelpWindow: OpenHelpWindow,
             droppedFile: droppedFile,
-            initialFolderPath: initialFolderPath);
+            initialFolderPath: initialFolderPath,
+            hasUnsavedDocuments: HasUnsavedDocuments,
+            shutdownForUpdate: ShutdownForUpdate);
 
         int width = _settings.WindowWidth ?? DefaultWidth;
         int height = _settings.WindowHeight ?? DefaultHeight;
@@ -399,6 +401,35 @@ internal sealed class PaneApplicationContext : ApplicationContext
         return total;
     }
 
+    /// <summary>
+    /// 開いているウィンドウのどれかに未保存の変更があるか(仕様書 U-04)。
+    /// 更新の適用は再起動を伴うため、実行前にこれを確かめる。
+    /// </summary>
+    private bool HasUnsavedDocuments() => _windows.Any(w => w.IsDirty);
+
+    /// <summary>
+    /// 更新の適用で、新しいPaneを起動したあとに自分自身を終了させる(仕様書 U-04)。
+    ///
+    /// 古いプロセスが動いたままだと、退避した Pane.exe.pane-old を新しい側が削除できない。
+    /// 未保存の確認は呼び出し前に済ませてあるため、ここでは確認ダイアログを出さずに閉じる
+    /// (閉じる操作の途中で確認が挟まると、新旧2つのPaneが同時に残る)。
+    /// </summary>
+    private void ShutdownForUpdate()
+    {
+        Logger.Write("更新: 新しいPaneを起動したので、このプロセスを終了する");
+        // 各ウィンドウのFormClosingで未保存確認が走らないよう、Disposeで直接閉じる。
+        foreach (MainForm window in _windows.ToList())
+        {
+            try { window.Dispose(); } catch (Exception ex) { Logger.WriteException("更新: ウィンドウの終了に失敗", ex); }
+        }
+        // 設定・取扱説明書のウィンドウも閉じる。ExitThreadだけではこれらは開いたまま残り、
+        // 新しいPaneが立ち上がったあとも古い側の窓が画面に居座って見える。
+        try { _settingsWindow?.Dispose(); } catch (Exception ex) { Logger.WriteException("更新: 設定ウィンドウの終了に失敗", ex); }
+        try { _helpWindow?.Dispose(); } catch (Exception ex) { Logger.WriteException("更新: 取扱説明書ウィンドウの終了に失敗", ex); }
+        Logger.Shutdown();
+        ExitThread();
+    }
+
     public void OpenWindowFromPipeRequest(string? path)
     {
         // 不具合修正: パイプ経由の要求は常に、送信元プロセス(フォアグラウンド権を持つ)が
@@ -458,7 +489,8 @@ internal sealed class PaneApplicationContext : ApplicationContext
         bool isNew = _settingsWindow is not { IsDisposed: false };
         if (isNew)
         {
-            _settingsWindow = new SettingsWindow(owner, BroadcastSettingsChanged);
+            _settingsWindow = new SettingsWindow(
+                owner, BroadcastSettingsChanged, HasUnsavedDocuments, ShutdownForUpdate);
             _settingsWindow.FormClosed += (_, _) => _settingsWindow = null;
         }
         // 不具合修正(事前生成が効いていなかった件と合わせて整理): 新規作成直後の初回表示も、
@@ -489,7 +521,8 @@ internal sealed class PaneApplicationContext : ApplicationContext
         try
         {
             Form? owner = _windows.Count > 0 ? _windows[0] : null;
-            window = new SettingsWindow(owner, BroadcastSettingsChanged);
+            window = new SettingsWindow(
+                owner, BroadcastSettingsChanged, HasUnsavedDocuments, ShutdownForUpdate);
             window.FormClosed += (_, _) => _settingsWindow = null;
             _settingsWindow = window;
             window.Prewarm();

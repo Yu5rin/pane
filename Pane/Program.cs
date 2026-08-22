@@ -92,6 +92,11 @@ internal static class Program
             SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
         }
 
+        // 前回の更新で退避した古いファイル(Pane.exe.pane-old / dist.pane-old)を片付ける。
+        // 起動時間に影響させないためバックグラウンドで行う(dist.pane-oldの再帰削除は
+        // 数十MB分になることがある)。失敗しても次回の起動でまた試す(UpdateService参照)。
+        Task.Run(UpdateService.CleanupLeftovers);
+
         var context = new PaneApplicationContext(initialPath, preload);
 
         var server = new SingleInstanceServer(SynchronizationContext.Current!);
