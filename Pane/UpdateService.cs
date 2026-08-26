@@ -91,11 +91,63 @@ internal static class UpdateService
             return Error(currentVersionText, "更新の確認先が https で始まっていないため中止しました。");
         }
 
+        Version? current = FileAssociationService.ParseVersion(currentVersionText);
+        if (current is null)
+        {
+            Logger.Warn($"更新の確認: 自分のバージョンを読み取れなかった: \"{currentVersionText}\"");
+            return Error(currentVersionText, "いま動いているPaneのバージョンを判別できませんでした。");
+        }
+
+        // Atomで「新しい版がある」と分かった場合の控え。このあとAPIへ詳細を取りに行くが、
+        // そちらが上限や障害で失敗しても、分かっているところまでは利用者へ伝えたい
+        // (「新しい版がある」ことと、リリースページの場所)。
+        string? knownNewerTag = null;
+        string knownReleaseUrl = "";
+
         try
         {
             using var _ = PerfWatch.Start("更新の確認(問い合わせ)", 5000);
-            Logger.Write($"更新の確認: 問い合わせ先={url}");
 
+            // まずAtomフィードで最新のタグだけを見る。GitHubのAPIには1時間60回(未認証)の
+            // 上限があり、これは端末ごとではなくIPアドレスごとに数えられる。会社などの
+            // 共有回線では他の通信で先に使い切られてしまい、実機のログでは更新の確認が
+            // 5回とも403(rate limit exceeded)で失敗していた。Atomフィードはその上限とは
+            // 別枠のため、普段の確認をこちらに寄せる。
+            //
+            // 新しい版が見つかったときだけAPIを呼び、SHA256とダウンロードURLを取りに行く。
+            // 呼ぶ頻度が「更新があったとき」だけになるので、上限に当たる見込みはまず無い。
+            //
+            // 既知の非対称: Atomフィードはプレリリースも載せるが、APIの releases/latest は
+            // 安定版だけを返す。プレリリースが最新の間は「Atomでは新しい・APIでは最新版」と
+            // なって毎回APIまで進む(節約が効かない)し、APIが上限で失敗すると下の
+            // NewerButNoDetailsがプレリリースを案内してしまう。このリポジトリは
+            // プレリリースを使わない運用なので許容している。使い始めるならAtomの
+            // entryを除外する条件が要る。
+            string? atomUrl = TryBuildAtomUrl(url);
+            if (atomUrl is not null)
+            {
+                string? tagFromAtom = await TryReadLatestTagFromAtomAsync(atomUrl);
+                if (tagFromAtom is not null)
+                {
+                    Version? latestFromAtom = FileAssociationService.ParseVersion(StripVersionPrefix(tagFromAtom));
+                    if (latestFromAtom is null)
+                    {
+                        Logger.Warn($"更新の確認: 配布元のバージョン表記を読み取れなかった: \"{tagFromAtom}\"");
+                        return Error(currentVersionText, "配布元のバージョン表記を読み取れませんでした。");
+                    }
+                    if (latestFromAtom <= current)
+                    {
+                        Logger.Write($"更新の確認: 最新版だった(現在={currentVersionText}, 配布元={tagFromAtom}, 問い合わせ先=Atom)");
+                        return new UpdateCheckResult("latest", currentVersionText, tagFromAtom, "", "", 0,
+                            BuildReleasePageUrl(atomUrl, tagFromAtom), "お使いのPaneは最新版です。");
+                    }
+                    Logger.Write($"更新の確認: 新しい版がある(現在={currentVersionText}, 配布元={tagFromAtom}, 問い合わせ先=Atom)。詳細をAPIへ問い合わせる");
+                    knownNewerTag = tagFromAtom;
+                    knownReleaseUrl = BuildReleasePageUrl(atomUrl, tagFromAtom);
+                }
+            }
+
+            Logger.Write($"更新の確認: 問い合わせ先={url}");
             using var cts = new CancellationTokenSource(CheckTimeout);
             string json = await Http.GetStringAsync(url, cts.Token);
 
@@ -107,16 +159,10 @@ internal static class UpdateService
             (string assetUrl, string sha256, long size) = FindZipAsset(root);
 
             Version? latest = FileAssociationService.ParseVersion(StripVersionPrefix(tag));
-            Version? current = FileAssociationService.ParseVersion(currentVersionText);
             if (latest is null)
             {
                 Logger.Warn($"更新の確認: 配布元のバージョン表記を読み取れなかった: \"{tag}\"");
                 return Error(currentVersionText, "配布元のバージョン表記を読み取れませんでした。");
-            }
-            if (current is null)
-            {
-                Logger.Warn($"更新の確認: 自分のバージョンを読み取れなかった: \"{currentVersionText}\"");
-                return Error(currentVersionText, "いま動いているPaneのバージョンを判別できませんでした。");
             }
 
             // 比較は必ずVersionで行う。文字列比較だと "1.0.10" < "1.0.9" と誤判定する。
@@ -142,10 +188,137 @@ internal static class UpdateService
             Logger.Warn("更新の確認: 時間内に応答がなかった");
             return Error(currentVersionText, "配布元から時間内に応答がありませんでした。ネットワークの状態を確認してください。");
         }
+        catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Forbidden)
+        {
+            // 問い合わせ回数の上限。何が起きたのかを利用者の言葉で伝える(「403」とだけ
+            // 出しても、自分の操作が原因ではないことが分からない)。
+            Logger.Warn("更新の確認: 問い合わせ回数の上限に達していた(403)");
+            if (knownNewerTag is not null) return NewerButNoDetails(currentVersionText, knownNewerTag, knownReleaseUrl);
+            return Error(currentVersionText,
+                "配布元への問い合わせが、回数の上限に達していました。この上限は同じネットワークを使う人たちで共有されるため、" +
+                "自分が何度も押していなくても起こります。しばらく時間をおくか、リリースページから直接ご確認ください。");
+        }
         catch (Exception ex)
         {
             Logger.WriteException("更新の確認に失敗", ex);
+            if (knownNewerTag is not null) return NewerButNoDetails(currentVersionText, knownNewerTag, knownReleaseUrl);
             return Error(currentVersionText, $"更新を確認できませんでした({ex.GetType().Name})。");
+        }
+    }
+
+    /// <summary>
+    /// 「新しい版があることは分かったが、配布物の詳細までは取れなかった」ときの結果。
+    ///
+    /// ダウンロードURLが無いので自動での入れ替えはできない。画面では「更新する」ボタンを
+    /// 出さず、リリースページへの導線だけを見せる(canApplyはDownloadUrlの有無で決まる)。
+    /// 黙って「確認できませんでした」にしてしまうと、更新があること自体が伝わらない。
+    /// </summary>
+    private static UpdateCheckResult NewerButNoDetails(string currentVersion, string tag, string releaseUrl)
+    {
+        Logger.Write($"更新の確認: 新しい版({tag})はあるが、配布物の詳細を取れなかった。手動更新を案内する");
+        return new UpdateCheckResult("available", currentVersion, tag, "", "", 0, releaseUrl,
+            $"新しい版 {tag} があります。ただし配布元が混み合っていて、自動で入れ替えるための情報を取れませんでした。" +
+            "リリースページからダウンロードしてください(しばらく待てば自動更新も使えるようになります)。");
+    }
+
+    /// <summary>
+    /// Atomフィードのxmlから、いちばん新しいリリースのタグ名を取り出す。
+    ///
+    /// 並び順に頼らず、読み取れたタグのうちバージョンとして最大のものを選ぶ。フィードは
+    /// 普通は新しい順に並ぶが、それに依存すると、並びが変わったときに古い版を「最新」と
+    /// 判断してしまう。バージョンとして読めないタグ(下書き用の名前など)は無視する。
+    ///
+    /// タグ名はリリースページのURL(entryのlinkのhref)の末尾に出る。
+    /// この切り出しはxmlさえあれば試せるよう、通信から分けてある。
+    /// </summary>
+    internal static string? ExtractLatestTagFromAtom(string xml)
+    {
+        var feed = System.Xml.Linq.XDocument.Parse(xml);
+        System.Xml.Linq.XNamespace atom = "http://www.w3.org/2005/Atom";
+
+        string? bestTag = null;
+        Version? bestVersion = null;
+        foreach (System.Xml.Linq.XElement entry in feed.Root?.Elements(atom + "entry") ?? Enumerable.Empty<System.Xml.Linq.XElement>())
+        {
+            string? href = entry.Elements(atom + "link")
+                .Select(e => (string?)e.Attribute("href"))
+                .FirstOrDefault(h => !string.IsNullOrEmpty(h));
+            if (string.IsNullOrEmpty(href)) continue;
+
+            string tag = Uri.UnescapeDataString(href.TrimEnd('/').Split('/').Last());
+            if (string.IsNullOrEmpty(tag)) continue;
+
+            Version? version = FileAssociationService.ParseVersion(StripVersionPrefix(tag));
+            if (version is null) continue;
+            if (bestVersion is not null && version <= bestVersion) continue;
+
+            bestVersion = version;
+            bestTag = tag;
+        }
+        return bestTag;
+    }
+
+    /// <summary>
+    /// APIの問い合わせ先から、同じリポジトリのAtomフィードのURLを組み立てる。
+    /// 形が違って組み立てられない場合(GitHub以外の配布元を設定している場合など)はnull。
+    ///
+    ///   https://api.github.com/repos/{owner}/{repo}/releases/latest
+    ///     → https://github.com/{owner}/{repo}/releases.atom
+    /// </summary>
+    private static string? TryBuildAtomUrl(string apiUrl)
+    {
+        try
+        {
+            if (!Uri.TryCreate(apiUrl, UriKind.Absolute, out Uri? uri)) return null;
+            if (!string.Equals(uri.Host, "api.github.com", StringComparison.OrdinalIgnoreCase)) return null;
+
+            string[] parts = uri.AbsolutePath.Trim('/').Split('/');
+            // repos / {owner} / {repo} / releases / latest
+            if (parts.Length < 4 || !string.Equals(parts[0], "repos", StringComparison.OrdinalIgnoreCase)) return null;
+
+            return $"https://github.com/{parts[1]}/{parts[2]}/releases.atom";
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Atomフィードから、リリースページのURLを組み立てる。</summary>
+    private static string BuildReleasePageUrl(string atomUrl, string tag)
+        => atomUrl.EndsWith(".atom", StringComparison.OrdinalIgnoreCase)
+            ? $"{atomUrl[..^".atom".Length]}/tag/{Uri.EscapeDataString(tag)}"
+            : "";
+
+    /// <summary>
+    /// Atomフィードから、いちばん新しいリリースのタグ名を読み取る。読めなければnullを返し、
+    /// 呼び出し元はAPIへの問い合わせへ進む(こちらが使えなくても更新の確認そのものは
+    /// できたほうがよいため、失敗を致命的に扱わない)。
+    /// </summary>
+    private static async Task<string?> TryReadLatestTagFromAtomAsync(string atomUrl)
+    {
+        try
+        {
+            Logger.Debug($"更新の確認: Atomフィードへ問い合わせる: {atomUrl}");
+            using var cts = new CancellationTokenSource(CheckTimeout);
+
+            // 既定のAcceptヘッダ(GitHub APIのJSON)のままでは意図が合わないので、この要求にだけ
+            // Atom用のAcceptを付ける。
+            using var request = new HttpRequestMessage(HttpMethod.Get, atomUrl);
+            request.Headers.Accept.Clear();
+            request.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/atom+xml"));
+
+            using HttpResponseMessage response = await Http.SendAsync(request, cts.Token);
+            response.EnsureSuccessStatusCode();
+            string xml = await response.Content.ReadAsStringAsync(cts.Token);
+
+            return ExtractLatestTagFromAtom(xml);
+        }
+        catch (Exception ex)
+        {
+            // ここで失敗してもAPI側で確認できる。騒がずに次へ進む。
+            Logger.Debug($"更新の確認: Atomフィードを読めなかった({ex.GetType().Name})。APIへ問い合わせる");
+            return null;
         }
     }
 

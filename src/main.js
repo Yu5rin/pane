@@ -121,6 +121,18 @@ function reportStartupMetrics() {
     if (startupResources.length) {
       const lastEnd = Math.max(...startupResources.map((r) => r.responseEnd));
       detail.push(`起動までに${startupResources.length}件取得(最後の完了=${round(lastEnd)}ms)`);
+
+      // どのファイルで待たされたのかまで出す。実機のログでは main.js 自体は数msで取れて
+      // いるのに全体で2秒かかっており、遅いのは別のファイルだと分かっている。名前が
+      // 分かれば、分割の仕方を変えるべきか、環境側(ウイルス対策の走査など)の話なのかを
+      // 判断できる。速いときは並べても意味がないので、目立つものがある場合だけ出す。
+      const slowest = startupResources.slice().sort((a, b) => b.duration - a.duration).slice(0, 3);
+      if (slowest.length && slowest[0].duration >= 100) {
+        const names = slowest
+          .filter((r) => r.duration >= 100)
+          .map((r) => `${r.name.split("/").pop()}=${round(r.duration)}ms`);
+        detail.push(`遅い順: ${names.join(", ")}`);
+      }
     }
 
     logToHost(
@@ -171,18 +183,45 @@ window.addEventListener("unhandledrejection", (e) => {
 // 重くて当たり前で、その内訳は別途[計測:JS]で出しているため、ここで二重に警告しない。
 const STALL_CHECK_INTERVAL_MS = 1000;
 const STALL_WARN_MS = 500;
+// この長さを超える停止は、Paneがメインスレッドをずっと握っていたと考えるより、
+// PCがスリープ・休止していた、または画面がロックされていたと考えるほうが自然。
+// 実機のログで、13分間なにも記録が無いあとに41.8秒の停止が記録され、その15秒後に
+// 利用者がウィンドウを閉じた、という並びが実際に出た(離席から戻ってきた形)。
+// Paneに41秒もメインスレッドを占有する処理は無い。
+const STALL_LIKELY_SUSPEND_MS = 20000;
+
 function startStallWatch() {
   let previous = performance.now();
+  // 停止していた区間にウィンドウが後ろに回っていたかどうかを、後から言えるようにする。
+  // ロック・スリープではまずフォーカスを失うため、判断の材料になる。
+  let lastBlurAt = -1;
+  window.addEventListener("blur", () => { lastBlurAt = performance.now(); });
+
   setInterval(() => {
     const now = performance.now();
     const delay = now - previous - STALL_CHECK_INTERVAL_MS;
+    const startedAt = previous;
     previous = now;
     // ウィンドウが非表示・最小化のときブラウザはタイマーの発火間隔を意図的に間引くため、
     // その遅れは不具合ではない。見えている間だけを対象にする。
     if (document.hidden) return;
-    if (delay >= STALL_WARN_MS) {
-      logToHost("warn", `画面の応答が${Math.round(delay)}ms止まっていた(この間、何かの処理がメインスレッドを占有していた)`);
-    }
+    if (delay < STALL_WARN_MS) return;
+
+    // 「本当にPaneが固まっていたのか」を後から切り分けられるだけの材料を添える。
+    // ここで黙ってしまうと本物のフリーズを取り逃がすため、警告自体は必ず出す。
+    //
+    // 限界: 本物のフリーズの最中に利用者が他のウィンドウをクリックすると、blurは
+    // キューに積まれてフリーズ明け(このコールバックより先)に発火するため、
+    // blurredDuringStallがtrueになり「後ろに回っていた」側の文言が付く。区別しきれない
+    // ケースがあるからこそ、どちらの文言も断定ではなく判断材料の列挙にとどめている。
+    const blurredDuringStall = lastBlurAt >= startedAt;
+    const suspectSuspend = delay >= STALL_LIKELY_SUSPEND_MS || blurredDuringStall;
+    const note = suspectSuspend
+      ? "PCのスリープ・休止や画面ロックからの復帰でもこの記録は出る" +
+        `(この間ウィンドウは${blurredDuringStall ? "後ろに回っていた" : "手前のままだった"})。` +
+        "Pane側が固まっていたのなら、同じ時間帯に重い操作の記録が残っているはず"
+      : "この間、何かの処理がメインスレッドを占有していた";
+    logToHost("warn", `画面の応答が${Math.round(delay)}ms止まっていた(${note})`);
   }, STALL_CHECK_INTERVAL_MS);
 }
 
