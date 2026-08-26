@@ -174,6 +174,18 @@ internal static class Logger
     /// <summary>
     /// 通常の記録(Info)。既存の呼び出し箇所との互換のため、レベル指定なしはInfoとして扱う。
     /// </summary>
+    /// <summary>
+    /// 行頭に出すプロセスの目印。ログファイルは1つを複数のプロセスが共有して書くため
+    /// (常駐しているPaneと、新しく起動したPaneが同時に書く)、これが無いと行が
+    /// 前後したときにどちらのものか区別できない。実機のログで実際に
+    /// 「OnLoadAsync開始」の次に「=== Pane起動 ===」が来て時刻が戻る、という
+    /// 読みにくさが起きていた。
+    ///
+    /// プロセスIDをそのまま出すと桁が揃わず読みにくいので、下4桁だけを使う。
+    /// 同時に動くPaneはせいぜい数個で、下4桁が衝突する見込みはまず無い。
+    /// </summary>
+    private static readonly string ProcessTag = (Environment.ProcessId % 10000).ToString("D4");
+
     public static void Write(string message) => Enqueue(LogLevel.Info, message);
 
     /// <summary>日常操作の逐一記録。既定では書き出されない(設定「詳細ログを記録する」が必要)。</summary>
@@ -239,7 +251,7 @@ internal static class Logger
             LogLevel.Debug => "[詳細] ",
             _ => "",
         };
-        string line = $"{DateTime.Now:HH:mm:ss.fff} [{Environment.CurrentManagedThreadId}] {prefix}{message}";
+        string line = $"{DateTime.Now:HH:mm:ss.fff} [{ProcessTag}:{Environment.CurrentManagedThreadId}] {prefix}{message}";
 
         if (Interlocked.Increment(ref _pendingCount) > MaxPending)
         {
@@ -294,7 +306,7 @@ internal static class Logger
             if (dropped > 0)
             {
                 // 捨てたこと自体を隠すと「ログが飛んでいる」原因が分からなくなる。
-                batch.Append($"{DateTime.Now:HH:mm:ss.fff} [{Environment.CurrentManagedThreadId}] [警告] ログ: 書き出しが追いつかず{dropped}行を破棄した")
+                batch.Append($"{DateTime.Now:HH:mm:ss.fff} [{ProcessTag}:{Environment.CurrentManagedThreadId}] [警告] ログ: 書き出しが追いつかず{dropped}行を破棄した")
                      .Append(Environment.NewLine);
                 lines++;
             }

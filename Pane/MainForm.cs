@@ -725,6 +725,10 @@ internal sealed class MainForm : Form
     {
         if (_cachedEnvironment is not null) return _cachedEnvironment;
 
+        // WebView2の初期化を待っている間に、これから読まれるdistのファイルを先に読んでおく
+        // (StartWarmingUpDistの説明を参照)。WebView2の初期化とは無関係なので待たない。
+        StartWarmingUpDist();
+
         await EnvironmentLock.WaitAsync();
         try
         {
@@ -754,6 +758,86 @@ internal sealed class MainForm : Form
             EnvironmentLock.Release();
         }
     }
+
+    /// <summary>distの先読みをプロセスで一度だけ行うためのフラグ。</summary>
+    private static int _distWarmUpStarted;
+
+    /// <summary>
+    /// 起動時にWebView2が読むことになるdistのファイルを、先にディスクから読んでおく。
+    ///
+    /// 実機のログでは、起動の内訳のうち「バンドル評価」が2.1〜2.7秒を占めており、
+    /// その内訳を計測したところ2.06秒はファイルの取得待ちで、JSの実行自体は約120msだった。
+    /// 同じ処理が別のPCでは68msで終わっているため、置いてあるファイルを初めて読むときの
+    /// 走査(ウイルス対策の常時監視)を待たされていると考えられる。
+    ///
+    /// ここで先に読み通しておくと、その待ちを「まだ画面を出していない今」へ寄せられる。
+    /// WebView2の初期化と並行して走らせるので、全体としては待ち時間が重なって短くなる。
+    ///
+    /// 読むのは起動時に実際に使われるものだけ。distには言語ごとのパーサ等が200個以上
+    /// 入っていて、それらは必要になったときに初めて読まれるため、ここで触ると逆に無駄が出る。
+    /// index.htmlとmain.jsから静的なimportを辿って、その範囲に絞る。
+    /// </summary>
+    private static void StartWarmingUpDist()
+    {
+        if (Interlocked.Exchange(ref _distWarmUpStarted, 1) != 0) return;
+
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                string dist = ResolveDistPath();
+                if (!Directory.Exists(dist)) return;
+
+                var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+                var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                long total = 0;
+
+                foreach (string name in new[] { "index.html", "style.css", "themes.css", "main.js" })
+                {
+                    total += WarmUpFileAndImports(dist, name, visited, depth: 0);
+                }
+                Logger.Debug($"distの先読み: {visited.Count}ファイル, 約{total / 1024}KB, {stopwatch.ElapsedMilliseconds}ms");
+            }
+            catch (Exception ex)
+            {
+                // 先読みは速くするためだけのもの。失敗しても起動には何の影響も無い。
+                Logger.Debug($"distの先読みに失敗(無視して続行): {ex.GetType().Name}");
+            }
+        });
+    }
+
+    /// <summary>
+    /// ファイルを1つ読み通し、その中の静的importを辿って同じことをする。
+    /// 動的import(必要になってから読まれる言語パーサ等)は辿らない。
+    /// </summary>
+    private static long WarmUpFileAndImports(string distFolder, string name, HashSet<string> visited, int depth)
+    {
+        // 実際の依存は2段程度。深追いしても得るものが無いので打ち切る。
+        if (depth > 3 || !visited.Add(name)) return 0;
+
+        try
+        {
+            byte[] bytes = File.ReadAllBytes(Path.Combine(distFolder, name));
+            long size = bytes.Length;
+            if (!name.EndsWith(".js", StringComparison.OrdinalIgnoreCase)) return size;
+
+            string text = System.Text.Encoding.UTF8.GetString(bytes);
+            foreach (System.Text.RegularExpressions.Match m in StaticImportPattern.Matches(text))
+            {
+                size += WarmUpFileAndImports(distFolder, m.Groups[1].Value, visited, depth + 1);
+            }
+            return size;
+        }
+        catch
+        {
+            // 1つ読めなくても続ける(先読みなので取りこぼしても構わない)。
+            return 0;
+        }
+    }
+
+    /// <summary>バンドル済みJSの静的import(from"./chunk-XXXX.js" / import"./x.js")を拾う。</summary>
+    private static readonly System.Text.RegularExpressions.Regex StaticImportPattern =
+        new("(?:from|import)\\s*\"\\./([^\"]+\\.js)\"", System.Text.RegularExpressions.RegexOptions.Compiled);
 
     /// <summary>dist/ フォルダの実パスを解決する。<see cref="SettingsWindow"/> も同じ流儀で
     /// 仮想ホスト名のマッピングを行うため、internal static として共有する。</summary>
