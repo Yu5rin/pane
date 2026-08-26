@@ -209,6 +209,11 @@ function startStallWatch() {
 
     // 「本当にPaneが固まっていたのか」を後から切り分けられるだけの材料を添える。
     // ここで黙ってしまうと本物のフリーズを取り逃がすため、警告自体は必ず出す。
+    //
+    // 限界: 本物のフリーズの最中に利用者が他のウィンドウをクリックすると、blurは
+    // キューに積まれてフリーズ明け(このコールバックより先)に発火するため、
+    // blurredDuringStallがtrueになり「後ろに回っていた」側の文言が付く。区別しきれない
+    // ケースがあるからこそ、どちらの文言も断定ではなく判断材料の列挙にとどめている。
     const blurredDuringStall = lastBlurAt >= startedAt;
     const suspectSuspend = delay >= STALL_LIKELY_SUSPEND_MS || blurredDuringStall;
     const note = suspectSuspend

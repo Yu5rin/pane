@@ -116,6 +116,13 @@ internal static class UpdateService
             //
             // 新しい版が見つかったときだけAPIを呼び、SHA256とダウンロードURLを取りに行く。
             // 呼ぶ頻度が「更新があったとき」だけになるので、上限に当たる見込みはまず無い。
+            //
+            // 既知の非対称: Atomフィードはプレリリースも載せるが、APIの releases/latest は
+            // 安定版だけを返す。プレリリースが最新の間は「Atomでは新しい・APIでは最新版」と
+            // なって毎回APIまで進む(節約が効かない)し、APIが上限で失敗すると下の
+            // NewerButNoDetailsがプレリリースを案内してしまう。このリポジトリは
+            // プレリリースを使わない運用なので許容している。使い始めるならAtomの
+            // entryを除外する条件が要る。
             string? atomUrl = TryBuildAtomUrl(url);
             if (atomUrl is not null)
             {

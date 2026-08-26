@@ -172,9 +172,6 @@ internal static class Logger
     }
 
     /// <summary>
-    /// 通常の記録(Info)。既存の呼び出し箇所との互換のため、レベル指定なしはInfoとして扱う。
-    /// </summary>
-    /// <summary>
     /// 行頭に出すプロセスの目印。ログファイルは1つを複数のプロセスが共有して書くため
     /// (常駐しているPaneと、新しく起動したPaneが同時に書く)、これが無いと行が
     /// 前後したときにどちらのものか区別できない。実機のログで実際に
@@ -186,6 +183,9 @@ internal static class Logger
     /// </summary>
     private static readonly string ProcessTag = (Environment.ProcessId % 10000).ToString("D4");
 
+    /// <summary>
+    /// 通常の記録(Info)。既存の呼び出し箇所との互換のため、レベル指定なしはInfoとして扱う。
+    /// </summary>
     public static void Write(string message) => Enqueue(LogLevel.Info, message);
 
     /// <summary>日常操作の逐一記録。既定では書き出されない(設定「詳細ログを記録する」が必要)。</summary>
