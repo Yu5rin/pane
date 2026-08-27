@@ -25,11 +25,16 @@
 //   (G) ページエラー・コンソールエラー0件(各節に分散)
 import pw from "playwright";
 import fs from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 const { chromium } = pw;
 
 const PORT = 8970;
 const BASE = `http://localhost:${PORT}/index.html`;
-const SHOTS = "/workspace/pane/.shots";
+// スクリーンショットの置き場は、このファイルの場所から決める。以前は開発環境の絶対パス
+// (/workspace/pane/.shots)を直書きしていたため、別の場所へ置いたリポジトリでは
+// フォルダを作れずスクリプトが起動直後に落ちていた(CIで実際にこれで失敗した)。
+const SHOTS = join(dirname(fileURLToPath(import.meta.url)), ".shots");
 const browser = await chromium.launch();
 let okCount = 0, ngCount = 0;
 const ok = (label, cond, extra = "") => { console.log(`${cond ? "OK  " : "NG  "} ${label}${extra ? " " + extra : ""}`); if (cond) okCount++; else ngCount++; };

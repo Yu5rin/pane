@@ -64,9 +64,18 @@ FAILED_SUITES=""
 
 # 各スイートの生の出力を残す場所。CIで失敗したときに中身を取り出せるよう、
 # 外から場所を指定できるようにしてある(指定が無ければ一時フォルダ)。
-OUT_DIR=${OUT_DIR:-$(mktemp -d)}
+# 外から場所を指定されたときは、こちらで消さない。消してしまうと、CIが失敗時に
+# 結果を回収しようとしても中身が無い(実際にそうなった)。自分で作った一時フォルダだけ片付ける。
+if [ -n "${OUT_DIR:-}" ]; then
+  KEEP_OUT_DIR=1
+else
+  OUT_DIR=$(mktemp -d)
+  KEEP_OUT_DIR=0
+fi
 mkdir -p "$OUT_DIR"
-trap 'rm -rf "$OUT_DIR"' EXIT
+if [ "$KEEP_OUT_DIR" = "0" ]; then
+  trap 'rm -rf "$OUT_DIR"' EXIT
+fi
 
 for f in .verify-*.mjs; do
   SUITE_COUNT=$((SUITE_COUNT + 1))
