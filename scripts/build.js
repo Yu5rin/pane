@@ -256,7 +256,22 @@ const buildOptions = {
   plugins: [patchLezerMarkdownTable],
 };
 
+// esbuildの出力にはハッシュ付きの名前(chunk-XXXXXXXX.js)が混じるため、作り直すたびに
+// 名前が変わる。distを消さずに重ねてビルドすると、もう誰も読み込まない古いチャンクが
+// 残り続ける。それがそのままZip配布物へ入り、更新時にも一緒にコピーされ、
+// ウイルス対策ソフトの走査対象にもなる(更新直後の初回起動が遅くなる一因)。
+// 実際に、放置していた6ファイル・約305KBがdistに溜まっていた。
+//
+// distへ入るものはすべてこのスクリプトが作る(静的ファイルのコピー・manual.md・esbuildの
+// 出力)ので、丸ごと消して作り直して構わない。
+// watch中は差分ビルドなので、消すのは最初の1回だけにする。
+function cleanDist() {
+  if (!fs.existsSync("dist")) return;
+  fs.rmSync("dist", { recursive: true, force: true });
+}
+
 async function run() {
+  cleanDist();
   copyStaticFiles();
   copyManualMarkdown();
   generateFileTypesCs();
