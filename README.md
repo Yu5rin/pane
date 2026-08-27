@@ -7,6 +7,15 @@ Markdown をそのまま書きながら整形結果が見える（ライブプ�
 コードエディタとしても使えます**。日々のメモ帳としても、ソースやログを覗く道具としても、
 この1本で済ませられます。
 
+![Markdown を書きながら整形結果が見える画面](docs/images/01-markdown.png)
+
+見出し・表・Callouts・数式が、書いたそばから整形されて見えます。記号は消えず、
+カーソルがその行に来たときだけ元の記法が現れます。
+
+| 暗いテーマ | コードファイルを開いたところ |
+| --- | --- |
+| ![暗いテーマ](docs/images/02-markdown-dark.png) | ![コードモード](docs/images/03-code.png) |
+
 ## 主な特徴
 
 - **インストール不要** — `Pane.exe` を好きな場所に置くだけ。レジストリを勝手に書き換えません
@@ -57,7 +66,26 @@ dotnet publish Pane/Pane.csproj -c Release -r win-x64 --self-contained true -o p
 
 `npm run build` を先に実行する必要があります（C# 側がその生成物に依存しているため）。
 
-配布用の Zip はリリーススクリプトで作れます。
+```bash
+npm run verify         # 回帰スイート（60本・約2400件）を全数実行する
+dotnet test            # C# 側のテスト
+npm run screenshots    # この README の画面写真を撮り直す（docs/images/）
+```
+
+## リリース
+
+1. `Pane/Pane.csproj` の `<Version>` を上げてコミットする（バージョンの正本はここだけ）
+2. 同じ版のタグを付けて push する
+
+```bash
+git tag v1.0.9 && git push origin v1.0.9
+```
+
+GitHub Actions が Zip を組み立て、SHA256 を添えた**下書きの**リリースを作ります
+（[.github/workflows/release.yml](.github/workflows/release.yml)）。
+変更点を書き足して公開してください。公開は自動では行いません。
+
+手元で Zip を作りたい場合（Windows）:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\release.ps1
