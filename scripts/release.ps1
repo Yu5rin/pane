@@ -1,9 +1,14 @@
 ﻿# Pane のリリース用 Zip を作る。
 #
 # 使い方（リポジトリ直下で実行）:
-#   powershell -ExecutionPolicy Bypass -File scripts\release.ps1
+#   powershell -ExecutionPolicy Bypass -File scripts\release.ps1               # Pane.csproj の <Version> を使う
 #   powershell -ExecutionPolicy Bypass -File scripts\release.ps1 -Version 1.0.1
 #   powershell -ExecutionPolicy Bypass -File scripts\release.ps1 -ReadyToRun   # 起動短縮の比較用
+#
+# 普段のリリースはこれを手で動かす必要はない。Pane.csproj の <Version> を上げてコミットし、
+# 同じ版のタグ（v1.0.9 のような形）を push すれば、GitHub Actions が同じ手順で Zip を作って
+# 下書きのリリースを用意する（.github/workflows/release.yml）。このスクリプトは、
+# 手元で中身を確かめたいときや、CI が使えないときのために残してある。
 #
 # 既定では .NET ランタイムを同梱した自己完結型（self-contained）で作る。
 # 利用者側に .NET のインストールを求めないためで、インストーラを使えない環境でも
@@ -17,7 +22,10 @@
 
 [CmdletBinding()]
 param(
-    [string]$Version = "1.0.9",
+    # 省略すると Pane\Pane.csproj の <Version> から読む。バージョンの正本はそちらで、
+    # ここに既定値を書いておくと二重管理になり、片方だけ直したときに
+    # 「タグは v1.0.9 なのに中身は 1.0.8」というZipができてしまう。
+    [string]$Version = "",
     [switch]$FrameworkDependent,
     # 事前コンパイル(ReadyToRun)を有効にする。起動時のJITが減り「プロセス開始→Main到達」が
     # 短くなる一方、配布物が大きくなる(win-x64 self-contained での実測:
@@ -33,6 +41,17 @@ $ErrorActionPreference = "Stop"
 # このスクリプトはリポジトリ直下を基準に動く（scripts\ の1つ上）
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
+
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    $csprojPath = Join-Path $RepoRoot "Pane\Pane.csproj"
+    $csproj = [xml](Get-Content $csprojPath)
+    $Version = ($csproj.Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1)
+    if ([string]::IsNullOrWhiteSpace($Version)) {
+        throw "$csprojPath から <Version> を読み取れませんでした。-Version で明示してください。"
+    }
+    $Version = $Version.Trim()
+    Write-Host "バージョンは Pane.csproj から読みました: $Version"
+}
 
 $Rid         = "win-x64"
 # ReadyToRun 版は比較用に別名の Zip にする(同じ名前だとどちらを配ったか分からなくなる)。
@@ -79,7 +98,8 @@ Start-Sleep -Milliseconds 300
 
 # ---- クリーン ----
 # 前回のビルド成果物が混ざらないよう、毎回まっさらから作る。
-# dist は削除してから npm run build で作り直す（古いチャンクが残ると Zip に紛れ込む）。
+# dist は npm run build 自体が作り直すようになった（scripts/build.js の cleanDist）が、
+# ここでも消すのは publish と staging を同じ手順でまとめて片付けるため。二重に消しても害はない。
 Write-Step "前回の成果物を削除"
 
 foreach ($dir in @("dist", "publish", $StageDir)) {
