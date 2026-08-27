@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!--
+      本体(Pane.csproj)は net8.0-windows の WinForms アプリで、Windows でしか動かない。
+      テストまで Windows 専用にすると、CI(Linux)でも手元の Linux でも実行できなくなる。
+      そこで、外の世界に触れないクラスだけをソースごと取り込み、このプロジェクト自体は
+      素の net8.0 に保つ。取り込んだクラスは同じアセンブリの一部になるので、internal の
+      ままテストから触れる(InternalsVisibleTo を足す必要がない)。
+    -->
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Windows 依存を持たないクラスだけをここに並べる。本体側でこのファイルに Windows 専用の
+      API を持ち込むと、このプロジェクトのビルドが壊れて気づける(それがこの構成の狙いでもある)。
+    -->
+    <Compile Include="../Pane/UpdateCheckLogic.cs" Link="取り込み/UpdateCheckLogic.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.8.0" />
+    <PackageReference Include="xunit" Version="2.5.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.5.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+</Project>

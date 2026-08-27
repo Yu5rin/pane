@@ -5,9 +5,6 @@ dist/
 bin/
 obj/
 
-# ローカル検証用のPlaywrightスクリプト(コミット対象外)
-.verify-*.mjs
-
 # npm run build が自動生成する。追跡するとビルドのたびに差分が出てpullを妨げるため対象外にする
 Pane/FileTypes.generated.cs
 
@@ -15,6 +12,12 @@ Pane/FileTypes.generated.cs
 publish/
 release/
 
-# ローカル検証用のスクリーンショット・性能計測スクリプト(コミット対象外)
+# 検証中のスクリーンショット・その場かぎりの性能計測スクリプト(コミット対象外)。
+# 回帰確認の本体である .verify-*.mjs は追跡する(この60本がPaneの品質を支えており、
+# 手元にしか無い状態だと環境が変わったときに失われる)。
 .shots/
 .perf-*.mjs
+
+# 検証スイートが実行中だけ作る作業用フォルダ(.verify-autodetect.mjs)。
+# node_modules を見つけられる場所でないと動かないため、リポジトリ直下に作っている。
+.verify-tmp-*/

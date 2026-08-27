@@ -11,10 +11,17 @@
 set -u
 cd "$(dirname "$0")" || exit 1
 
-NODE=/opt/node22/bin/node
-TIMEOUT_SEC=200
-export PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
-export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+# nodeは実行中のものをそのまま使う(CIでも開発環境でも同じ手順で動くように、
+# 特定の場所へ入れたnodeを決め打ちにしない)。
+NODE=${NODE:-node}
+TIMEOUT_SEC=${TIMEOUT_SEC:-200}
+
+# ブラウザの置き場。この開発環境には用意済みのものがあるが、無い環境
+# (CIなど)ではplaywrightの既定の場所に入るため、あるときだけ指定する。
+if [ -d /opt/pw-browsers ]; then
+  export PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
+  export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+fi
 
 # .verify-*.mjs が使っているポート全部(ソースから機械的に収集)。決め打ちの一覧に
 # 頼らず、実際に使われているポートを毎回拾い直す(スイート追加時の取りこぼし防止)。
@@ -55,7 +62,10 @@ TOTAL_NG=0
 SUITE_COUNT=0
 FAILED_SUITES=""
 
-OUT_DIR=$(mktemp -d)
+# 各スイートの生の出力を残す場所。CIで失敗したときに中身を取り出せるよう、
+# 外から場所を指定できるようにしてある(指定が無ければ一時フォルダ)。
+OUT_DIR=${OUT_DIR:-$(mktemp -d)}
+mkdir -p "$OUT_DIR"
 trap 'rm -rf "$OUT_DIR"' EXIT
 
 for f in .verify-*.mjs; do
