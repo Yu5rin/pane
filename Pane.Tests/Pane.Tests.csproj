@@ -23,6 +23,7 @@
       API を持ち込むと、このプロジェクトのビルドが壊れて気づける(それがこの構成の狙いでもある)。
     -->
     <Compile Include="../Pane/UpdateCheckLogic.cs" Link="取り込み/UpdateCheckLogic.cs" />
+    <Compile Include="../Pane/LogReviewLogic.cs" Link="取り込み/LogReviewLogic.cs" />
   </ItemGroup>
 
   <ItemGroup>
