@@ -105,6 +105,13 @@ internal sealed class MainForm : Form
     private static readonly SemaphoreSlim EnvironmentLock = new(1, 1);
     private static CoreWebView2Environment? _cachedEnvironment;
 
+    /// <summary>
+    /// 生成済みのWebView2環境(まだ作られていなければnull)。待たずに今の状態だけを見たい
+    /// 用途のために公開する。現在の利用者はメモリの計測
+    /// (<see cref="PaneApplicationContext"/>)で、この環境に属するプロセスだけを数えるために使う。
+    /// </summary>
+    internal static CoreWebView2Environment? CachedEnvironment => _cachedEnvironment;
+
     private FileSystemWatcher? _watcher;
     private bool _suppressWatcher;
     private bool _externalChangePending;
@@ -507,6 +514,27 @@ internal sealed class MainForm : Form
         : Color.FromArgb(0xFB, 0xFB, 0xFA); // src/style.css: :root --paper(最終値)
 
     /// <summary>
+    /// このウィンドウが実際に使える状態(本文が描画され、WebView2が見えている状態)になった
+    /// ときに1度だけ発火する。PaneApplicationContextが、仕様書 第8.4節の数値目標
+    /// 「既存インスタンスへのファイル追加表示 300ms以内」「2枚目以降のウィンドウ追加メモリ
+    /// 60MB以内」を実測するために購読する。あわせて、更新の案内(U-06)を「届く状態になって
+    /// から」送るためにも使う(PaneApplicationContext.TryShowPendingUpdateNotice参照)。
+    ///
+    /// 初期描画完了の通知(initial-render-ready)が届かずフォールバックで表示した場合も、
+    /// 利用者から見れば「使える状態になった」ことに変わりはないため同じく発火する。
+    ///
+    /// 一度きりの発火なので、後から購読しても呼ばれない。既に使える状態かどうかは
+    /// <see cref="IsReadyToUse"/> で確かめること。
+    /// </summary>
+    public event Action? ReadyToUse;
+
+    /// <summary>
+    /// <see cref="ReadyToUse"/> が既に発火したか(このウィンドウがもう使える状態か)。
+    /// 後から購読する側が「もう過ぎているので今すぐ送ってよい」と判断するために使う。
+    /// </summary>
+    internal bool IsReadyToUse => _webViewRevealed;
+
+    /// <summary>
     /// 起動時の白フラッシュ対策(新方式)の要: WebView2コントロールを実際に表示する。
     /// 呼び出し経路は2つ:
     ///   (1) JS側("initial-render-ready")からの正常な通知。テーマ・メニューバー・
@@ -518,17 +546,6 @@ internal sealed class MainForm : Form
     ///       ウィンドウがテーマ色一色で固まって見えてしまう)。
     /// どちらが先に来ても、2回目以降は<see cref="_webViewRevealed"/>で二重処理を防ぐ。
     /// </summary>
-    /// <summary>
-    /// このウィンドウが実際に使える状態(本文が描画され、WebView2が見えている状態)になった
-    /// ときに1度だけ発火する。PaneApplicationContextが、仕様書 第8.4節の数値目標
-    /// 「既存インスタンスへのファイル追加表示 300ms以内」「2枚目以降のウィンドウ追加メモリ
-    /// 60MB以内」を実測するために購読する。
-    ///
-    /// 初期描画完了の通知(initial-render-ready)が届かずフォールバックで表示した場合も、
-    /// 利用者から見れば「使える状態になった」ことに変わりはないため同じく発火する。
-    /// </summary>
-    public event Action? ReadyToUse;
-
     private void RevealWebView(bool viaFallback)
     {
         if (_webViewRevealed) return;
@@ -3289,6 +3306,16 @@ internal sealed class MainForm : Form
     }
 
     /// <summary>
+    /// 起動時の更新確認(仕様書 U-06)で新しい版が見つかったことを画面へ知らせる。
+    /// 受け取ったJS側は画面上部の帯に案内を出すだけで、勝手に更新は始めない。
+    ///
+    /// <see cref="IsReadyToUse"/> がfalseの間に呼んでも、受け手がいないので消えるだけ
+    /// (<see cref="PostToWeb"/>参照)。呼ぶ側で確かめること。
+    /// </summary>
+    internal void PostUpdateAvailable(string latestVersion, string message)
+        => PostToWeb(new { type = "update-available", latestVersion, message });
+
+    /// <summary>
     /// 設定のうちJS側(main.js / editor.js / sidebar.js等)で効かせる項目をまとめて伝える
     /// (docs/設定項目一覧.md「送受信の約束」)。一覧系(installedFonts等)は含めない。
     /// 起動時("ready"受信直後)、設定画面で保存されるたび、最近使ったファイルが更新されるたびに送る。
@@ -3296,13 +3323,6 @@ internal sealed class MainForm : Form
     /// (<see cref="ApplyAutoSaveSettings"/>)。
     /// <see cref="PaneApplicationContext"/> が全ウィンドウへ再送する際にも呼ぶため internal。
     /// </summary>
-    /// <summary>
-    /// 起動時の更新確認(仕様書 U-06)で新しい版が見つかったことを画面へ知らせる。
-    /// 受け取ったJS側は画面上部の帯に案内を出すだけで、勝手に更新は始めない。
-    /// </summary>
-    internal void PostUpdateAvailable(string latestVersion, string message)
-        => PostToWeb(new { type = "update-available", latestVersion, message });
-
     internal void PostCapabilities()
     {
         AppSettings settings = SettingsService.Load();

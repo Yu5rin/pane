@@ -37,8 +37,24 @@ internal sealed record UpdateCheckResult(
 /// </summary>
 internal static class UpdateService
 {
-    /// <summary>通信のタイムアウト。確認は軽い問い合わせなので短くてよい。</summary>
+    /// <summary>1回の問い合わせのタイムアウト。確認は軽い問い合わせなので短くてよい。</summary>
     private static readonly TimeSpan CheckTimeout = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// 確認全体のタイムアウト。Atomフィードとリリース情報の2回を問い合わせるため、
+    /// それぞれに <see cref="CheckTimeout"/> を掛けると最悪30秒待たされる。
+    ///
+    /// 設定画面の「更新を確認」を押した人はその間ずっと待つことになるし、
+    /// ネットワークが繋がっていない場所ではその30秒がまるごと無駄になる。
+    /// 全体としてここで打ち切る。
+    /// </summary>
+    private static readonly TimeSpan TotalCheckTimeout = TimeSpan.FromSeconds(20);
+
+    /// <summary>
+    /// Atomフィード1回ぶんのタイムアウト。フィードは数KBの軽い応答なので、これを超えて
+    /// 待つ意味は薄い。早めに見切って、残り時間をリリース情報の問い合わせへ回す。
+    /// </summary>
+    private static readonly TimeSpan AtomTimeout = TimeSpan.FromSeconds(8);
 
     /// <summary>ダウンロードのタイムアウト。配布物は70MB超あるため長めに取る。</summary>
     private static readonly TimeSpan DownloadTimeout = TimeSpan.FromMinutes(30);
@@ -91,7 +107,7 @@ internal static class UpdateService
             return Error(currentVersionText, "更新の確認先が https で始まっていないため中止しました。");
         }
 
-        Version? current = FileAssociationService.ParseVersion(currentVersionText);
+        Version? current = UpdateCheckLogic.ParseVersion(currentVersionText);
         if (current is null)
         {
             Logger.Warn($"更新の確認: 自分のバージョンを読み取れなかった: \"{currentVersionText}\"");
@@ -103,6 +119,10 @@ internal static class UpdateService
         // (「新しい版がある」ことと、リリースページの場所)。
         string? knownNewerTag = null;
         string knownReleaseUrl = "";
+
+        // 確認全体の制限時間。Atomとリリース情報の2回ぶんをまとめてここで打ち切る
+        // (TotalCheckTimeoutのコメント参照)。
+        using var totalCts = new CancellationTokenSource(TotalCheckTimeout);
 
         try
         {
@@ -123,13 +143,13 @@ internal static class UpdateService
             // NewerButNoDetailsがプレリリースを案内してしまう。このリポジトリは
             // プレリリースを使わない運用なので許容している。使い始めるならAtomの
             // entryを除外する条件が要る。
-            string? atomUrl = TryBuildAtomUrl(url);
+            string? atomUrl = UpdateCheckLogic.TryBuildAtomUrl(url);
             if (atomUrl is not null)
             {
-                string? tagFromAtom = await TryReadLatestTagFromAtomAsync(atomUrl);
+                string? tagFromAtom = await TryReadLatestTagFromAtomAsync(atomUrl, totalCts.Token);
                 if (tagFromAtom is not null)
                 {
-                    Version? latestFromAtom = FileAssociationService.ParseVersion(StripVersionPrefix(tagFromAtom));
+                    Version? latestFromAtom = UpdateCheckLogic.ParseVersion(tagFromAtom);
                     if (latestFromAtom is null)
                     {
                         Logger.Warn($"更新の確認: 配布元のバージョン表記を読み取れなかった: \"{tagFromAtom}\"");
@@ -139,17 +159,19 @@ internal static class UpdateService
                     {
                         Logger.Write($"更新の確認: 最新版だった(現在={currentVersionText}, 配布元={tagFromAtom}, 問い合わせ先=Atom)");
                         return new UpdateCheckResult("latest", currentVersionText, tagFromAtom, "", "", 0,
-                            BuildReleasePageUrl(atomUrl, tagFromAtom), "お使いのPaneは最新版です。");
+                            UpdateCheckLogic.BuildReleasePageUrl(atomUrl, tagFromAtom), "お使いのPaneは最新版です。");
                     }
                     Logger.Write($"更新の確認: 新しい版がある(現在={currentVersionText}, 配布元={tagFromAtom}, 問い合わせ先=Atom)。詳細をAPIへ問い合わせる");
                     knownNewerTag = tagFromAtom;
-                    knownReleaseUrl = BuildReleasePageUrl(atomUrl, tagFromAtom);
+                    knownReleaseUrl = UpdateCheckLogic.BuildReleasePageUrl(atomUrl, tagFromAtom);
                 }
             }
 
             Logger.Write($"更新の確認: 問い合わせ先={url}");
-            using var cts = new CancellationTokenSource(CheckTimeout);
-            string json = await Http.GetStringAsync(url, cts.Token);
+            // 1回ぶんの上限(CheckTimeout)と全体の上限(totalCts)の、早く来たほうで打ち切る。
+            using var apiCts = CancellationTokenSource.CreateLinkedTokenSource(totalCts.Token);
+            apiCts.CancelAfter(CheckTimeout);
+            string json = await Http.GetStringAsync(url, apiCts.Token);
 
             using JsonDocument doc = JsonDocument.Parse(json);
             JsonElement root = doc.RootElement;
@@ -158,7 +180,7 @@ internal static class UpdateService
             string releaseUrl = root.TryGetProperty("html_url", out JsonElement pageProp) ? pageProp.GetString() ?? "" : "";
             (string assetUrl, string sha256, long size) = FindZipAsset(root);
 
-            Version? latest = FileAssociationService.ParseVersion(StripVersionPrefix(tag));
+            Version? latest = UpdateCheckLogic.ParseVersion(tag);
             if (latest is null)
             {
                 Logger.Warn($"更新の確認: 配布元のバージョン表記を読み取れなかった: \"{tag}\"");
@@ -222,85 +244,27 @@ internal static class UpdateService
     }
 
     /// <summary>
-    /// Atomフィードのxmlから、いちばん新しいリリースのタグ名を取り出す。
-    ///
-    /// 並び順に頼らず、読み取れたタグのうちバージョンとして最大のものを選ぶ。フィードは
-    /// 普通は新しい順に並ぶが、それに依存すると、並びが変わったときに古い版を「最新」と
-    /// 判断してしまう。バージョンとして読めないタグ(下書き用の名前など)は無視する。
-    ///
-    /// タグ名はリリースページのURL(entryのlinkのhref)の末尾に出る。
-    /// この切り出しはxmlさえあれば試せるよう、通信から分けてある。
-    /// </summary>
-    internal static string? ExtractLatestTagFromAtom(string xml)
-    {
-        var feed = System.Xml.Linq.XDocument.Parse(xml);
-        System.Xml.Linq.XNamespace atom = "http://www.w3.org/2005/Atom";
-
-        string? bestTag = null;
-        Version? bestVersion = null;
-        foreach (System.Xml.Linq.XElement entry in feed.Root?.Elements(atom + "entry") ?? Enumerable.Empty<System.Xml.Linq.XElement>())
-        {
-            string? href = entry.Elements(atom + "link")
-                .Select(e => (string?)e.Attribute("href"))
-                .FirstOrDefault(h => !string.IsNullOrEmpty(h));
-            if (string.IsNullOrEmpty(href)) continue;
-
-            string tag = Uri.UnescapeDataString(href.TrimEnd('/').Split('/').Last());
-            if (string.IsNullOrEmpty(tag)) continue;
-
-            Version? version = FileAssociationService.ParseVersion(StripVersionPrefix(tag));
-            if (version is null) continue;
-            if (bestVersion is not null && version <= bestVersion) continue;
-
-            bestVersion = version;
-            bestTag = tag;
-        }
-        return bestTag;
-    }
-
-    /// <summary>
-    /// APIの問い合わせ先から、同じリポジトリのAtomフィードのURLを組み立てる。
-    /// 形が違って組み立てられない場合(GitHub以外の配布元を設定している場合など)はnull。
-    ///
-    ///   https://api.github.com/repos/{owner}/{repo}/releases/latest
-    ///     → https://github.com/{owner}/{repo}/releases.atom
-    /// </summary>
-    private static string? TryBuildAtomUrl(string apiUrl)
-    {
-        try
-        {
-            if (!Uri.TryCreate(apiUrl, UriKind.Absolute, out Uri? uri)) return null;
-            if (!string.Equals(uri.Host, "api.github.com", StringComparison.OrdinalIgnoreCase)) return null;
-
-            string[] parts = uri.AbsolutePath.Trim('/').Split('/');
-            // repos / {owner} / {repo} / releases / latest
-            if (parts.Length < 4 || !string.Equals(parts[0], "repos", StringComparison.OrdinalIgnoreCase)) return null;
-
-            return $"https://github.com/{parts[1]}/{parts[2]}/releases.atom";
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    /// <summary>Atomフィードから、リリースページのURLを組み立てる。</summary>
-    private static string BuildReleasePageUrl(string atomUrl, string tag)
-        => atomUrl.EndsWith(".atom", StringComparison.OrdinalIgnoreCase)
-            ? $"{atomUrl[..^".atom".Length]}/tag/{Uri.EscapeDataString(tag)}"
-            : "";
-
-    /// <summary>
     /// Atomフィードから、いちばん新しいリリースのタグ名を読み取る。読めなければnullを返し、
     /// 呼び出し元はAPIへの問い合わせへ進む(こちらが使えなくても更新の確認そのものは
     /// できたほうがよいため、失敗を致命的に扱わない)。
+    ///
+    /// 前回と同じ内容なら本文を受け取らずに済ませる。フィードには前回受け取ったときの
+    /// 目印(ETag)が付いており、それを添えて尋ねると、変わっていなければ配布元は
+    /// 「304 変更なし」だけを返す。起動のたびに確認する作りなので、多くの場合はこちらになる。
+    /// 数KBとはいえ毎回受け取る必要はなく、配布元にも自分の回線にも余計な負荷をかけない。
     /// </summary>
-    private static async Task<string?> TryReadLatestTagFromAtomAsync(string atomUrl)
+    /// <param name="outerToken">確認全体の制限時間。これとAtom個別の上限の早い方で打ち切る。</param>
+    private static async Task<string?> TryReadLatestTagFromAtomAsync(string atomUrl, CancellationToken outerToken)
     {
+        AppSettings settings = SettingsService.Load();
+        string? knownETag = settings.UpdateFeedETag;
+        string? knownTag = settings.UpdateFeedLatestTag;
+
         try
         {
             Logger.Debug($"更新の確認: Atomフィードへ問い合わせる: {atomUrl}");
-            using var cts = new CancellationTokenSource(CheckTimeout);
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(outerToken);
+            cts.CancelAfter(AtomTimeout);
 
             // 既定のAcceptヘッダ(GitHub APIのJSON)のままでは意図が合わないので、この要求にだけ
             // Atom用のAcceptを付ける。
@@ -308,11 +272,28 @@ internal static class UpdateService
             request.Headers.Accept.Clear();
             request.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/atom+xml"));
 
+            // 前回の目印と、そのとき読み取ったタグの両方が揃っているときだけ使う。
+            // 目印だけあってタグが無いと、304が返ってきても答えようがない。
+            bool canUseETag = !string.IsNullOrEmpty(knownETag) && !string.IsNullOrEmpty(knownTag);
+            if (canUseETag)
+            {
+                request.Headers.TryAddWithoutValidation("If-None-Match", knownETag);
+            }
+
             using HttpResponseMessage response = await Http.SendAsync(request, cts.Token);
+
+            if (response.StatusCode == System.Net.HttpStatusCode.NotModified && canUseETag)
+            {
+                Logger.Write($"更新の確認: Atomフィードは前回から変わっていない(304)。前回のタグを使う({knownTag})");
+                return knownTag;
+            }
+
             response.EnsureSuccessStatusCode();
             string xml = await response.Content.ReadAsStringAsync(cts.Token);
+            string? tag = UpdateCheckLogic.ExtractLatestTagFromAtom(xml);
 
-            return ExtractLatestTagFromAtom(xml);
+            RememberFeedState(response.Headers.ETag?.Tag, tag);
+            return tag;
         }
         catch (Exception ex)
         {
@@ -322,22 +303,31 @@ internal static class UpdateService
         }
     }
 
+    /// <summary>
+    /// Atomフィードの目印(ETag)と、そのとき読み取ったタグを控える。次回の確認で
+    /// 「前回から変わっていないか」を尋ねるために使う。
+    /// どちらかが欠けていると次回に使えないため、両方揃ったときだけ保存する。
+    /// </summary>
+    private static void RememberFeedState(string? etag, string? tag)
+    {
+        if (string.IsNullOrEmpty(etag) || string.IsNullOrEmpty(tag)) return;
+        try
+        {
+            SettingsService.Update(s =>
+            {
+                s.UpdateFeedETag = etag;
+                s.UpdateFeedLatestTag = tag;
+            });
+        }
+        catch (Exception ex)
+        {
+            // 控えられなくても、次回そのまま全部受け取るだけで支障はない。
+            Logger.Debug($"更新の確認: フィードの目印を控えられなかった: {ex.GetType().Name}");
+        }
+    }
+
     private static UpdateCheckResult Error(string currentVersion, string message)
         => new("error", currentVersion, "", "", "", 0, "", message);
-
-    /// <summary>
-    /// タグ名の先頭の "v" を落とす("v1.0.4" → "1.0.4")。
-    ///
-    /// Gitのタグは慣例的に "v" を付けるが(このリポジトリも v1.0.4 の形)、
-    /// <see cref="Version.TryParse"/> は "v" が付いていると読み取れない。
-    /// 画面に出す表記はタグのまま("v1.0.5 があります")にしたいので、
-    /// ここでは比較用の値を作るときだけ落とす。
-    /// </summary>
-    private static string StripVersionPrefix(string tag)
-    {
-        string t = tag.Trim();
-        return t.Length > 1 && (t[0] == 'v' || t[0] == 'V') ? t[1..] : t;
-    }
 
     /// <summary>
     /// リリースのアセットから、入れ替えに使うZipを1つ選ぶ。

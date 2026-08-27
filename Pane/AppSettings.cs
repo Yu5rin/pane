@@ -872,4 +872,35 @@ internal sealed class AppSettings
     /// 実際に起動時へ反映する処理は後続ステップで実装する。ここではプロパティの保持のみ。
     /// </summary>
     public string? LastFolderPath { get; set; }
+
+    /// <summary>
+    /// 更新があることを見つけたのに、まだ画面に出せていない版のタグ(U-06)。出せたら空に戻す。
+    ///
+    /// 起動時の確認は起動から数秒おいて走り、結果が返るまでにも待ちがある。その間に
+    /// ウィンドウを閉じられると、せっかく見つけた案内が誰にも届かないまま消えてしまう。
+    /// ここに控えておくと、次の起動では通信の完了を待たずに案内を出せる。
+    ///
+    /// 利用者が設定画面で触る項目ではない(画面に出したかどうかという内部の覚え書き)。
+    /// </summary>
+    public string? PendingUpdateNoticeTag { get; set; }
+
+    /// <summary>
+    /// <see cref="PendingUpdateNoticeTag"/> と一緒に見せる案内の文面。
+    /// 通信できないときでもそのまま出せるよう、文面ごと控えておく。
+    /// </summary>
+    public string? PendingUpdateNoticeMessage { get; set; }
+
+    /// <summary>
+    /// 配布元のAtomフィードを前回受け取ったときの目印(ETag)。次回はこれを添えて尋ね、
+    /// 変わっていなければ本文を受け取らずに済ませる(UpdateService参照)。
+    ///
+    /// 利用者が設定画面で触る項目ではない(通信を減らすための内部の覚え書き)。
+    /// </summary>
+    public string? UpdateFeedETag { get; set; }
+
+    /// <summary>
+    /// <see cref="UpdateFeedETag"/> を受け取ったときに、そのフィードから読み取った最新のタグ。
+    /// 「変わっていない」と返ってきたときは、この値をそのまま使う。
+    /// </summary>
+    public string? UpdateFeedLatestTag { get; set; }
 }
