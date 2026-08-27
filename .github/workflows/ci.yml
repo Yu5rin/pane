@@ -19,7 +19,8 @@ jobs:
   build-and-verify:
     name: ビルドと回帰スイート
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 回帰スイート60本だけで20〜30分かかる(手元の実測)。ビルドと合わせて余裕を持たせる。
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
