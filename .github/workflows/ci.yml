@@ -63,3 +63,7 @@ jobs:
           name: verify-output
           path: verify-output/
           if-no-files-found: ignore
+          # スイートごとの出力は .verify-foo.mjs.log という名前で、先頭がドットのため
+          # 隠しファイル扱いになる。既定のままだと1件も収集されず、
+          # 「失敗したのに中身が無い」ことになる。
+          include-hidden-files: true
