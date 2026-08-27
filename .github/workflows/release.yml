@@ -1,0 +1,119 @@
+# v から始まるタグを push したら、配布用の Zip を組み立てて下書きのリリースを作る。
+#
+# これまでリリースは手元のWindowsで release.ps1 を回し、できたZipを手でアップロードして
+# 本文を書く、という手順だった。手順そのものは短いが、
+#   ・「npm run build を先に走らせる」「バージョンを2か所書き換える」といった前提を毎回思い出す必要がある
+#   ・作った本人の環境でしか再現できない(何が入ったZipなのかを後から確かめられない)
+# という弱さがあった。ここで組み立てれば、どのコミットから作られたZipなのかがタグで残る。
+#
+# 公開はしない(--draft)。本文を確かめて公開ボタンを押すのは人の仕事。
+name: リリースの下書きを作る
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# リリースを作るために書き込み権限が要る。
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Zipを組み立てて下書きを作る
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: タグからバージョンを取り出す
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag -replace '^v', ''
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "タグ '$tag' からバージョンを読み取れません(v1.2.3 の形で付けてください)"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+
+      # タグと Pane.csproj の <Version> がずれていると、配布物の中身とタグ名が食い違う。
+      # 「更新を確認」はタグを見て新旧を判断するので、ここがずれると更新の案内が狂う。
+      - name: タグと Pane.csproj のバージョンが一致するか確かめる
+        shell: pwsh
+        run: |
+          $csproj = [xml](Get-Content "Pane\Pane.csproj")
+          $inProject = ($csproj.Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1).Trim()
+          $fromTag = "${{ steps.version.outputs.version }}"
+          if ($inProject -ne $fromTag) {
+            throw "タグは $fromTag ですが Pane.csproj の <Version> は $inProject です。どちらかを直してからタグを付け直してください。"
+          }
+          Write-Host "バージョン一致: $inProject"
+
+      - name: 依存を入れる
+        run: npm ci
+
+      - name: 配布用の Zip を組み立てる
+        shell: pwsh
+        run: |
+          .\scripts\release.ps1 -Version "${{ steps.version.outputs.version }}" -Force
+
+      - name: SHA256 を出す
+        id: hash
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem "release\*.zip" | Select-Object -First 1
+          if (-not $zip) { throw "release フォルダに Zip がありません" }
+          $hash = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
+          $sizeMb = [math]::Round($zip.Length / 1MB, 1)
+          "name=$($zip.Name)" >> $env:GITHUB_OUTPUT
+          "path=$($zip.FullName)" >> $env:GITHUB_OUTPUT
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+          "size=$sizeMb" >> $env:GITHUB_OUTPUT
+          Write-Host "$($zip.Name)  $sizeMb MB  SHA256=$hash"
+
+      # 下書きのまま作る。本文はここで用意した骨組みに、変更点を書き足して公開する。
+      - name: 下書きのリリースを作る
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $body = @"
+          ## 変更点
+
+          (ここに書く)
+
+          ## ダウンロード
+
+          | ファイル | サイズ | SHA256 |
+          | --- | --- | --- |
+          | ${{ steps.hash.outputs.name }} | ${{ steps.hash.outputs.size }} MB | ``${{ steps.hash.outputs.sha256 }}`` |
+
+          Zip を展開し、``Pane.exe`` を実行してください。``Pane.exe`` と ``dist`` フォルダは同じ場所に置いたままにしてください。
+
+          設定「バージョン情報」の「更新を確認」からも更新できます(ダウンロードした Zip は上の SHA256 と照合されます)。
+          "@
+          $body | Out-File -FilePath release-notes.md -Encoding utf8
+          gh release create "${{ steps.version.outputs.tag }}" `
+            "${{ steps.hash.outputs.path }}" `
+            --draft `
+            --title "${{ steps.version.outputs.tag }}" `
+            --notes-file release-notes.md
+
+      - name: 組み立てた Zip を残す
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.hash.outputs.name }}
+          path: ${{ steps.hash.outputs.path }}
+          retention-days: 14

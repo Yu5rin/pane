@@ -5,7 +5,9 @@
   "private": true,
   "scripts": {
     "build": "node scripts/build.js",
-    "dev": "node scripts/build.js --serve"
+    "dev": "node scripts/build.js --serve",
+    "verify": "sh run-verify.sh",
+    "screenshots": "node scripts/screenshots.mjs"
   },
   "repository": {
     "type": "git",
@@ -45,6 +47,7 @@
     "mermaid": "^11.16.1"
   },
   "devDependencies": {
-    "esbuild": "^0.24.2"
+    "esbuild": "^0.24.2",
+    "playwright": "1.56.1"
   }
 }

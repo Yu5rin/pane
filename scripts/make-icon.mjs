@@ -9,7 +9,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import pw from "/opt/node22/lib/node_modules/playwright/index.js";
+import pw from "playwright";
 
 const { chromium } = pw;
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");

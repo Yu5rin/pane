@@ -163,12 +163,47 @@ internal static class Logger
     {
         try
         {
-            return System.IO.Path.Combine(dir, $"pane-{DateTime.Now:yyyyMMdd}.log");
+            return System.IO.Path.Combine(dir, $"pane-{DateTime.Now.ToString(LogFileDateFormat)}.log");
         }
         catch
         {
             return System.IO.Path.Combine(System.IO.Path.GetTempPath(), "pane-fallback.log");
         }
+    }
+
+    /// <summary>ログファイルの名前の形。日付ごとに1つ作られる。</summary>
+    private const string LogFileDateFormat = "yyyyMMdd";
+
+    /// <summary>
+    /// ログを残しておく日数。これより前のファイルは起動時に削除する
+    /// (<see cref="StartupLogReview.CleanupOldLogs"/>)。
+    ///
+    /// 調査で実際に見返すのはせいぜい直近の数日で、それ以前は誰も読まないまま溜まり続ける。
+    /// かといって数日で消すと「先週から時々おかしい」という相談に応えられなくなるため、
+    /// 1か月ぶんを残す。
+    /// </summary>
+    public const int RetentionDays = 30;
+
+    /// <summary>
+    /// ログファイルの名前から日付を読み取る("pane-20260827.log" → 2026-08-27)。
+    /// Paneが作る形と違う名前(利用者が同じフォルダへ置いた別のファイル、
+    /// フォルダを作れなかったときの pane-fallback.log など)ではfalse。
+    /// </summary>
+    public static bool TryParseLogFileDate(string fileName, out DateTime day)
+    {
+        day = default;
+        const string prefix = "pane-";
+        const string suffix = ".log";
+        if (!fileName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return false;
+        if (!fileName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)) return false;
+
+        string middle = fileName[prefix.Length..^suffix.Length];
+        return DateTime.TryParseExact(
+            middle,
+            LogFileDateFormat,
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.None,
+            out day);
     }
 
     /// <summary>

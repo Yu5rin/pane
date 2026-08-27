@@ -15,17 +15,33 @@ internal sealed class PaneApplicationContext : ApplicationContext
     private const int DefaultWidth = 960;
     private const int DefaultHeight = 720;
 
-    /// <summary>設定ウィンドウの事前生成(体感速度対策)を始めるまでの待ち時間。起動直後の
-    /// 輻輳(本体ウィンドウ自身のWebView2初期化・Navigate)を避けるため、少し間を置いてから
-    /// 裏で作り始める。この値自体の妥当性(短すぎ・長すぎ)は実機ログ(SettingsWindow側の
-    /// 各段階のタイムスタンプ)を見てから調整する。</summary>
-    private const int SettingsPregenerateDelayMs = 2500;
+    /// <summary>
+    /// 設定ウィンドウの事前生成(体感速度対策)を始めるまでの待ち時間。
+    ///
+    /// 本来の合図は「最初の本体ウィンドウが使える状態になったこと」(<see cref="MainForm.ReadyToUse"/>)
+    /// で、この時間はそれが来なかったときの保険。起動直後の輻輳(本体ウィンドウ自身の
+    /// WebView2初期化・Navigate)に事前生成を重ねると、肝心の本体の表示が遅くなる。
+    ///
+    /// 以前はこの固定の待ち時間だけが合図だった。しかし本体の初期描画が終わるまでの時間は
+    /// 環境によって大きく違い(実機で2.7秒かかることもあった)、短いと輻輳し、長いと
+    /// 「待っている間に利用者が設定を開いてしまう」ことになる。時間で当て推量するより、
+    /// 実際に本体が落ち着いたことを見てから始めるほうが確実なため、合図を切り替えた。
+    /// </summary>
+    private const int SettingsPregenerateFallbackMs = 8000;
 
-    /// <summary>取扱説明書ウィンドウの事前生成を始めるまでの待ち時間。設定ウィンドウの事前生成
-    /// (<see cref="SettingsPregenerateDelayMs"/>)と同時に走らせると起動直後の輻輳が増えるため、
-    /// 少しずらして開始する(WebView2環境自体は共有キャッシュのため、2つ目のPrewarmが増やす
-    /// コストはEnsureCoreWebView2Async呼び出し程度で小さい)。</summary>
-    private const int HelpPregenerateDelayMs = 3500;
+    /// <summary>取扱説明書ウィンドウの事前生成を始めるまでの保険の待ち時間。設定ウィンドウの
+    /// 事前生成(<see cref="SettingsPregenerateFallbackMs"/>)と同時に走らせると起動直後の輻輳が
+    /// 増えるため、少しずらして開始する(WebView2環境自体は共有キャッシュのため、2つ目の
+    /// Prewarmが増やすコストはEnsureCoreWebView2Async呼び出し程度で小さい)。</summary>
+    private const int HelpPregenerateFallbackMs = 9000;
+
+    /// <summary>本体ウィンドウが使える状態になってから設定ウィンドウの事前生成を始めるまでの間。
+    /// 初期描画が終わった直後はまだ後片付け(遅延読み込みの続き等)が動いているため、
+    /// ひと呼吸置いてから始める。</summary>
+    private const int PregenerateAfterReadyMs = 600;
+
+    /// <summary>取扱説明書ウィンドウの事前生成を、設定ウィンドウの事前生成からどれだけ後ろに置くか。</summary>
+    private const int HelpPregenerateAfterSettingsMs = 1200;
 
     /// <summary>起動時の更新確認(U-06)を始めるまでの待ち時間。起動直後の輻輳に通信を
     /// 混ぜないよう、事前生成(上の2つ)より後ろに置く。案内が数秒遅れて出ても困らない。</summary>
@@ -62,6 +78,29 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// <summary>起動時の更新確認(U-06)用ワンショットタイマー。</summary>
     private readonly System.Windows.Forms.Timer _startupUpdateCheckTimer;
 
+    /// <summary>
+    /// 新しい版が見つかったが、まだ画面に出せていない案内(U-06)。出せたらnullに戻す。
+    ///
+    /// 確認が終わった時点で、知らせる先のウィンドウが無い(まだ開いていない・もう閉じられた)
+    /// ことがある。以前はそこで諦めていたため、案内が誰にも届かないまま消えていた。
+    /// ここに控えておき、ウィンドウが使える状態になった時点で出す。
+    /// </summary>
+    private UpdateCheckResult? _pendingUpdateNotice;
+
+    /// <summary>
+    /// 最後に配布元へ問い合わせた時刻。まだ一度も問い合わせていなければ <see cref="DateTime.MinValue"/>。
+    /// 常駐プロセス(B-1)が何日も生き続けるときに、確認が最初の一度きりで終わらないようにするため
+    /// (<see cref="StartStartupUpdateCheckTimer"/>)。
+    /// </summary>
+    private DateTime _lastUpdateCheckAt = DateTime.MinValue;
+
+    /// <summary>
+    /// 常駐したまま使い続けている場合に、次の確認までどれだけ空けるか。
+    /// 「起動のたびに確認する」という約束(U-06)を、起動しっぱなしの人にも同じ意味で届ける
+    /// ための間隔であり、確認そのものを増やす意図ではない。
+    /// </summary>
+    private static readonly TimeSpan UpdateRecheckInterval = TimeSpan.FromHours(24);
+
     /// <summary>--preloadで起動されたプロセスかどうか(B-1)。trueの間は、最後のウィンドウが
     /// 閉じられてもプロセスを終了させず、ウィンドウ0枚の常駐状態へ戻す(OnWindowClosed参照)。
     /// 一度trueになったらプロセスの生存期間中ずっとtrueのまま(常駐プロセスとしての性質)。</summary>
@@ -76,12 +115,14 @@ internal sealed class PaneApplicationContext : ApplicationContext
         _settings = SettingsService.Load();
         _preload = preload;
 
-        // 設定ウィンドウの事前生成(体感速度対策)。preload起動・通常起動のどちらでも同じ
-        // タイマーで賄う。preload起動時は下のEnsureEnvironmentAsync(WebView2環境の事前生成)と
-        // 並行して走ることになるが、EnsureEnvironmentAsync自体がロックで多重呼び出しに
-        // 対応しているため競合しない(SettingsWindow.OnLoadAsyncも同じEnsureEnvironmentAsyncを
-        // 呼ぶので、先に完了していればそのままキャッシュを使う)。
-        _settingsPregenerateTimer = new System.Windows.Forms.Timer { Interval = SettingsPregenerateDelayMs };
+        // 設定ウィンドウの事前生成(体感速度対策)。本来の合図は最初の本体ウィンドウが使える
+        // 状態になったこと(OpenWindowでReadyToUseを購読する)で、このタイマーはそれが来なかった
+        // ときの保険。preload起動では本体ウィンドウがそもそも無いため、常にこちらが働く。
+        // preload起動時は下のEnsureEnvironmentAsync(WebView2環境の事前生成)と並行して走ることに
+        // なるが、EnsureEnvironmentAsync自体がロックで多重呼び出しに対応しているため競合しない
+        // (SettingsWindow.OnLoadAsyncも同じEnsureEnvironmentAsyncを呼ぶので、先に完了していれば
+        // そのままキャッシュを使う)。
+        _settingsPregenerateTimer = new System.Windows.Forms.Timer { Interval = SettingsPregenerateFallbackMs };
         _settingsPregenerateTimer.Tick += (_, _) =>
         {
             _settingsPregenerateTimer.Stop();
@@ -89,7 +130,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
         };
         _settingsPregenerateTimer.Start();
 
-        _helpPregenerateTimer = new System.Windows.Forms.Timer { Interval = HelpPregenerateDelayMs };
+        _helpPregenerateTimer = new System.Windows.Forms.Timer { Interval = HelpPregenerateFallbackMs };
         _helpPregenerateTimer.Tick += (_, _) =>
         {
             _helpPregenerateTimer.Stop();
@@ -218,6 +259,11 @@ internal sealed class PaneApplicationContext : ApplicationContext
         {
             OpenWindow(null, forceActivate: forceActivate);
         }
+
+        // 前回の起動で見つけたのに出せなかった更新の案内があれば、通信を待たずにここで出す。
+        // まだWebView2の初期化中なので、実際に画面へ出るのはウィンドウが使える状態になった時点
+        // (OpenWindowで登録したReadyToUse)。
+        ShowRememberedUpdateNoticeIfAny();
     }
 
     /// <summary>
@@ -276,7 +322,8 @@ internal sealed class PaneApplicationContext : ApplicationContext
         //   ・既存インスタンスへのファイル追加表示(目標300ms以内。パイプ経由の要求が対象)
         // 1枚目は「起動」であってこの目標の対象外なので、2枚目以降だけを見る。
         bool measureAdditionalWindow = _windows.Count > 0;
-        long memoryBeforeBytes = measureAdditionalWindow ? MeasureTotalMemoryBytes() : 0;
+        bool memoryBeforeOwnOnly = false;
+        long memoryBeforeBytes = measureAdditionalWindow ? MeasureTotalMemoryBytes(out memoryBeforeOwnOnly) : 0;
         var windowStopwatch = measureAdditionalWindow ? System.Diagnostics.Stopwatch.StartNew() : null;
 
         var form = new MainForm(
@@ -344,6 +391,14 @@ internal sealed class PaneApplicationContext : ApplicationContext
         };
         form.FormClosed += (_, _) => OnWindowClosed(form);
 
+        // 更新の案内(U-06)は、このウィンドウが使える状態になってからでないと届かない。
+        // まだ控えが残っていれば、その時点で出す(TryShowPendingUpdateNotice参照)。
+        form.ReadyToUse += TryShowPendingUpdateNotice;
+
+        // 設定・取扱説明書の事前生成は、本体ウィンドウが落ち着いてから始める
+        // (SchedulePregenerationAfterFirstWindow参照)。
+        form.ReadyToUse += SchedulePregenerationAfterFirstWindow;
+
         _windows.Add(form);
         form.Show();
 
@@ -353,15 +408,24 @@ internal sealed class PaneApplicationContext : ApplicationContext
             // 実際に使える状態になってから測るため、そのウィンドウの初期描画完了を待って報告する
             // (MainForm側がinitial-render-readyを受け取った時点でコールバックしてくる)。
             long beforeBytes = memoryBeforeBytes;
+            bool beforeOwnOnly = memoryBeforeOwnOnly;
             System.Diagnostics.Stopwatch stopwatch = windowStopwatch!;
             form.ReadyToUse += () =>
             {
-                long afterBytes = MeasureTotalMemoryBytes();
+                long afterBytes = MeasureTotalMemoryBytes(out bool ownOnly);
                 long deltaMb = (afterBytes - beforeBytes) / (1024 * 1024);
+                // 前後で数え方が変わっていたら、その差は比べられない(片方に他アプリのぶんが
+                // 入っている)。黙って数字だけ出すと読み違えるので、その旨を添える。
+                string memoryNote = (ownOnly, beforeOwnOnly) switch
+                {
+                    (true, true) => "メモリはPane本体と、Pane自身のWebView2プロセスだけの合計",
+                    (_, _) when ownOnly != beforeOwnOnly =>
+                        "メモリは前後で数え方が変わったため比較できない(開く前はWebView2環境がまだ無かった)。参考値",
+                    _ => "メモリはPane本体とWebView2の各プロセスの合計。WebView2環境がまだ無く実行ファイル名で数えたため、" +
+                         "他のアプリのWebView2が動いていると多めに出る",
+                };
                 Logger.Write($"[計測] {_windows.Count}枚目のウィンドウ: 表示まで{stopwatch.ElapsedMilliseconds}ms, " +
-                             $"メモリ増加{deltaMb}MB (目標: 表示300ms以内・メモリ60MB以内。" +
-                             $"メモリはPane本体とWebView2の各プロセスの合計。他アプリのWebView2も同じ実行ファイル名のため、" +
-                             $"それらが同時に動いていると多めに出る)");
+                             $"メモリ増加{deltaMb}MB (目標: 表示300ms以内・メモリ60MB以内。{memoryNote})");
                 PerfWatch.Report($"{_windows.Count}枚目のウィンドウの表示", stopwatch.ElapsedMilliseconds, 300);
             };
         }
@@ -394,15 +458,49 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// 実行ファイル名で拾う都合上、他のアプリが使っているWebView2まで数えてしまうが、
     /// 「ウィンドウを開く前後の差分」を見る用途では実用上の支障は小さい。
     /// </summary>
-    private static long MeasureTotalMemoryBytes()
+    /// <summary>
+    /// Paneが今使っているメモリの合計(本体のプロセスと、自分のWebView2のプロセス群)。
+    /// 測れたかどうかも一緒に返す(<paramref name="measuredOwnProcessesOnly"/>)。
+    ///
+    /// 数える相手は「自分のWebView2環境に属するプロセス」に限る。以前は実行ファイル名で
+    /// msedgewebview2 を全部拾っていたが、WebView2はEdge本体や他のアプリも使う共通の部品で、
+    /// それらのプロセスも同じ名前で並ぶ。実機では2枚目のウィンドウのメモリ増加が373MBと
+    /// 出ていたが、これは他のアプリのぶんを一緒に数えていた疑いが強く、数字として当てにならない。
+    /// </summary>
+    private static long MeasureTotalMemoryBytes(out bool measuredOwnProcessesOnly)
     {
         long total = 0;
+        measuredOwnProcessesOnly = false;
         try
         {
             using (System.Diagnostics.Process self = System.Diagnostics.Process.GetCurrentProcess())
             {
                 total += self.WorkingSet64;
             }
+
+            Microsoft.Web.WebView2.Core.CoreWebView2Environment? env = Pane.MainForm.CachedEnvironment;
+            if (env is not null)
+            {
+                // この環境が持っているプロセスだけを数える。他のアプリのWebView2は別の環境なので
+                // ここには出てこない。
+                foreach (Microsoft.Web.WebView2.Core.CoreWebView2ProcessInfo info in env.GetProcessInfos())
+                {
+                    try
+                    {
+                        using System.Diagnostics.Process p = System.Diagnostics.Process.GetProcessById(info.ProcessId);
+                        total += p.WorkingSet64;
+                    }
+                    catch (ArgumentException)
+                    {
+                        // 数え終わる前に終了したプロセス。数に入れないだけでよい。
+                    }
+                }
+                measuredOwnProcessesOnly = true;
+                return total;
+            }
+
+            // WebView2環境がまだ無い(1枚目のウィンドウを作っている最中など)。名前で拾う従来の
+            // やり方に落とす。他のアプリのぶんが混ざるため、呼び出し元はその旨を添えて記録する。
             foreach (System.Diagnostics.Process p in System.Diagnostics.Process.GetProcessesByName("msedgewebview2"))
             {
                 using (p) total += p.WorkingSet64;
@@ -457,9 +555,13 @@ internal sealed class PaneApplicationContext : ApplicationContext
             _initialOpenPending = false;
             Logger.Write($"preload: 最初のウィンドウ要求を受信(path={path ?? "(なし)"})。復元確認・セッション復元を行う");
             RunRecoveryAndInitialOpen(path, forceActivate: true);
+            // ログオン直後の待機中は見送っていた更新確認を、ここから改めて動かす
+            // (StartStartupUpdateCheckTimerのコメント参照)。
+            StartStartupUpdateCheckTimer();
             return;
         }
         OpenWindow(path, forceActivate: true);
+        RecheckUpdateIfDue();
     }
 
     /// <summary>
@@ -486,42 +588,172 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// 呼び出し元(保存した本人のウィンドウ)を区別する必要が無いため引数は取らない。
     /// </summary>
     /// <summary>
-    /// 起動時の更新確認(仕様書 U-06)。1日1回だけ配布元へ問い合わせ、新しい版があれば
+    /// 起動時の更新確認(仕様書 U-06)。起動のたびに配布元へ問い合わせ、新しい版があれば
     /// 画面上部の帯で知らせる。実際に更新するかどうかは利用者が決める。
     ///
-    /// ・preload起動(B-1)では行わない。利用者が見ていないログオン直後に通信したくないため。
-    ///   ウィンドウが実際に開かれたときには、その時点でこのタイマーは既に止まっている。
-    /// ・ウィンドウが1枚も無ければ知らせる先が無いので何もしない。
+    /// ・preload起動(B-1)の待機中は行わない。利用者が見ていないログオン直後に通信したくない
+    ///   ため。代わりに、最初のウィンドウを開く時点で改めてこのタイマーを動かす
+    ///   (<see cref="StartStartupUpdateCheckTimer"/>)。
+    /// ・確認が終わった時点で知らせる先が無ければ、案内を控えておいて後で出す
+    ///   (<see cref="_pendingUpdateNotice"/>)。
     /// ・確認に失敗しても何も出さない(UpdateService.CheckOnStartupAsync参照)。
     /// </summary>
     private async Task CheckUpdateOnStartupAsync()
     {
-        if (_preload)
+        if (_preload && _initialOpenPending)
         {
-            Logger.Debug("起動時の更新確認: preload起動のため行わない");
+            Logger.Debug("起動時の更新確認: preloadの待機中のため行わない(最初のウィンドウを開く時点で改めて確認する)");
             return;
         }
         try
         {
+            _lastUpdateCheckAt = DateTime.UtcNow;
             UpdateCheckResult? result = await UpdateService.CheckOnStartupAsync();
             if (result is null) return;
 
-            // 開いているウィンドウのうち1枚だけに出す。全部に出すと、複数開いている人に
-            // 同じ案内が何枚も並ぶことになる。
-            MainForm? target = _windows.FirstOrDefault(w => !w.IsDisposed);
-            if (target is null)
-            {
-                Logger.Debug("起動時の更新確認: 新しい版があったが、知らせる先のウィンドウが無い");
-                return;
-            }
-            Logger.Write($"起動時の更新確認: 新しい版を画面で知らせる({result.LatestVersion})");
-            target.PostUpdateAvailable(result.LatestVersion, result.Message);
+            _pendingUpdateNotice = result;
+            // 案内を出せないまま終了することもあるため、先に控えておく。出せた時点で消す。
+            RememberPendingUpdateNotice(result);
+            TryShowPendingUpdateNotice();
         }
         catch (Exception ex)
         {
             // 更新の案内が出せないだけでアプリの動作を妨げてはいけない。
             Logger.WriteException("起動時の更新確認に失敗", ex);
         }
+    }
+
+    /// <summary>
+    /// 控えてある更新の案内を、使える状態のウィンドウへ出す。出せたら控えを消す。
+    /// 出せる先が無ければ何もしない(次にウィンドウが使える状態になったとき、または
+    /// 次回の起動でまた試される)。
+    ///
+    /// 開いているウィンドウのうち1枚にだけ出す。全部に出すと、複数開いている人の画面に
+    /// 同じ案内が何枚も並ぶことになる。
+    /// </summary>
+    private void TryShowPendingUpdateNotice()
+    {
+        UpdateCheckResult? notice = _pendingUpdateNotice;
+        if (notice is null) return;
+
+        // まだ描画が終わっていないウィンドウへ送っても、受け手がいないので消えてしまう
+        // (MainForm.PostUpdateAvailable参照)。使える状態になったものだけを相手にする。
+        MainForm? target = _windows.FirstOrDefault(w => !w.IsDisposed && w.IsReadyToUse);
+        if (target is null)
+        {
+            Logger.Debug($"更新の案内: 新しい版({notice.LatestVersion})が見つかっているが、まだ出せる先が無いので控えておく");
+            return;
+        }
+
+        _pendingUpdateNotice = null;
+        Logger.Write($"更新の案内: 新しい版を画面で知らせる({notice.LatestVersion})");
+        target.PostUpdateAvailable(notice.LatestVersion, notice.Message);
+        ForgetPendingUpdateNotice();
+    }
+
+    /// <summary>
+    /// まだ出せていない案内を設定ファイルへ控える。次回の起動では、通信の完了を待たずに
+    /// これを出せる(<see cref="ShowRememberedUpdateNoticeIfAny"/>)。
+    /// </summary>
+    private static void RememberPendingUpdateNotice(UpdateCheckResult result)
+    {
+        try
+        {
+            SettingsService.Update(s =>
+            {
+                s.PendingUpdateNoticeTag = result.LatestVersion;
+                s.PendingUpdateNoticeMessage = result.Message;
+            });
+        }
+        catch (Exception ex)
+        {
+            // 控えられなくても、この起動の中で出せるなら困らない。
+            Logger.Debug($"更新の案内: 控えの保存に失敗(この起動では出せる): {ex.GetType().Name}");
+        }
+    }
+
+    /// <summary>控えを消す。案内を実際に画面へ出せたときに呼ぶ。</summary>
+    private static void ForgetPendingUpdateNotice()
+    {
+        try
+        {
+            SettingsService.Update(s =>
+            {
+                s.PendingUpdateNoticeTag = null;
+                s.PendingUpdateNoticeMessage = null;
+            });
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug($"更新の案内: 控えの削除に失敗(次回もう一度出るだけ): {ex.GetType().Name}");
+        }
+    }
+
+    /// <summary>
+    /// 前回の起動で見つけたのに出せなかった案内があれば、通信を待たずに出す。
+    ///
+    /// 起動時の確認は数秒おいてから始まり、結果が返るまでにも待ちがある。その間に閉じられると
+    /// 案内が誰にも届かないまま消えていた。控えを先に出しておけば、通信の速さや繋がりやすさに
+    /// 関係なく届く。控えより新しい版が確認で見つかれば、そちらで上書きされる。
+    /// </summary>
+    private void ShowRememberedUpdateNoticeIfAny()
+    {
+        if (_pendingUpdateNotice is not null) return; // この起動で見つけたものを優先する
+
+        AppSettings settings = SettingsService.Load();
+        string? tag = settings.PendingUpdateNoticeTag;
+        if (string.IsNullOrWhiteSpace(tag)) return;
+
+        // 前回の案内より後に更新を済ませていれば、もう知らせる必要はない。
+        string currentVersion = SettingsBridge.DetectAppVersion();
+        if (UpdateCheckLogic.IsNewerThanCurrent(tag, currentVersion) != true)
+        {
+            Logger.Write($"更新の案内: 前回の控え({tag})は今の版({currentVersion})に追いつかれているので捨てる");
+            ForgetPendingUpdateNotice();
+            return;
+        }
+
+        Logger.Write($"更新の案内: 前回出せなかった案内({tag})を先に出す");
+        _pendingUpdateNotice = new UpdateCheckResult(
+            Status: "available",
+            CurrentVersion: currentVersion,
+            LatestVersion: tag,
+            DownloadUrl: "",
+            Sha256: "",
+            SizeBytes: 0,
+            ReleaseUrl: "",
+            Message: settings.PendingUpdateNoticeMessage ?? $"新しい版 {tag} があります。");
+        TryShowPendingUpdateNotice();
+    }
+
+    /// <summary>
+    /// 起動時の更新確認(U-06)のタイマーを動かす。既に動いていれば何もしない。
+    ///
+    /// 2つの場面から呼ぶ。
+    ///   ・preload起動(B-1)で最初のウィンドウを開いたとき。ログオン直後の待機中は通信を
+    ///     見送っているため、ここで改めて動かす。以前はコンストラクタで一度動かしたきりで、
+    ///     待機中に何もせず止まっていた。常駐を使っている人には起動時の確認が一度も走らなかった。
+    ///   ・常駐したまま次のウィンドウを開いたとき。前回の確認から
+    ///     <see cref="UpdateRecheckInterval"/> 以上空いていれば、また確認する。
+    ///     常駐プロセスは何日も生き続けるので、これが無いと最初の一度きりで終わってしまう。
+    /// </summary>
+    private void StartStartupUpdateCheckTimer()
+    {
+        if (_startupUpdateCheckTimer.Enabled) return;
+        _startupUpdateCheckTimer.Start();
+    }
+
+    /// <summary>
+    /// 常駐したまま使い続けている場合に、頃合いを見て更新確認をやり直す。
+    /// ウィンドウを開くたびに呼ばれるが、実際に動くのは前回の確認から十分に間が空いたときだけ。
+    /// </summary>
+    private void RecheckUpdateIfDue()
+    {
+        if (_lastUpdateCheckAt == DateTime.MinValue) return; // まだ最初の確認が済んでいない
+        if (DateTime.UtcNow - _lastUpdateCheckAt < UpdateRecheckInterval) return;
+
+        Logger.Write($"更新の確認: 前回から{(int)(DateTime.UtcNow - _lastUpdateCheckAt).TotalHours}時間経ったので確認し直す(常駐したまま使い続けている)");
+        StartStartupUpdateCheckTimer();
     }
 
     private void BroadcastSettingsChanged()
@@ -571,6 +803,37 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// 例外が起きても致命的ではない: _settingsWindowをnullのままにしておけば、次回の
     /// <see cref="OpenSettingsWindow"/>が従来どおり(その場で新規作成)にフォールバックする。
     /// </summary>
+    /// <summary>
+    /// 本体ウィンドウが使える状態になったのを受けて、設定・取扱説明書の事前生成を始める。
+    ///
+    /// 起動直後は本体ウィンドウ自身のWebView2初期化とHTMLの読み込みで手一杯で、そこへ
+    /// 事前生成を重ねると本体の表示そのものが遅れる。かといって固定の待ち時間で当て推量すると、
+    /// 環境によって短すぎたり長すぎたりする。本体が実際に描き終わったこの瞬間から数えるのが
+    /// いちばん確実なので、保険のタイマーを止めて、短い間を置いて始め直す。
+    ///
+    /// 2枚目以降のウィンドウが開かれたときにも呼ばれ、事前生成がまだなら数え直しになる。
+    /// これは意図したとおりで、ウィンドウが立て続けに開いている間はやはり忙しく、
+    /// そこへ事前生成を割り込ませたくない。既に作り終えていれば何もしない。
+    /// </summary>
+    private void SchedulePregenerationAfterFirstWindow()
+    {
+        if (_settingsWindow is not null && _helpWindow is not null) return;
+
+        if (_settingsWindow is null)
+        {
+            _settingsPregenerateTimer.Stop();
+            _settingsPregenerateTimer.Interval = PregenerateAfterReadyMs;
+            _settingsPregenerateTimer.Start();
+        }
+        if (_helpWindow is null)
+        {
+            _helpPregenerateTimer.Stop();
+            _helpPregenerateTimer.Interval = PregenerateAfterReadyMs + HelpPregenerateAfterSettingsMs;
+            _helpPregenerateTimer.Start();
+        }
+        Logger.Debug("事前生成: 本体ウィンドウが使える状態になったので、ここから数え直す");
+    }
+
     private void PregenerateSettingsWindow()
     {
         if (_settingsWindow is not null) return;

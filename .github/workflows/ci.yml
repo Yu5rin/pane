@@ -1,0 +1,69 @@
+# PRとmainへの変更ごとに、手元でやっている確認と同じものを回す。
+#
+# これまではビルドも検証も開発者の手元だけで行っていたため、実機に出てから
+# 見つかる不具合があった(更新後の再起動・更新確認のレート制限など)。
+# 少なくとも「ビルドが通る」「回帰スイートが通る」はここで担保する。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 同じブランチへ続けてpushしたときは、古い実行を止めて最新だけを走らせる。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-verify:
+    name: ビルドと回帰スイート
+    runs-on: ubuntu-latest
+    # 回帰スイート60本だけで20〜30分かかる(手元の実測)。ビルドと合わせて余裕を持たせる。
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 依存を入れる
+        run: npm ci
+
+      - name: ブラウザを入れる（回帰スイート用）
+        run: npx playwright install --with-deps chromium
+
+      - name: JSをビルドする
+        run: npm run build
+
+      # WinFormsのプロジェクトはLinuxからでもEnableWindowsTargetingでビルドできる。
+      # 実行はできないが、コンパイルが通ることの確認はここで足りる。
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: C#をビルドする
+        run: dotnet build Pane/Pane.csproj -c Release -p:EnableWindowsTargeting=true
+
+      - name: C#のテストを走らせる
+        run: dotnet test Pane.Tests/Pane.Tests.csproj -c Release
+
+      # 60本・約2400件。1本でもNGがあればここで落ちる(run-verify.shの終了コード)。
+      - name: 回帰スイートを走らせる
+        run: npm run verify
+        env:
+          OUT_DIR: ${{ github.workspace }}/verify-output
+
+      - name: 失敗したときのために結果を残す
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-output
+          path: verify-output/
+          if-no-files-found: ignore
+          # スイートごとの出力は .verify-foo.mjs.log という名前で、先頭がドットのため
+          # 隠しファイル扱いになる。既定のままだと1件も収集されず、
+          # 「失敗したのに中身が無い」ことになる。
+          include-hidden-files: true

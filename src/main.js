@@ -2768,7 +2768,7 @@ async function handleHostMessage(msg) {
     case "update-available":
       // 起動時の更新確認(仕様書 U-06)で新しい版が見つかった。ここでは知らせるだけで、
       // 更新そのものは利用者が設定画面で「更新する」を押したときにしか始まらない。
-      // 自動では消さない(autoHideMsを渡さない)。見逃すと次に気づくのは翌日になるため。
+      // 自動では消さない(autoHideMsを渡さない)。見逃すと次に気づくのは次の起動になるため。
       showAdBanner(msg.message || `新しい版 ${msg.latestVersion || ""} があります`, {
         actionLabel: "更新する",
         onAction: () => bridge?.postMessage({ type: "open-settings-window", category: "versionInfo" }),

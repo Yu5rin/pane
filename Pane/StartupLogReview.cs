@@ -10,7 +10,12 @@ namespace Pane;
 /// 起動のたびに直前のセッションを機械的に集計しておけば、ログを開いた人が冒頭を見るだけで
 /// 「前回は問題があったのか、無かったのか」が分かる。
 ///
-/// 集計するのは「1つ前の <c>=== Pane起動</c> 行から、その次の起動行(または末尾)まで」。
+/// 集計するのは「1つ前の <c>=== Pane起動</c> 行から末尾まで」のうち、<b>その起動行と同じ
+/// プロセスが書いた行だけ</b>。Paneは常駐(B-1)や更新後の入れ替えで複数のプロセスが同時に
+/// 動くことがあり、同じ日のログファイルへ混ざって書き込まれる。プロセスを区別せずに数えると、
+/// 別のプロセスの警告を「前回のセッションの問題」として数えてしまい、件数も例も当てにならなくなる。
+/// 行頭のプロセスタグ(<see cref="Logger"/>が付ける <c>[PPPP:TT]</c> の左側)で選り分ける。
+///
 /// 何も見つからなければ何も書かない(問題が無いときにログを増やさない)。
 /// </summary>
 internal static class StartupLogReview
@@ -21,9 +26,6 @@ internal static class StartupLogReview
 
     /// <summary>ログファイルがこのサイズを超えたら、肥大化として警告する。</summary>
     private const long LargeLogWarnBytes = 20L * 1024 * 1024;
-
-    /// <summary>要約に添える具体例の最大件数。</summary>
-    private const int MaxExamples = 3;
 
     /// <summary>
     /// 直前の起動セッションを集計して要約を記録する。
@@ -43,44 +45,21 @@ internal static class StartupLogReview
             if (info.Length >= LargeLogWarnBytes)
             {
                 Logger.Warn($"ログファイルが大きくなっている({info.Length / (1024 * 1024)}MB): {path}。" +
-                            "不要なら削除してよい(Paneが自動で消すことはない)");
+                            $"古いぶんは{Logger.RetentionDays}日で自動的に消えるが、今日のこのファイルは対象外。" +
+                            "不要ならそのまま削除してよい");
             }
 
             List<string> lines = ReadTailLines(path);
             if (lines.Count == 0) return;
 
-            // 末尾から遡って直近の起動行を探す。見つからなければ、読み取った範囲すべてを
-            // 「前回のぶん」として扱う(1回の起動が512KBを超えるほど記録された場合など)。
-            int start = 0;
-            string sessionStartedAt = "(不明)";
-            for (int i = lines.Count - 1; i >= 0; i--)
-            {
-                if (!lines[i].Contains("=== Pane起動")) continue;
-                start = i;
-                sessionStartedAt = ExtractTime(lines[i]);
-                break;
-            }
+            LogReviewSummary summary = LogReviewLogic.Summarize(lines);
+            if (summary.IsEmpty) return;
 
-            int errors = 0;
-            int warnings = 0;
-            var examples = new List<string>();
-            for (int i = start; i < lines.Count; i++)
-            {
-                bool isError = lines[i].Contains("[エラー]");
-                bool isWarn = !isError && lines[i].Contains("[警告]");
-                if (!isError && !isWarn) continue;
-                if (isError) errors++; else warnings++;
-                if (examples.Count < MaxExamples) examples.Add(Shorten(lines[i]));
-            }
-
-            if (errors == 0 && warnings == 0) return;
-
-            string detail = examples.Count > 0 ? $" 例: {string.Join(" / ", examples)}" : "";
-            string summary = $"[前回の記録] {sessionStartedAt}開始のセッションでエラー{errors}件・警告{warnings}件を記録していた。{detail}";
+            string line = LogReviewLogic.Format(summary);
             // 前回の話であって今回の異常ではないため、警告ではなく通常の記録として残す。
             // ただしエラーがあった場合だけは見落とさないよう警告にする。
-            if (errors > 0) Logger.Warn(summary);
-            else Logger.Write(summary);
+            if (summary.Errors > 0) Logger.Warn(line);
+            else Logger.Write(line);
         }
         catch (Exception ex)
         {
@@ -103,15 +82,46 @@ internal static class StartupLogReview
         return lines;
     }
 
-    /// <summary>行頭の "HH:mm:ss.fff" を取り出す。取れなければ空文字。</summary>
-    private static string ExtractTime(string line)
-        => line.Length >= 12 && line[2] == ':' && line[5] == ':' ? line[..12] + " " : "";
-
-    /// <summary>要約に載せるため1行を短く切り詰める。</summary>
-    private static string Shorten(string line)
+    /// <summary>
+    /// 古いログファイルを削除する。起動時に一度だけ呼ぶ。
+    ///
+    /// ログは日付ごとのファイル(pane-yyyyMMdd.log)へ追記していくため、放っておくと
+    /// 使った日数ぶんだけ溜まり続ける。調査に使うのはせいぜい直近の数日で、それより前は
+    /// 誰も読まないまま残る。<see cref="Logger.RetentionDays"/> 日より古いものを消す。
+    ///
+    /// 消すのは Pane 自身が作った名前(pane-yyyyMMdd.log)に一致し、かつ日付として読める
+    /// ファイルだけ。利用者が同じフォルダへ置いた別のファイルには触れない。
+    /// 今日のぶん(と、まだ動いている他プロセスが書いている可能性のある今日のぶん)は対象外。
+    /// </summary>
+    public static void CleanupOldLogs()
     {
-        const int max = 120;
-        string trimmed = line.Replace('\n', ' ').Replace('\r', ' ');
-        return trimmed.Length <= max ? trimmed : trimmed[..max] + "…";
+        try
+        {
+            string dir = Logger.DirectoryPath;
+            if (!Directory.Exists(dir)) return;
+
+            DateTime limit = DateTime.Now.Date.AddDays(-Logger.RetentionDays);
+            int removed = 0;
+            foreach (string file in Directory.EnumerateFiles(dir, "pane-*.log"))
+            {
+                if (!Logger.TryParseLogFileDate(Path.GetFileName(file), out DateTime day)) continue;
+                if (day >= limit) continue;
+                try
+                {
+                    File.Delete(file);
+                    removed++;
+                }
+                catch (Exception ex)
+                {
+                    // 別のプロセスが掴んでいる等。次回また試すので騒がない。
+                    Logger.Debug($"古いログの削除に失敗(次回また試す): {Path.GetFileName(file)} ({ex.GetType().Name})");
+                }
+            }
+            if (removed > 0) Logger.Write($"古いログを{removed}件削除した({Logger.RetentionDays}日より前のぶん)");
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug($"古いログの掃除に失敗: {ex.GetType().Name}");
+        }
     }
 }
