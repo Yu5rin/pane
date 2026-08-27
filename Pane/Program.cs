@@ -124,6 +124,10 @@ internal static class Program
         // 数十MB分になることがある)。失敗しても次回の起動でまた試す(UpdateService参照)。
         Task.Run(UpdateService.CleanupLeftovers);
 
+        // 古いログファイルも同じくバックグラウンドで片付ける。ログは日付ごとに増え続けるため、
+        // 消す仕組みが無いと使った日数ぶん溜まったままになる(StartupLogReview.CleanupOldLogs参照)。
+        Task.Run(StartupLogReview.CleanupOldLogs);
+
         var context = new PaneApplicationContext(initialPath, preload);
 
         var server = new SingleInstanceServer(SynchronizationContext.Current!);
