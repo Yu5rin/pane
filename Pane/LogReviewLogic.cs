@@ -52,15 +52,18 @@ internal static class LogReviewLogic
     {
         int start = 0;
         string startedAt = "";
-        string? sessionProcess = null;
+        string? launcherProcess = null;
         for (int i = lines.Count - 1; i >= 0; i--)
         {
             if (!lines[i].Contains("=== Pane起動")) continue;
             start = i;
             startedAt = ExtractTime(lines[i]);
-            sessionProcess = ExtractProcessTag(lines[i]);
+            launcherProcess = ExtractProcessTag(lines[i]);
             break;
         }
+
+        // このセッションを実際に動かしたプロセスを決める(FindBusiestProcessの説明を参照)。
+        string? workerProcess = FindBusiestProcess(lines, start, launcherProcess);
 
         int errors = 0;
         int warnings = 0;
@@ -72,7 +75,7 @@ internal static class LogReviewLogic
             bool isWarn = !isError && lines[i].Contains("[警告]");
             if (!isError && !isWarn) continue;
 
-            if (sessionProcess is not null && ExtractProcessTag(lines[i]) != sessionProcess)
+            if (!BelongsToSession(ExtractProcessTag(lines[i]), launcherProcess, workerProcess))
             {
                 fromOtherProcesses++;
                 continue;
@@ -83,6 +86,67 @@ internal static class LogReviewLogic
         }
 
         return new LogReviewSummary(startedAt, errors, warnings, fromOtherProcesses, examples);
+    }
+
+    /// <summary>
+    /// その行が、いま見ているセッションのものか。
+    ///
+    /// 1回のセッションには2つのプロセスが登場する。起動された側(<paramref name="launcher"/>)と、
+    /// 実際に動いた側(<paramref name="worker"/>)で、多くの場合これは別物になる
+    /// (<see cref="FindBusiestProcess"/>の説明を参照)。どちらのものも数える。
+    ///
+    /// プロセスタグを読み取れない古い形式のログでは、選り分けようがないので全部数える。
+    /// </summary>
+    private static bool BelongsToSession(string? tag, string? launcher, string? worker)
+    {
+        if (launcher is null && worker is null) return true; // 古い形式のログ
+        if (tag is null) return true;
+        return tag == launcher || tag == worker;
+    }
+
+    /// <summary>
+    /// 指定の範囲でいちばん多く行を書いているプロセスを返す。読み取れなければnull。
+    ///
+    /// 「=== Pane起動 ===」を書いたプロセスが、そのままウィンドウを開くとは限らない。
+    /// Paneはファイルを開くたびに新しいプロセスが立ち上がるが、既にPaneが動いていれば、
+    /// そのプロセスは常駐している側へ要求を渡して自分は即座に終了する(多重起動制御)。
+    /// つまり起動行を書いた側は数行しか書かずに消え、以後の記録はすべて常駐している側が書く。
+    ///
+    /// 起動行のプロセスだけを頼りにすると、この構造では実際の警告がまるごと
+    /// 「別プロセスのもの」として外れてしまう。実際、そうなっていた:
+    ///   [前回の記録] 15:14:39 開始のセッションでエラー0件・警告0件を記録していた。
+    ///   (別プロセスの記録が2件、同じ範囲に混ざっている)
+    /// この2件こそが、そのセッションで実際に起きた警告(更新確認の403)だった。
+    ///
+    /// 行数がいちばん多いプロセスは、その範囲で実際に働いていた側とみなしてよい。
+    ///
+    /// ただし引き渡しが起きていない(自分でウィンドウまで開いた)場合もあり、そのときは
+    /// 起動行を書いた側がそのまま働いている。同数で並んだときは
+    /// <paramref name="launcher"/> を選ぶのはそのため。数で並ぶ状況は
+    /// 「引き渡しが起きていないのに、別のプロセスが同じくらい書いている」ときで、
+    /// その別プロセスは無関係な常駐側と考えるのが自然になる。
+    /// </summary>
+    private static string? FindBusiestProcess(IReadOnlyList<string> lines, int start, string? launcher)
+    {
+        var counts = new Dictionary<string, int>();
+        for (int i = start; i < lines.Count; i++)
+        {
+            string? tag = ExtractProcessTag(lines[i]);
+            if (tag is null) continue;
+            counts[tag] = counts.TryGetValue(tag, out int n) ? n + 1 : 1;
+        }
+        if (counts.Count == 0) return null;
+
+        // 同数で並んだときに列挙の順で結果が変わらないよう、起動側を先に置いてから比べる。
+        string? best = launcher is not null && counts.ContainsKey(launcher) ? launcher : null;
+        int bestCount = best is not null ? counts[best] : 0;
+        foreach (KeyValuePair<string, int> pair in counts)
+        {
+            if (pair.Value <= bestCount) continue;
+            best = pair.Key;
+            bestCount = pair.Value;
+        }
+        return best;
     }
 
     /// <summary>集計結果を、ログの冒頭に残す1行にする。</summary>

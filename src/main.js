@@ -187,11 +187,19 @@ const STALL_WARN_MS = 500;
 // PCがスリープ・休止していた、または画面がロックされていたと考えるほうが自然。
 // 実機のログで、13分間なにも記録が無いあとに41.8秒の停止が記録され、その15秒後に
 // 利用者がウィンドウを閉じた、という並びが実際に出た(離席から戻ってきた形)。
-// Paneに41秒もメインスレッドを占有する処理は無い。
-const STALL_LIKELY_SUSPEND_MS = 20000;
+//
+// 当初は41.8秒の実例だけを見て20秒にしたが、その後18.5秒の停止が
+// 「メインスレッドを占有していた」側に振り分けられた(2026-09-01のログ。57分なにも
+// 記録が無いあと、昼の時間帯に発生)。Paneでいちばん重い処理でも、10万行の文書への
+// 1文字入力で0.6秒しかかからない。その15倍以上が続くのは外の要因と考えるのが自然。
+const STALL_LIKELY_SUSPEND_MS = 10000;
 
 function startStallWatch() {
   let previous = performance.now();
+  // 壁時計も併せて測る。PCがスリープしていた場合、止まっていた区間では壁時計だけが
+  // 大きく進み、performance.nowとの差が開く(環境によっては両方進むため決め手にはならないが、
+  // 後からログを読むときの手がかりになる)。
+  let previousWall = Date.now();
   // 停止していた区間にウィンドウが後ろに回っていたかどうかを、後から言えるようにする。
   // ロック・スリープではまずフォーカスを失うため、判断の材料になる。
   let lastBlurAt = -1;
@@ -199,9 +207,12 @@ function startStallWatch() {
 
   setInterval(() => {
     const now = performance.now();
+    const wallNow = Date.now();
     const delay = now - previous - STALL_CHECK_INTERVAL_MS;
+    const wallDelay = wallNow - previousWall - STALL_CHECK_INTERVAL_MS;
     const startedAt = previous;
     previous = now;
+    previousWall = wallNow;
     // ウィンドウが非表示・最小化のときブラウザはタイマーの発火間隔を意図的に間引くため、
     // その遅れは不具合ではない。見えている間だけを対象にする。
     if (document.hidden) return;
@@ -221,7 +232,12 @@ function startStallWatch() {
         `(この間ウィンドウは${blurredDuringStall ? "後ろに回っていた" : "手前のままだった"})。` +
         "Pane側が固まっていたのなら、同じ時間帯に重い操作の記録が残っているはず"
       : "この間、何かの処理がメインスレッドを占有していた";
-    logToHost("warn", `画面の応答が${Math.round(delay)}ms止まっていた(${note})`);
+    // 壁時計の経過も添える。両者が大きく食い違っていれば、止まっていたのは
+    // Paneではなく機械そのもの(スリープ・休止)だと分かる。
+    const wallNote = Math.abs(wallDelay - delay) >= 1000
+      ? `、壁時計では${Math.round(wallDelay)}ms`
+      : "";
+    logToHost("warn", `画面の応答が${Math.round(delay)}ms止まっていた${wallNote}(${note})`);
   }, STALL_CHECK_INTERVAL_MS);
 }
 

@@ -43,7 +43,7 @@ internal sealed class SettingsWindow : Form
     private const string VirtualHostName = "pane.local";
     /// <summary>起動時の白フラッシュ対策(新方式)のフォールバック猶予。MainForm側と
     /// 同じ値・同じ考え方(<see cref="MainForm"/> WebViewRevealFallbackMs参照)。</summary>
-    private const int WebViewRevealFallbackMs = 3000;
+    private const int WebViewRevealFallbackMs = 6000;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,

@@ -50,6 +50,56 @@ public class LogReviewLogicTests
     }
 
     [Fact]
+    public void 実際に起きた不具合_起動行を書いたプロセスと実際に動いたプロセスは別物()
+    {
+        // Paneはファイルを開くたびに新しいプロセスが立ち上がるが、既にPaneが動いていれば、
+        // そのプロセスは常駐している側へ要求を渡して自分は即座に終了する(多重起動制御)。
+        // 起動行を書いた側(4456)は数行しか書かず、以後は常駐している側(1656)が書く。
+        //
+        // 起動行のプロセスだけを頼りにしていたときは、この2件の警告がまるごと
+        // 「別プロセスのもの」として外れ、要約が「エラー0件・警告0件」になっていた。
+        // 実機のログ(2026-09-02)から再現したもの。
+        var lines = new[]
+        {
+            Start("15:14:39.725", "4456"),
+            Line("15:14:39.750", "4456", "[計測] プロセス開始→Main到達: 766ms"),
+            Line("15:14:39.944", "4456", "WEBVIEW2_DEFAULT_BACKGROUND_COLOR=0xFF14171A"),
+            Line("15:14:40.020", "1656", "MainForm生成: initialPath=..."),
+            Line("15:14:40.087", "1656", "OnLoadAsync開始"),
+            Line("15:14:43.489", "1656", "JSからのメッセージ受信: type=ready"),
+            Warn("15:14:48.326", "1656", "更新の確認: 問い合わせ回数の上限に達していた(403)"),
+            Line("15:14:59.552", "1656", "更新の確認: 問い合わせ先=..."),
+            Warn("15:14:59.604", "1656", "更新の確認: 問い合わせ回数の上限に達していた(403)"),
+            Line("15:15:31.701", "1656", "FormClosing: isDirty=False"),
+        };
+
+        LogReviewSummary summary = LogReviewLogic.Summarize(lines);
+        Assert.Equal(2, summary.Warnings);
+        Assert.Equal(0, summary.Errors);
+        Assert.Equal(0, summary.FromOtherProcesses);
+        Assert.Equal("15:14:39.725 ", summary.StartedAt);
+    }
+
+    [Fact]
+    public void 起動行を書いたプロセス自身の警告も数える()
+    {
+        // 引き渡す前に起動側が警告を出すこともある。そちらも同じセッションの一部。
+        var lines = new[]
+        {
+            Start("15:14:39.725", "4456"),
+            Warn("15:14:39.800", "4456", "起動した側が出した警告"),
+            Line("15:14:40.020", "1656", "MainForm生成"),
+            Line("15:14:40.087", "1656", "OnLoadAsync開始"),
+            Line("15:14:43.489", "1656", "ready受信"),
+            Warn("15:14:48.326", "1656", "常駐している側が出した警告"),
+        };
+
+        LogReviewSummary summary = LogReviewLogic.Summarize(lines);
+        Assert.Equal(2, summary.Warnings);
+        Assert.Equal(0, summary.FromOtherProcesses);
+    }
+
+    [Fact]
     public void 別のプロセスが書いた行は数に入れず件数だけ添える()
     {
         // 常駐しているPane(0100)が動いたまま、新しいPane(0200)が起動した場面。
