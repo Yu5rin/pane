@@ -325,10 +325,30 @@ async function newBridgedPage(viewport) {
   await page.waitForTimeout(300);
 
   // (7) ハンドルのダブルクリックで既定幅(240px)に戻る
+  //
+  // 注意: #sidebarにはtransition: width 160ms ease(src/style.css)が掛かっている。
+  // ドラッグ中はsidebar.jsが.sidebar-resizingクラスでこのtransitionを切るが、
+  // ダブルクリックでの既定幅リセット(resizeHandleEl.addEventListener("dblclick", ...))は
+  // 意図的にtransitionを切っていない(パッと切り替わるより160msでなめらかに戻る方が
+  // 自然なUXであるため)。つまりダブルクリック直後は「幅がアニメーション中」の状態を
+  // 経由するのが実装として正しい挙動であり、これ自体はバグではない。
+  //
+  // 以前はここをwaitForTimeout(150)で固定待ちしていたが、150ms < 160msなので
+  // 理屈のうえで必ず「トランジションが終わる前」を捕まえうる書き方だった。ローカルでは
+  // 描画が速くwaitForTimeout(150)の実測時間がtransitionの完了後にずれ込むことが多かったため
+  // 気づかれなかったが、CI(ubuntu-latest)では描画が遅れて150ms時点でトランジションが
+  // 終わっておらず、easeカーブの残り(例: 240 + 110px*残り約1.6% = 241.8125px)を
+  // そのまま読んでしまいNGになっていた。
+  //
+  // 固定待ち時間をただ延ばすのではなく、「幅が既定値へ収束するまで」を明示的に待つ
+  // (transitionの長さが将来変わっても追従できるようにするため)。
   handle = await handleOf();
   hbox = await handle.boundingBox();
   await page.mouse.dblclick(hbox.x + hbox.width / 2, hbox.y + hbox.height / 2);
-  await page.waitForTimeout(150);
+  await page.waitForFunction(
+    () => Math.abs(document.getElementById("sidebar").getBoundingClientRect().width - 240) < 0.5,
+    { timeout: 2000 }
+  ).catch(() => {}); // タイムアウトしても握りつぶし、後続のok()に実測値を渡してNGとして可視化する
   const afterDbl = await widthOf();
   ok(`(7) ダブルクリックで既定幅240pxに戻る (${afterDbl})`, Math.abs(afterDbl - 240) < 1);
 
