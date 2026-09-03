@@ -36,11 +36,24 @@ internal sealed class MainForm : Form
     private const int ExternalChangeDebounceMs = 300;
     /// <summary>起動時の白フラッシュ対策(新方式)のフォールバック猶予(ミリ秒)。
     /// JS側("initial-render-ready")からの通知を待たずにこれだけ経過したら、
-    /// <see cref="RevealWebView"/>がWebView2を強制的に表示する。JS側が例外で止まる等
-    /// 通知が永久に来ない場合の保険であり、実機でしか再現しないシナリオのため
-    /// (このリポジトリのヘッドレス環境ではWebView2自体が動かせず検証できない)、
-    /// 長すぎず短すぎない値として3秒を選んだ。</summary>
-    private const int WebViewRevealFallbackMs = 3000;
+    /// <see cref="RevealWebView"/>がWebView2を強制的に表示する。JS側が例外で止まる等、
+    /// 通知が永久に来ない場合の保険。
+    ///
+    /// 当初は3秒だったが、実機のログでは通知が届く前にこの保険が先に発火することが常態化して
+    /// いた(3日分のログで14回中10回)。しかもその多くは、強制表示のわずか数ミリ秒後に本物の
+    /// 通知が届いている:
+    ///   11:01:28.052 WebView2を表示(フォールバック: 3000ms以内に…)
+    ///   11:01:28.056 initial-render-ready受信            ← 4ms差
+    /// これでは保険ではなく通常経路になってしまい、白フラッシュ対策の意味が薄れる。
+    ///
+    /// JS側の起動は実機で2.4〜2.8秒かかる(内訳の大半はバンドルの評価)。Navigateからの
+    /// 計測なので3秒では余裕がまったく無い。実測の倍近くを見て6秒にする。
+    /// 本当にJS側が止まった場合の待ちも6秒に延びるが、その状態はどのみち使えないので、
+    /// 「正常なのに毎回ちらつく」ほうを避ける。
+    ///
+    /// この値を縮めたくなったら、まずJS側の起動(バンドル評価)を速くすること。
+    /// 保険の時間を削ってもちらつきが増えるだけで、起動は速くならない。</summary>
+    private const int WebViewRevealFallbackMs = 6000;
     /// <summary>ローカル画像配信(<see cref="OnLocalFileResourceRequested"/>)・エクスポート時の
     /// data:埋め込み(<see cref="HandleReadLocalImageRequest"/>)、双方に共通の1ファイルあたりの
     /// サイズ上限(不具合修正: 従来は前者にだけ上限が無く非対称だった)。エクスポート側と

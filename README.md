@@ -78,7 +78,7 @@ npm run screenshots    # この README の画面写真を撮り直す（docs/ima
 2. 同じ版のタグを付けて push する
 
 ```bash
-git tag v1.1.0 && git push origin v1.1.0
+git tag v1.2.3 && git push origin v1.2.3   # 実際の版に読み替える
 ```
 
 GitHub Actions が Zip を組み立て、SHA256 を添えた**下書きの**リリースを作ります
