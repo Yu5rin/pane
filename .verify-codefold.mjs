@@ -65,6 +65,9 @@
 //       コードモードでも、インデントの深さに基づいてマーカーが出る・クリックで畳める・
 //       Alt-[/Alt-]/Ctrl-Alt-[/Ctrl-Alt-]で操作できる(foldServiceによる標準コマンドとの統合)こと。
 //       言語ありコードモード・Markdownモードの既存挙動が変わっていないことも合わせて確認する。
+//   (Z) 実機フィードバック「+/−の記号が見えないことがある」の再現・回帰確認。9テーマ全部で
+//       「記号色(--paper)と地色(--ink)自身」のコントラスト比がWCAG AA(4.5:1)以上であること。
+//       (T)節が見ていなかった「記号色 vs 地色」を検証する(詳細は(Z)節本体のコメント参照)。
 import pw from "playwright";
 import zlib from "node:zlib";
 import fs from "node:fs";
@@ -1213,6 +1216,40 @@ const NEST_DOC3 = [
   }
 
   ok("(T) ページエラー0件", errors.length === 0, JSON.stringify(errors));
+  await page.close();
+}
+
+// =========================================================================
+// (Z) 実機フィードバック「+/−の記号が見えないことがある」の再現・回帰確認。
+// (T)節は「マーカーの地色(--ink-sub→--ink)が周囲の背景(--paper)から浮いて見えるか」
+// (fillRatio、3.0:1)しか見ておらず、肝心の「記号(--paper)が地の色の上で読めるか」
+// (記号色と地色自身のコントラスト、textRatio)を一度も検証していなかった。この節は
+// textRatioをWCAG AAの通常文字基準(4.5:1。この記号は12px・800ウェイトでWCAGの
+// 「大きな文字」の条件(太字18.66px相当)を満たさないため、緩い3:1ではなく4.5:1を使う)
+// で9テーマ全部について検証する。
+// 【地=var(--ink-sub)だった旧実装での実測値(修正前に本節を実行すると落ちることを確認
+// 済み)】night 3.24:1(4.5未満)、solarized-light 4.13:1(4.5未満)、sepia 4.44:1
+// (4.5未満)、他6テーマは4.5以上。地をvar(--ink)に変更後は9テーマ全部で5.6:1以上。
+// =========================================================================
+{
+  const { page, errors } = await newPage();
+  await openFile(page, "symbolcontrast.js", NEST_DOC3);
+
+  for (const th of THEMES) {
+    await applySettings(page, { theme: th.theme, lightTheme: th.lightTheme, darkTheme: th.darkTheme });
+    const colors = await page.evaluate(() => {
+      const markers = [...document.querySelectorAll(".cm-fold-marker2")];
+      if (markers.length === 0) return null;
+      // (T)節と同じく、最も深い(=最後の)マーカーで確認する。
+      const span = markers[markers.length - 1];
+      return { marker: getComputedStyle(span).color, fill: getComputedStyle(span).backgroundColor };
+    });
+    const textRatio = colors ? contrastRatio(colors.marker, colors.fill) : null;
+    ok(`(Z) ${th.label}: 記号(${colors?.marker})と地(${colors?.fill})自身のコントラスト比が4.5以上(実測=${textRatio?.toFixed(2)})`,
+      !!textRatio && textRatio >= 4.5);
+  }
+
+  ok("(Z) ページエラー0件", errors.length === 0, JSON.stringify(errors));
   await page.close();
 }
 

@@ -3021,9 +3021,24 @@ const foldKeymapSafe = [
 // countColumnで実測)を直接使って引き直す。マーカー側はcountColumnによる列計算が
 // 不要になったため削除したが、縦線側は列計算が今も必要(後述のlineFoldOpenSpecs参照)。
 //
-// マーカー自体の見た目(塗り+枠+記号)は前回(依頼3)の実測済みの配色をそのまま引き継ぐ
-// (var(--ink-sub)の地にvar(--paper)の記号。9テーマでコントラスト比3.0以上を確認済み。
-// 検証は.verify-codefold.mjs (T)節参照)。
+// マーカー自体の見た目(塗り+枠+記号)。
+// 【実機フィードバックによる修正、「+/−の記号が見えないことがある」】以前は地の色に
+// var(--ink-sub)を使っていたが、実測すると9テーマ中3テーマ(night 3.24:1、
+// solarized-light 4.13:1、sepia 4.44:1)で「記号(var(--paper))と地(var(--ink-sub))の
+// コントラスト比」がWCAG AAの通常文字基準(4.5:1)を満たしていなかった。特にnightは
+// 3.24:1しかなく、実機で「符号が見えないことがある」という指摘と一致する。
+// 原因は、(T)節の既存検証が「地の色(--ink-sub)が周囲の背景(--paper)から浮いて見える
+// かどうか」だけを3.0:1で検証しており、肝心の「記号そのものが地の色の上で読めるか」
+// (記号色 var(--paper) と 地の色 var(--ink-sub) 自身のコントラスト)を一度も検証して
+// いなかったこと。加えて3.0:1という基準自体もWCAGの「大きな文字(太字18.66px相当)」用の
+// 緩い基準であり、この記号は12px・800ウェイトで「大きな文字」の条件を満たさないため、
+// 本来は4.5:1を満たす必要があった。
+// そもそも--ink-subは各テーマで「本文(--paper)の上に乗る、控えめな補助文字の色」として
+// 個別にチューニングされた変数であり(gutter番号やヒント文字などに使用)、地の色として
+// var(--paper)の記号を乗せる用途は想定されていない。9テーマ共通で常に高いコントラストを
+// 保証できる組み合わせは、本文の主色である--ink/--paper(全9テーマで5.6:1以上を実測、
+// 仕様書10.2節の6変数の範囲内)のため、地・枠をvar(--ink)に変更した。
+// 検証は.verify-codefold.mjs (T)節(地色vs背景)と(Z)節(記号色vs地色、今回追加)参照。
 const FOLD_MARKER_SIZE = 15; // マーカー本体の一辺(px)。旧実装から変更なし。
 const FOLD_MARKER_GAP_LEFT = 5; // 本文エリアの左端→マーカー左端の隙間(px、依頼どおり)。
 const FOLD_MARKER_GAP_RIGHT = 5; // マーカー右端→コード開始位置の隙間(px、依頼どおり左右対称)。
@@ -3675,12 +3690,16 @@ const foldOpenMarkerPlugin = ViewPlugin.fromClass(class {
 // マーカーの見た目。色はテーマのCSS変数だけを参照するため、getComputedStyleでの再構築
 // なしに9テーマすべてへ自動追従する(guideLineThemeと同じ作法)。src/style.css・
 // src/themes.cssは他エージェントが編集中のため触れず、ここ(EditorView.theme())だけで
-// 完結させる。配色は前回(依頼3)実測済みの組み合わせをそのまま引き継ぐ: 地=
-// var(--ink-sub)、記号=var(--paper)、枠=地と同じvar(--ink-sub)(塗りと一体の「塗りつぶ
-// された四角」に見えるようにする)。ホバー時はvar(--accent)に切り替え、クリックできる
-// ことを伝える。実測(9テーマ、.verify-codefold.mjs (T)節参照): 記号色と地色それぞれに
-// ついて、背景(コード本文の地=var(--paper)相当)とのコントラスト比が3.0以上であることを
-// 確認する。
+// 完結させる。配色: 地=var(--ink)、記号=var(--paper)、枠=地と同じvar(--ink)(塗りと
+// 一体の「塗りつぶされた四角」に見えるようにする)。ホバー時はvar(--accent)に切り替え、
+// クリックできることを伝える。
+// 【実機フィードバックによる修正、経緯は下記大きなコメント(3018行付近)参照】以前は
+// 地にvar(--ink-sub)を使っていたが、night等一部テーマで記号が読みにくいという指摘を
+// 受けて調べたところ、「記号色(--paper)と地色(--ink-sub)自身のコントラスト比」が
+// 一部テーマでWCAG AA(4.5:1)未満だった(--ink-subは元々「本文上の控えめな補助文字」
+// 用に低めにチューニングされた変数のため)。9テーマ全てで5.6:1以上を確保できる
+// var(--ink)に地・枠を差し替えた。実測は.verify-codefold.mjs (T)節(地色vs周囲の
+// 背景)・(Z)節(記号色vs地色、今回追加)参照。
 const foldOpenMarkerTheme = EditorView.theme({
   // アンカー: 幅0・高さは実測px(JSで焼き込む)のinline-block。テキストの流し込み位置を
   // 一切動かさない(依頼「本文の文字と重ならないこと」への対応)。
@@ -3698,9 +3717,9 @@ const foldOpenMarkerTheme = EditorView.theme({
     fontWeight: "800",
     fontFamily: "var(--font-mono, ui-monospace, monospace)",
     color: "var(--paper)",
-    border: "1.5px solid var(--ink-sub)",
+    border: "1.5px solid var(--ink)",
     borderRadius: "3px",
-    backgroundColor: "var(--ink-sub)",
+    backgroundColor: "var(--ink)",
     userSelect: "none",
     cursor: "pointer",
     zIndex: "2", // インデントガイド・本文より前面に出す(重なっても読める順序)
@@ -3902,8 +3921,8 @@ const guideLineTheme = EditorView.theme({
   },
   // 依頼⑤: マーカーホバー中、対応する範囲の縦線だけを強調する。新設した
   // --fold-guide-hover(9テーマごとに個別実測、src/themes.css参照)を使う。マーカー自体の
-  // 既存のhover配色(var(--ink-sub)→var(--accent))と揃えることで、「マーカーと同じ色に
-  // 変わった線がその範囲」と直感的に対応づけられるようにした。
+  // 既存のhover配色(通常時var(--ink)→ホバー時var(--accent))と揃えることで、「マーカーと
+  // 同じ色に変わった線がその範囲」と直感的に対応づけられるようにした。
   ".cm-guide-line.cm-guide-hot": {
     backgroundColor: "var(--fold-guide-hover)",
   },
