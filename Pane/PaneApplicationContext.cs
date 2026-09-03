@@ -188,7 +188,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
         {
             if (!_settings.RecoverUnsavedDrafts)
             {
-                Logger.Write($"復元確認をスキップ(recoverUnsavedDrafts=false): スナップショットを破棄: {snapshot.OriginalPath ?? "無題のドキュメント"}");
+                Logger.Write($"復元確認をスキップ(recoverUnsavedDrafts=false): スナップショットを破棄: {(snapshot.OriginalPath is null ? "無題のドキュメント" : PrivacyLogFormatter.ShortenPath(snapshot.OriginalPath))}");
                 AutoSaveService.DeleteSnapshot(windowId);
                 continue;
             }
@@ -204,13 +204,33 @@ internal sealed class PaneApplicationContext : ApplicationContext
 
             if (choice == DialogResult.Yes)
             {
-                OpenWindow(snapshot.OriginalPath, snapshot, forceActivate: forceActivate);
+                // 【不具合修正】以前はここで単にOpenWindow(...)するだけで、下のDeleteSnapshot(windowId)
+                // (旧WindowIdのスナップショット削除)を「はい」「いいえ」どちらでも無条件に実行していた。
+                // コメントには「はいの場合は復元後のウィンドウが新しいGuidで新規に書き直す」とあったが、
+                // 実際には次の自動保存Tick(既定30秒後)まで新ウィンドウ側は何も書いておらず、
+                // 「旧スナップショットは既に消えた・新スナップショットはまだ無い」という空白ができていた。
+                // 復元ダイアログで「はい」を選んだ直後(このアプリがいちばん不安定な瞬間、
+                // WebView2の初期化に失敗して"ready"が来ない場合も含む)にもう一度落ちると、
+                // その空白の間は未保存内容がどこにも残っておらず完全に失われる
+                // (.review-behavior.md「復元「はい」直後に元スナップショットを消すため、
+                // データが失われうる」参照)。
+                //
+                // 対策: 新しいウィンドウのWindowIdをここで先に確定させ、その下へ復元内容の
+                // コピーを書いてから(この時点で新旧2つの場所に同じ内容がある)、旧ファイルを
+                // 削除する。OpenWindow側にはそのWindowIdをそのまま使わせる
+                // (MainForm(windowId:...)、"ready"が届いてWebView2の準備が整うのを待たずに
+                // 済むため、WebView2の初期化自体が失敗するケースも救える)。
+                // MainForm.RestoreFromSnapshot側でも"ready"受信時に同じ内容を書き直しており
+                // (SavedAtUtcの更新を兼ねる)、そちらは二重の安全策として残してある。
+                Guid newWindowId = Guid.NewGuid();
+                AutoSaveService.WriteSnapshot(newWindowId, snapshot with { SavedAtUtc = DateTime.UtcNow });
+                OpenWindow(snapshot.OriginalPath, snapshot, forceActivate: forceActivate, windowId: newWindowId);
                 openedAny = true;
                 if (snapshot.OriginalPath is not null) openedPaths.Add(snapshot.OriginalPath);
             }
             // 復元元の古いスナップショットファイルは、いいえの場合はここで、
-            // はいの場合は復元後のウィンドウが新しいGuidで新規に書き直すか、
-            // 次回の明示保存成功時に削除されるため、ここで明示的に消す。
+            // はいの場合は新しいWindowId側へ既にコピーを書き終えた後にここで、それぞれ消す
+            // (はいの場合にここを先に実行してしまうと、上の空白がそのまま復活してしまう)。
             AutoSaveService.DeleteSnapshot(windowId);
         }
 
@@ -244,14 +264,15 @@ internal sealed class PaneApplicationContext : ApplicationContext
             string? folder = _settings.StartupFolderPath;
             if (!string.IsNullOrWhiteSpace(folder) && Directory.Exists(folder))
             {
-                Logger.Write($"起動時のカスタムフォルダを読み込む: {folder}");
+                Logger.Write($"起動時のカスタムフォルダを読み込む: {PrivacyLogFormatter.ShortenPath(folder)}");
+                Logger.Debug($"起動時のカスタムフォルダ(フルパス): {folder}");
                 OpenWindow(null, initialFolderPath: folder, forceActivate: forceActivate);
                 openedAny = true;
             }
             else
             {
                 // 指定フォルダが存在しない場合は空文書で起動する(下の!openedAnyフォールバックへ)。
-                Logger.Write($"起動時のカスタムフォルダが存在しないため空文書で起動する: {folder ?? "(未設定)"}");
+                Logger.Write($"起動時のカスタムフォルダが存在しないため空文書で起動する: {(folder is null ? "(未設定)" : PrivacyLogFormatter.ShortenPath(folder))}");
             }
         }
 
@@ -277,7 +298,13 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// フォアグラウンド権を持たないことがあり(不具合修正: エクスプローラからファイルを
     /// 開いたときにPaneのウィンドウが前面に来ないことがある対策)、通常起動(自プロセスが
     /// ユーザー操作で起動されフォアグラウンド権を持つ)では余計な副作用を避けるため既定はfalse。</param>
-    public void OpenWindow(string? path, AutoSaveSnapshot? recoverFrom = null, DroppedFileContent? droppedFile = null, string? initialFolderPath = null, bool forceActivate = false)
+    public void OpenWindow(
+        string? path,
+        AutoSaveSnapshot? recoverFrom = null,
+        DroppedFileContent? droppedFile = null,
+        string? initialFolderPath = null,
+        bool forceActivate = false,
+        Guid? windowId = null)
     {
         // コマンドライン引数・多重起動時のパイプ経由でフォルダのパスが渡された場合
         // (仕様書 F-14: `Pane.exe <folder>`)。pathをそのままファイルとして読もうとすると
@@ -286,7 +313,8 @@ internal sealed class PaneApplicationContext : ApplicationContext
         // であることが確定している)はこの判定の対象外にする。
         if (path is not null && recoverFrom is null && droppedFile is null && initialFolderPath is null && Directory.Exists(path))
         {
-            Logger.Write($"OpenWindow: 起動引数がフォルダのためフォルダとして開く: {path}");
+            Logger.Write($"OpenWindow: 起動引数がフォルダのためフォルダとして開く: {PrivacyLogFormatter.ShortenPath(path)}");
+            Logger.Debug($"OpenWindow(フルパス): {path}");
             OpenWindow(null, initialFolderPath: path, forceActivate: forceActivate);
             return;
         }
@@ -313,7 +341,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
             // 重い初期化は無い)。新しいウィンドウを作る経路のほうは、実際に画面へ出るまでを
             // MainForm.ReadyToUse で測っている。
             PerfWatch.Report("既存ウィンドウへのタブ追加", tabStopwatch.ElapsedMilliseconds, 300);
-            Logger.Write($"[計測] 既存ウィンドウへ新しいタブとして開いた: {tabStopwatch.ElapsedMilliseconds}ms (目標300ms以内, path={path ?? "(なし)"})");
+            Logger.Write($"[計測] 既存ウィンドウへ新しいタブとして開いた: {tabStopwatch.ElapsedMilliseconds}ms (目標300ms以内, path={(path is null ? "(なし)" : PrivacyLogFormatter.ShortenPath(path))})");
             return;
         }
 
@@ -338,7 +366,8 @@ internal sealed class PaneApplicationContext : ApplicationContext
             droppedFile: droppedFile,
             initialFolderPath: initialFolderPath,
             hasUnsavedDocuments: HasUnsavedDocuments,
-            shutdownForUpdate: ShutdownForUpdate);
+            shutdownForUpdate: ShutdownForUpdate,
+            windowId: windowId);
 
         int width = _settings.WindowWidth ?? DefaultWidth;
         int height = _settings.WindowHeight ?? DefaultHeight;
@@ -553,7 +582,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
         if (_initialOpenPending)
         {
             _initialOpenPending = false;
-            Logger.Write($"preload: 最初のウィンドウ要求を受信(path={path ?? "(なし)"})。復元確認・セッション復元を行う");
+            Logger.Write($"preload: 最初のウィンドウ要求を受信(path={(path is null ? "(なし)" : PrivacyLogFormatter.ShortenPath(path))})。復元確認・セッション復元を行う");
             RunRecoveryAndInitialOpen(path, forceActivate: true);
             // ログオン直後の待機中は見送っていた更新確認を、ここから改めて動かす
             // (StartStartupUpdateCheckTimerのコメント参照)。

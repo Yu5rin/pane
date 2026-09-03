@@ -3,6 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- 文書中の`https://`画像・iframeは表示のためその場でURLへ読み込みリクエストが発生する
+     (仕様上の割り切り。docs/仕様書.md「オンライン画像のローカル保存」非対応の項、
+     docs/取扱説明書.md「外部通信について」参照)。既定のままだとRefererヘッダーに
+     このアプリのオリジン(https://pane.local/)が付き、参照先へ「Paneで開かれたこと」が
+     伝わってしまう(.review-security.md C-5)。Refererを一切送らないことで、その分だけでも
+     参照先が得られる情報を減らす。 -->
+<meta name="referrer" content="no-referrer">
 <title>Pane</title>
 <link rel="icon" type="image/svg+xml" href="icon.svg">
 <script>

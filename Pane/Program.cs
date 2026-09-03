@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Linq;
 using System.Text;
 
 namespace Pane;
@@ -22,7 +23,11 @@ internal static class Program
         // 自分の起動行を書く前に、前回の起動で警告・エラーが出ていなかったかを読み返す
         // (書いた後だと集計範囲が自分自身になってしまう。StartupLogReview参照)。
         StartupLogReview.ReviewPreviousRun();
-        Logger.Write($"=== Pane起動 args=[{string.Join(",", args)}] ===");
+        // argsには関連付け起動・D&D起動時のファイルの絶対パスがそのまま入る
+        // (.review-security.md B対応。理由はPrivacyLogFormatter参照)。既定ログでは
+        // ファイル名だけにし、完全なパスは詳細ログ(Logger.Debug)にのみ残す。
+        Logger.Write($"=== Pane起動 args=[{string.Join(",", args.Select(PrivacyLogFormatter.ShortenPath))}] ===");
+        Logger.Debug($"=== Pane起動(フルパス) args=[{string.Join(",", args)}] ===");
         LogProcessStartToMainElapsed();
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
 

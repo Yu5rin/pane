@@ -24,6 +24,10 @@
     -->
     <Compile Include="../Pane/UpdateCheckLogic.cs" Link="取り込み/UpdateCheckLogic.cs" />
     <Compile Include="../Pane/LogReviewLogic.cs" Link="取り込み/LogReviewLogic.cs" />
+    <Compile Include="../Pane/LargeFileGuard.cs" Link="取り込み/LargeFileGuard.cs" />
+    <Compile Include="../Pane/SettingsRecoveryLogic.cs" Link="取り込み/SettingsRecoveryLogic.cs" />
+    <Compile Include="../Pane/ExternalToolLocator.cs" Link="取り込み/ExternalToolLocator.cs" />
+    <Compile Include="../Pane/PrivacyLogFormatter.cs" Link="取り込み/PrivacyLogFormatter.cs" />
   </ItemGroup>
 
   <ItemGroup>

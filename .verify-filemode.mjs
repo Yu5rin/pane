@@ -24,11 +24,12 @@ const ok = (l, c) => console.log(`${c ? "OK  " : "NG  "} ${l}`);
 
 const SAMPLE = "# 見出し\n\n本文です。\n";
 
-async function open(fileName, path) {
-  await page.evaluate(({ fileName, path, text }) => window.__reply({
+async function open(fileName, path, extra = {}) {
+  await page.evaluate(({ fileName, path, text, extra }) => window.__reply({
     type: "file-opened", fileName, path, text,
     encoding: "UTF-8", lineEnding: "CRLF", readOnly: false,
-  }), { fileName, path, text: SAMPLE });
+    ...extra,
+  }), { fileName, path, text: SAMPLE, extra });
   await page.waitForTimeout(500);
 }
 
@@ -120,6 +121,42 @@ await page.waitForTimeout(400);
 const sentG = await page.evaluate(() => window.__sent.filter((m) => m.type === "remember-file-mode"));
 ok(`(g) 自動判定と同じ選択でmode:nullが送られる: ${JSON.stringify(sentG)}`,
   sentG.length === 1 && sentG[0].path === "C:\\work\\sample.js" && sentG[0].mode === null);
+
+// ============================================================
+// (i) 仕様書 第8.3節(不具合修正): C#側がforcePlainMode:trueを付けた大容量ファイルは、
+//     拡張子・per-file記憶(perFileModes)に関わらずプレーンテキストで開く
+// ============================================================
+{
+  // 前段(f)の後片付けで perFileModes/fileModeOverrides は空になっている前提。
+  // まず素の状態(forcePlainMode無し)でsample.mdがMarkdownになることを確認してから、
+  // 同じファイルにforcePlainMode:trueを付けて開き直す。
+  await open("sample.md", "C:\\work\\sample.md");
+  ok(`(i-前提) forcePlainMode無しのsample.mdはMarkdown: ${JSON.stringify(await mode())}`, (await mode()) === "Markdown");
+
+  await open("huge.md", "C:\\work\\huge.md", { forcePlainMode: true });
+  ok(
+    `(i) forcePlainMode:trueの.mdファイルは拡張子に関わらずプレーンテキストになる: ${JSON.stringify(await mode())}`,
+    (await mode()) === "プレーンテキスト(大容量のため自動)",
+  );
+
+  // per-file記憶(このパスは以前手動でmarkdownに固定されている、仕様書 第1章)があっても、
+  // forcePlainModeが優先される。
+  await page.evaluate(() => window.__reply({
+    type: "apply-settings", perFileModes: { "C:\\work\\huge.md": "markdown" },
+  }));
+  await page.waitForTimeout(300);
+  await open("huge.md", "C:\\work\\huge.md", { forcePlainMode: true });
+  ok(
+    `(i) per-file記憶(markdown)よりforcePlainModeが優先されプレーンテキストのまま: ${JSON.stringify(await mode())}`,
+    (await mode()) === "プレーンテキスト(大容量のため自動)",
+  );
+  await page.evaluate(() => window.__reply({ type: "apply-settings", perFileModes: {} }));
+  await page.waitForTimeout(300);
+
+  // forcePlainModeが付いていない普通のファイルに戻すと、ステータスバーの注記も消える。
+  await open("sample.md", "C:\\work\\sample.md");
+  ok(`(i) forcePlainMode無しの文書に戻ると注記も消える: ${JSON.stringify(await mode())}`, (await mode()) === "Markdown");
+}
 
 // (h) ページエラー・コンソールエラーが0件
 ok(`(h) ページエラー・コンソールエラー0件: ${JSON.stringify(errors)}`, errors.length === 0);

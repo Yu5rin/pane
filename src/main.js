@@ -302,6 +302,10 @@ let currentName = "無題";
 // 実際の値はnew-document/file-opened等のメッセージで上書きされる。
 let currentEncoding = "UTF-8";
 let currentLineEnding = "CRLF";
+// 仕様書 第8.3節: 現在の文書が「大容量のためライブプレビューを自動無効化された」ものか
+// (C#側がfile-opened/open-in-tab/tabs-changedで付けてくるforcePlainMode)。
+// updateStatusMode()がステータスバーのモード表示に注記を添えるために参照する。
+let currentForcePlainMode = false;
 // 設定(defaultEncoding/defaultLineEnding)から作った既定ラベル。C#側がencoding/lineEndingを
 // 送ってこなかった場合(new-documentの旧経路・ブラウザ単体検証等)のフォールバックに使う。
 // apply-settings受信のたびに最新化する(未受信の間は上のUTF-8/CRLFのまま)。
@@ -955,7 +959,12 @@ function modeLabel(mode, language) {
 }
 function updateStatusMode() {
   const mode = editor.getMode();
-  statusMode.textContent = modeLabel(mode, editor.getCodeLanguage());
+  let label = modeLabel(mode, editor.getCodeLanguage());
+  // 仕様書 第8.3節: 大容量のため自動的にプレーンテキストへ落とした場合は、利用者が
+  // 「なぜ装飾が無いのか」に気づけるよう理由をステータスバーに添える(取扱説明書
+  // L390「動作を軽くするためライブプレビューを自動的に無効化」の告知)。
+  if (mode === "plain" && currentForcePlainMode) label += "(大容量のため自動)";
+  statusMode.textContent = label;
   applyTooltip(statusMode, tooltipLevel, { state: statusMode.textContent });
   host.classList.toggle("mode-code", mode === "code");
   // 仕様書 第10.3節「本文の最大幅」はMarkdownモードのときだけ適用する(style.css側が
@@ -2159,6 +2168,10 @@ function makeEmptyTab() {
     // 完了を待っている間にタブが切り替わってしまい適用を見送った場合にtrueにする
     // (詳しくはresolveTabFileMode参照)。
     modePending: false,
+    // 仕様書 第8.3節: 10MBを超えるファイルを開いたタブか(C#側MainForm.OpenInNewTabが
+    // ファイルサイズを見て付けてくる。resolveTabFileMode参照)。trueならこのタブは
+    // 拡張子判定・per-file記憶(perFileModes)より優先してplainモードで確定させる。
+    forcePlainMode: false,
   };
 }
 // 不具合3の修正: タブ(tab)のmode/codeLanguageを「本来あるべき値」に確定させる。
@@ -2178,7 +2191,10 @@ function makeEmptyTab() {
 async function resolveTabFileMode(tab) {
   const myGen = ++fileOpenGen;
   tab.modePending = false;
-  await editor.setFileMode(tab.fileName, decideFileMode(tab.path, tab.fileName));
+  // 仕様書 第8.3節(不具合修正): 大容量ファイルはC#側が付けたforcePlainModeを
+  // 拡張子判定より優先する(下記applyFileOpened・decideFileModeのコメントも参照)。
+  const tabMode = tab.forcePlainMode ? "plain" : decideFileMode(tab.path, tab.fileName);
+  await editor.setFileMode(tab.fileName, tabMode);
   if (myGen !== fileOpenGen || activeTabId !== tab.id) {
     tab.modePending = true; // 割り込まれた・非アクティブになった → 未確定のまま次回に持ち越す
     return;
@@ -2205,6 +2221,7 @@ function switchToTab(id, { skipSaveCurrent = false } = {}) {
   setName(next.fileName);
   currentEncoding = next.encoding;
   currentLineEnding = next.lineEnding;
+  currentForcePlainMode = !!next.forcePlainMode; // ステータスバーの注記(updateStatusMode)用
   setReadOnly(next.readOnly);
   // ダーティ判定の基準(computeIsDirty参照)もタブごとに切り替える。next.dirtyは
   // saveActiveTabSnapshotで書き戻された時点の判定結果をそのまま使う(savedDoc/metaDirtyと
@@ -2293,6 +2310,7 @@ function applyDisplayMode(next) {
       lineEnding: currentLineEnding,
       readOnly: isReadOnly,
       dirty: isDirty,
+      forcePlainMode: currentForcePlainMode, // 仕様書 第8.3節。ウィンドウ形式→タブ形式移行でも引き継ぐ
       // 今まさに画面に出している内容の基準(computeIsDirty参照)をそのままタブへ引き継ぐ。
       savedDoc: savedDocRef,
       metaDirty,
@@ -2335,6 +2353,10 @@ async function applyOpenInTab(msg) {
   // これから行うswitchToTab(このタブへの切替)が自動的にresolveTabFileMode()を呼んで
   // くれる(不具合3の修正。詳しくはresolveTabFileMode/switchToTabのコメント参照)。
   tab.modePending = true;
+  // 仕様書 第8.3節(不具合修正): C#側(MainForm.OpenInNewTab)がファイルサイズを見て
+  // 付けてくるフラグ。resolveTabFileMode(上でmodePending:trueにした結果、switchToTabから
+  // 呼ばれる)がこれを見てplainモードを強制する。
+  tab.forcePlainMode = !!msg.forcePlainMode;
   tabs.push(tab);
   switchToTab(tab.id, { skipSaveCurrent: true });
 }
@@ -2361,12 +2383,22 @@ async function applyFileOpened(msg) {
   pushClosedFile(currentPath);
   resetAutoDetectState(); // 文書が変わるので内容からの自動判定の状態(仕様書 第1章の拡張)もリセット
   // 拡張子だけでなく、拡張子ごとの既定モード上書き・ファイル単位の手動記憶も考慮する(仕様書 第1章)。
-  await editor.setFileMode(msg.fileName, decideFileMode(msg.path ?? null, msg.fileName, msg.fileNameIsReal === true));
+  // 仕様書 第8.3節(不具合修正: .review-behavior.md「仕様書8.3『10MB超はライブプレビュー
+  // 自動無効化』が未実装」): C#側(MainForm.OpenFile/OpenDroppedContent)がファイルサイズを
+  // 見てforcePlainMode:trueを付けてきた場合は、拡張子判定・per-file記憶(perFileModes)より
+  // 優先してplainモードで開く。大きなMarkdownファイルでもライブプレビュー(表・Mermaid・
+  // 数式等の装飾)無しの軽いプレーンテキストとして開くことで、全文をCodeMirrorへ渡した瞬間に
+  // UIが固まるのを避ける(手動でView>Markdownへ切り替えることは引き続き可能)。
+  const fileMode = msg.forcePlainMode
+    ? "plain"
+    : decideFileMode(msg.path ?? null, msg.fileName, msg.fileNameIsReal === true);
+  await editor.setFileMode(msg.fileName, fileMode);
   // 不具合4の修正: awaitで待っている間により新しい「開く」要求(file-opened/open-in-tab/
   // new-document)が届いていたら、この呼び出しの結果はもう古い。currentPath/本文/ステータス
   // 表示を書き換えると、新しい要求で既に表示している内容を後から上書きして消してしまう
   // (症状: 後着のファイルが一瞬正しく表示された後、先着していた方の内容に巻き戻る)。
   if (myGen !== fileOpenGen) return;
+  currentForcePlainMode = !!msg.forcePlainMode; // ステータスバーの注記(updateStatusMode)用
   // 「.LOG」の自動追記(仕様書 第3章 N-15、メモ帳互換): 1行目が".LOG"だけのファイルを
   // 開いた直後、末尾へ日時を追記してdirty状態にする。読み取り専用ファイルは対象外
   // (保存できないものをdirty扱いにしても混乱を招くだけのため)。
@@ -2423,6 +2455,7 @@ async function applyNewDocumentLocal(msg) {
   // 無題の新規文書はパス・ファイル名とも無いため、decideFileMode(null, null)は常にmarkdownを返す。
   await editor.setFileMode(null, decideFileMode(null, null));
   if (myGen !== fileOpenGen) return;
+  currentForcePlainMode = false; // 新規文書は大容量ファイルではない
   editor.setDocumentPath(null); // 無題文書には基準フォルダが無い(相対パスの画像は解決できない)
   setEditorValueQuiet("");
   setName("無題");
@@ -2497,7 +2530,7 @@ async function handleHostMessage(msg) {
       if (pendingSaveResolvers.length) {
         const resolvers = pendingSaveResolvers;
         pendingSaveResolvers = [];
-        for (const resolve of resolvers) resolve();
+        for (const resolve of resolvers) resolve(!!msg.ok);
       }
       break;
     case "request-text":
@@ -2517,6 +2550,16 @@ async function handleHostMessage(msg) {
       // 未保存の変更を残したまま閉じる/新規作成する/別ファイルを開く前の保存確認
       // (C#側ConfirmDiscardDirtyAsync)から届く。通常のCtrl+Sと同じ保存フローを使う。
       saveFile(false);
+      break;
+    case "request-save-all-tabs":
+      // 上記"request-save"のタブ形式版(不具合修正)。C#側は_tabInfos.Count > 0のときだけ
+      // こちらを送ってくる。dirtyな全タブを保存し終える(または途中で失敗する)まで待ってから
+      // 結果をまとめて返す("save-result"は個々のタブの保存のたびに飛んでくるため、
+      // 全体の成否とは別の応答種別にしてある)。
+      {
+        const allOk = await saveAllDirtyTabsAndWait();
+        bridge?.postMessage({ type: "save-all-tabs-result", ok: allOk });
+      }
       break;
     case "request-dropped-file-fallback":
       // ファイルD&D(C#側MainForm.HandleOpenDroppedFileByName)がDragEnterで得たフルパスとの
@@ -3058,14 +3101,52 @@ async function fallbackOpenDroppedFile() {
   });
 }
 
-// switchFileFromSidebar()専用: saveFile()を呼び出し、対応する"save-result"が届くまで待つ。
-// saveFile()自体はpostMessageを送るだけで完了を待たない(結果は非同期にhandleHostMessageへ
-// 届く)ため、ここでPromise化して待機できるようにする。
+// switchFileFromSidebar()・saveAllDirtyTabsAndWait()専用: saveFile()を呼び出し、対応する
+// "save-result"が届くまで待つ。saveFile()自体はpostMessageを送るだけで完了を待たない
+// (結果は非同期にhandleHostMessageへ届く)ため、ここでPromise化して待機できるようにする。
+// 保存の成否(msg.ok)をそのままbooleanで返す(呼び出し元のswitchFileFromSidebarは戻り値を
+// 見ないが、saveAllDirtyTabsAndWaitは「名前を付けて保存」ダイアログのキャンセル等で
+// 保存できなかったタブがあれば、そこで全体を打ち切る必要があるため利用する)。
 function saveFileAndWait(forcePicker) {
   return new Promise((resolve) => {
     pendingSaveResolvers.push(resolve);
     saveFile(forcePicker);
   });
+}
+
+// 不具合修正(.review-behavior.md「タブ形式で、アクティブでないタブの未保存内容が
+// 確認されない」): タブ形式でウィンドウを閉じる/更新する前の保存確認(C#側
+// ConfirmDiscardDirtyAsync)は、"request-save"(=saveFile())だとアクティブタブしか
+// 保存しない。非アクティブタブに残っていた未保存の変更は、保存するかを尋ねられることも
+// 保存されることもないまま閉じられ、直前30秒以内の自動保存スナップショットが無ければ
+// そのまま失われていた。
+// C#側が"request-save-all-tabs"を送ってきたとき(_tabInfos.Count > 0、つまりタブ形式で
+// 運用中のとき)はこちらを使い、dirtyな各タブへ順に切り替えながら保存する。
+// 1件でも保存できなかった(名前を付けて保存のダイアログをキャンセルされた等)場合は、
+// その時点でfalseを返して打ち切る(C#側はこれを「保存する」がキャンセルされたものとして
+// 扱い、閉じる/更新する操作自体を中止する)。
+async function saveAllDirtyTabsAndWait() {
+  const originalActiveId = activeTabId;
+  // 保存の途中でtabs配列の中身(タブの並び等)が変わりうるため、対象のidだけ先に確定させる。
+  const dirtyIds = tabs.filter((t) => t.dirty).map((t) => t.id);
+  for (const id of dirtyIds) {
+    const tab = tabs.find((t) => t.id === id);
+    if (!tab || !tab.dirty) continue; // 既に保存済み(このループの前段のsaveFileAndWaitで一緒に確定した等)なら不要
+    if (id !== activeTabId) switchToTab(id);
+    const ok = await saveFileAndWait(false);
+    if (!ok) return false;
+  }
+  // 保存中に切り替えたタブを、確認開始時にアクティブだったタブへ戻す(閉じる操作が
+  // キャンセルされた場合に、ユーザーが見ていた画面のまま続けられるようにするため)。
+  // skipSaveCurrentは付けない: 直前に保存したタブ(いま画面に出ている内容)を、
+  // 切り替え前にsaveActiveTabSnapshotでtabs配列へ書き戻す必要があるため
+  // (付けると、そのタブのfileName/path等がtabs配列上は保存前の値のまま古くなる。
+  // dirtyフラグ自体はsetDirty()が直接同期するため消えるが、名前表示だけ更新されない
+  // 見た目上の不整合が残ってしまう)。
+  if (activeTabId !== originalActiveId && tabs.some((t) => t.id === originalActiveId)) {
+    switchToTab(originalActiveId);
+  }
+  return true;
 }
 
 async function saveFile(forcePicker) {
