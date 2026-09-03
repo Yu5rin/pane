@@ -164,6 +164,23 @@ internal sealed class AppSettings
         set => _sidebarWidthPx = Math.Clamp(value, 180, 600);
     }
 
+    private long _largeFileThresholdBytes = LargeFileGuard.DefaultThresholdBytes;
+
+    /// <summary>
+    /// 大容量ファイルの判定しきい値(バイト単位、仕様書 第8.3節「10MBを超えるファイルは
+    /// ライブプレビューを自動無効化し、プレーンモードで開く」)。既定10MB
+    /// (<see cref="LargeFileGuard.DefaultThresholdBytes"/>)。
+    /// SidebarWidthPx/DisplayModeと同じ隠し設定: 通常はいじる必要が無い技術的な値のため
+    /// 設定画面には出さない。settings.jsonを直接編集すれば変更できる。0以下を指定した場合は
+    /// 既定値へフォールバックする(<see cref="LargeFileGuard.ResolveThresholdBytes"/>参照。
+    /// 0を「無制限」の意味には使わせない)。
+    /// </summary>
+    public long LargeFileThresholdBytes
+    {
+        get => _largeFileThresholdBytes;
+        set => _largeFileThresholdBytes = LargeFileGuard.ResolveThresholdBytes(value);
+    }
+
     /// <summary>最近使ったファイルを記録するか。falseなら<see cref="RecentFiles"/>への追記を止める。既定true。</summary>
     public bool RecordRecentFiles { get; set; } = true;
 

@@ -24,6 +24,8 @@
     -->
     <Compile Include="../Pane/UpdateCheckLogic.cs" Link="取り込み/UpdateCheckLogic.cs" />
     <Compile Include="../Pane/LogReviewLogic.cs" Link="取り込み/LogReviewLogic.cs" />
+    <Compile Include="../Pane/LargeFileGuard.cs" Link="取り込み/LargeFileGuard.cs" />
+    <Compile Include="../Pane/SettingsRecoveryLogic.cs" Link="取り込み/SettingsRecoveryLogic.cs" />
   </ItemGroup>
 
   <ItemGroup>

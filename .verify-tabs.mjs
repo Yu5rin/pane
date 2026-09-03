@@ -299,6 +299,74 @@ await applySettings(page, { displayMode: "tab" });
   await page.evaluate(() => window.__reply({ type: "menu-closed", menu: "__context__" }));
 }
 
+// ============================================================
+// (G2) 不具合修正: "request-save-all-tabs"で、アクティブでないタブの未保存内容も
+//      保存できる(.review-behavior.md「タブ形式で、アクティブでないタブの未保存内容が
+//      確認されない」の直接の原因だった処理。C#側MainForm.ConfirmDiscardDirtyAsyncは
+//      タブ形式のときこちらを送り、非アクティブタブだけを保存し損ねたまま閉じる/更新する
+//      ことがないようにする。src/main.js saveAllDirtyTabsAndWait参照)
+// ============================================================
+{
+  // ここまでの手順で3枚(Second/Third/World、いずれも未保存)になっているはず。
+  const dirtyCountBefore = await page.$$eval(
+    ".tab-item-dirty",
+    (els) => els.filter((e) => e.textContent === "●").length,
+  );
+  ok(`(G2-前提) 3枚とも未保存(●=${dirtyCountBefore})`, dirtyCountBefore === 3);
+
+  const activeBefore = await page.$eval(".tab-item.active", (el) => el.dataset.tabId);
+
+  await clearSent(page);
+  await page.evaluate(() => window.__reply({ type: "request-save-all-tabs" }));
+  await page.waitForTimeout(200);
+
+  // 1件目のタブぶんの保存要求("save")が届くはず(アクティブタブとは限らない。
+  // saveAllDirtyTabsAndWaitはdirtyな全タブを配列順に処理するため)。
+  let saveMsg = await lastMsg(page, "save");
+  ok('(G2) 1件目のタブの保存要求("save")が送られる', !!saveMsg);
+  await clearSent(page);
+  await page.evaluate(() => window.__reply({
+    type: "save-result", ok: true, fileName: "a.md", path: "C:\\work\\a.md", encoding: "UTF-8", lineEnding: "CRLF",
+  }));
+  await page.waitForTimeout(200);
+
+  // 1件目で終わらず、2件目のタブの保存要求も続けて送られる
+  // (アクティブタブだけを保存する従来の"request-save"ではここが送られず、
+  // 非アクティブタブの未保存内容が失われていた)。
+  saveMsg = await lastMsg(page, "save");
+  ok('(G2) 2件目のタブの保存要求も送られる(1件目で終わらない)', !!saveMsg);
+  await clearSent(page);
+  await page.evaluate(() => window.__reply({
+    type: "save-result", ok: true, fileName: "b.md", path: "C:\\work\\b.md", encoding: "UTF-8", lineEnding: "CRLF",
+  }));
+  await page.waitForTimeout(200);
+
+  saveMsg = await lastMsg(page, "save");
+  ok('(G2) 3件目のタブの保存要求も送られる', !!saveMsg);
+  await page.evaluate(() => window.__reply({
+    type: "save-result", ok: true, fileName: "c.md", path: "C:\\work\\c.md", encoding: "UTF-8", lineEnding: "CRLF",
+  }));
+  await page.waitForTimeout(200);
+
+  const allTabsResult = await lastMsg(page, "save-all-tabs-result");
+  ok(
+    `(G2) 全タブの保存完了後、"save-all-tabs-result"(ok:true)がC#へ返る (${JSON.stringify(allTabsResult)})`,
+    allTabsResult?.ok === true,
+  );
+
+  const dirtyCountAfter = await page.$$eval(
+    ".tab-item-dirty",
+    (els) => els.filter((e) => e.textContent === "●").length,
+  );
+  ok(`(G2) 保存後は3枚とも未保存表示が消える(●=${dirtyCountAfter})`, dirtyCountAfter === 0);
+
+  const activeAfter = await page.$eval(".tab-item.active", (el) => el.dataset.tabId);
+  ok(
+    `(G2) 保存前にアクティブだったタブへ戻る(前=${activeBefore}, 後=${activeAfter})`,
+    activeBefore === activeAfter,
+  );
+}
+
 await page.close();
 
 // ============================================================

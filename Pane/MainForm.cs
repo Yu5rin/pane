@@ -172,8 +172,21 @@ internal sealed class MainForm : Form
     private const int PathResolutionCacheTtlMs = 3000;
     private const int PathResolutionCacheMaxEntries = 4096;
 
-    /// <summary>ConfirmDiscardDirtyAsyncの「保存する」選択時、JS側の保存完了(save-result)を待つための待機口。</summary>
+    /// <summary>ConfirmDiscardDirtyAsyncの「保存する」選択時、JS側の保存完了(save-result)を待つための待機口。
+    /// タブ形式(_tabInfos.Count > 0)では使わない(下の_saveAllTabsCompletionSource参照)。</summary>
     private TaskCompletionSource<bool>? _saveCompletionSource;
+
+    /// <summary>
+    /// 不具合修正(.review-behavior.md「タブ形式で、アクティブでないタブの未保存内容が
+    /// 確認されない」): タブ形式でConfirmDiscardDirtyAsyncが「保存する」を選んだ場合、
+    /// JS側(saveAllDirtyTabsAndWait)はdirtyな各タブへ順に切り替えながら個別に
+    /// "save"/"save-result"の往復を繰り返す。そのため_saveCompletionSourceを使うと、
+    /// 1タブ目の保存が終わった時点のCompleteSave(ok)で早期に解決されてしまい、
+    /// 残りのタブの結果を待てない。全タブぶんの結果("save-all-tabs-result")を待つための
+    /// 待機口をこちらへ分けている(HandleSaveRequest→CompleteSave経路には触れさせない)。
+    /// </summary>
+    private TaskCompletionSource<bool>? _saveAllTabsCompletionSource;
+
     /// <summary>ConfirmDiscardDirtyAsyncを通過した後、確認を再表示せずにClose()を通すためのフラグ。</summary>
     private bool _forceClose;
 
@@ -200,12 +213,29 @@ internal sealed class MainForm : Form
     /// <summary><see cref="_titlebarForegroundOverride"/>の読み取り専用公開。用途は上記と同じ。</summary>
     internal string? TitlebarForegroundOverride => _titlebarForegroundOverride;
 
-    /// <summary>自動保存スナップショットの識別子。ウィンドウごとに一意。</summary>
-    public Guid WindowId { get; } = Guid.NewGuid();
+    /// <summary>
+    /// 自動保存スナップショットの識別子。ウィンドウごとに一意。既定は新規採番だが、
+    /// コンストラクタでwindowIdを渡された場合はそれを使う(復元「はい」直後のスナップショット
+    /// 引き継ぎ、<see cref="PaneApplicationContext.RunRecoveryAndInitialOpen"/>参照)。
+    /// </summary>
+    public Guid WindowId { get; }
 
     public string? CurrentPath => _currentPath;
 
-    public bool IsDirty => _isDirty;
+    /// <summary>
+    /// このウィンドウに未保存の変更があるか。閉じる確認(<see cref="ConfirmDiscardDirtyAsync"/>)・
+    /// 更新前チェック(<see cref="PaneApplicationContext.HasUnsavedDocuments"/>)が見る値。
+    ///
+    /// 不具合修正: 以前は<see cref="_isDirty"/>(=アクティブタブだけの状態、
+    /// <see cref="HandleTabsChanged"/>参照)をそのまま返しており、タブ形式で
+    /// 「タブ1を編集→タブ2(未編集)へ切替→ウィンドウを閉じる」とすると、非アクティブな
+    /// タブ1の未保存の変更が一切確認されないまま閉じてしまっていた
+    /// (.review-behavior.md「タブ形式で、アクティブでないタブの未保存内容が確認されない」)。
+    /// タブ形式(_tabInfos.Count > 0)では全タブのDirtyを見る。ウィンドウ形式では
+    /// _tabInfosが空のまま(HandleTabsChangedが一度も呼ばれない)なので、従来どおり
+    /// _isDirty(=このウィンドウの唯一の文書の状態)を返す。
+    /// </summary>
+    public bool IsDirty => _tabInfos.Count > 0 ? _tabInfos.Any(t => t.Dirty) : _isDirty;
 
     /// <summary>
     /// セッション復元(仕様書 N-07)用。タブ形式(第2.10節 C-14)ならこのウィンドウで開いている
@@ -233,8 +263,14 @@ internal sealed class MainForm : Form
         DroppedFileContent? droppedFile = null,
         string? initialFolderPath = null,
         Func<bool>? hasUnsavedDocuments = null,
-        Action? shutdownForUpdate = null)
+        Action? shutdownForUpdate = null,
+        Guid? windowId = null)
     {
+        // 不具合修正: 復元「はい」直後の空白(.review-behavior.md参照)を無くすため、
+        // PaneApplicationContext.RunRecoveryAndInitialOpenが自動保存スナップショットを
+        // 先に書いた先のWindowIdを、この新しいウィンドウ自身のWindowIdとして引き継げるように
+        // している。通常の起動(windowId省略)では従来どおり新規採番する。
+        WindowId = windowId ?? Guid.NewGuid();
         _initialPath = initialPath;
         _initialFolderPath = initialFolderPath;
         _recoverFrom = recoverFrom;
@@ -588,7 +624,7 @@ internal sealed class MainForm : Form
     /// </summary>
     private async Task<bool> ConfirmDiscardDirtyAsync()
     {
-        if (!_isDirty) return true;
+        if (!IsDirty) return true;
 
         DialogResult choice = PaneDialog.Show(
             this,
@@ -602,6 +638,18 @@ internal sealed class MainForm : Form
         if (choice == DialogResult.No) return true;
 
         // 保存する: 本文はJS(CodeMirror)側にしか無いため、保存を要求して完了を待つ。
+        // タブ形式では、アクティブタブだけを保存する"request-save"では非アクティブタブの
+        // 未保存分が保存されないまま残ってしまう(上のIsDirty参照)ため、dirtyな全タブを
+        // 保存する"request-save-all-tabs"を使う(src/main.js saveAllDirtyTabsAndWait)。
+        if (_tabInfos.Count > 0)
+        {
+            _saveAllTabsCompletionSource = new TaskCompletionSource<bool>();
+            PostToWeb(new { type = "request-save-all-tabs" });
+            bool savedAll = await _saveAllTabsCompletionSource.Task;
+            Logger.Write($"ConfirmDiscardDirtyAsync: 全タブ保存結果={savedAll}");
+            return savedAll;
+        }
+
         _saveCompletionSource = new TaskCompletionSource<bool>();
         PostToWeb(new { type = "request-save" });
         bool saved = await _saveCompletionSource.Task;
@@ -1360,6 +1408,15 @@ internal sealed class MainForm : Form
             case "save":
                 HandleSaveRequest(root);
                 break;
+            case "save-all-tabs-result":
+                // ConfirmDiscardDirtyAsyncが"request-save-all-tabs"を送った場合の応答
+                // (src/main.js saveAllDirtyTabsAndWait)。個々のタブの保存自体は"save"/
+                // "save-result"の往復で完結しており、こちらは「dirtyだった全タブの保存が
+                // 最後まで(1件もキャンセル・失敗せずに)終わったか」だけを伝える。
+                TryGetBool(root, "ok", out bool allTabsSaved);
+                _saveAllTabsCompletionSource?.TrySetResult(allTabsSaved);
+                _saveAllTabsCompletionSource = null;
+                break;
             case "set-encoding":
                 // ステータスバーからの明示的な文字コード変更(仕様書 第6.1節)。ここでは
                 // _currentEncodingを更新するだけでファイルへは書き込まない。次回保存
@@ -2030,6 +2087,9 @@ internal sealed class MainForm : Form
             _currentLineEnding = result.LineEnding;
             _hasTrailingNewline = result.HasTrailingNewline;
             _isReadOnly = IsFileReadOnly(path);
+            // 仕様書 第8.3節(不具合修正): 10MBを超えるファイルはライブプレビューを自動無効化し
+            // プレーンモードで開く。判定はLargeFileGuardへ集約してある(理由はそちらのコメント参照)。
+            bool forcePlainMode = IsLargeFile(path);
             SetDirty(false);
             StartWatching(path);
             AddRecentFile(path);
@@ -2042,6 +2102,7 @@ internal sealed class MainForm : Form
                 encoding = TextFileService.EncodingLabel(result.Encoding),
                 lineEnding = TextFileService.LineEndingLabel(result.LineEnding),
                 readOnly = _isReadOnly,
+                forcePlainMode,
             });
             // ファイルを開くと、その親フォルダを自動でサイドバーに読み込む
             // (仕様書 第2.8節「ファイルを開くと、その親フォルダが自動的に読み込まれる」)。
@@ -2093,6 +2154,8 @@ internal sealed class MainForm : Form
         {
             LoadResult result = TextFileService.Load(path);
             bool readOnly = IsFileReadOnly(path);
+            // 仕様書 第8.3節(不具合修正): ウィンドウ形式のOpenFileと同じ判定をタブ形式でも適用する。
+            bool forcePlainMode = IsLargeFile(path);
             AddRecentFile(path);
             PostToWeb(new
             {
@@ -2103,6 +2166,7 @@ internal sealed class MainForm : Form
                 encoding = TextFileService.EncodingLabel(result.Encoding),
                 lineEnding = TextFileService.LineEndingLabel(result.LineEnding),
                 readOnly,
+                forcePlainMode,
             });
             AutoLoadParentFolder(path);
         }
@@ -2545,6 +2609,9 @@ internal sealed class MainForm : Form
         _isReadOnly = false;
         StopWatching();
         SetDirty(false);
+        // 仕様書 第8.3節(不具合修正): ドロップの場合はファイルを再度statする必要が無く、
+        // 既に手元にあるバイト列の長さがそのままファイルサイズになる。
+        bool forcePlainMode = LargeFileGuard.IsLargeFile(bytes.LongLength, SettingsService.Load().LargeFileThresholdBytes);
         PostToWeb(new
         {
             type = "file-opened",
@@ -2559,6 +2626,7 @@ internal sealed class MainForm : Form
             encoding = TextFileService.EncodingLabel(result.Encoding),
             lineEnding = TextFileService.LineEndingLabel(result.LineEnding),
             readOnly = false,
+            forcePlainMode,
         });
     }
 
@@ -2616,6 +2684,16 @@ internal sealed class MainForm : Form
             recovered = true,
         });
         SetDirty(true);
+
+        // 不具合修正(.review-behavior.md「復元「はい」直後に元スナップショットを消すため、
+        // データが失われうる」)の二重目の安全策。本命の修正はPaneApplicationContext.
+        // RunRecoveryAndInitialOpen側(「はい」を選んだ直後、旧スナップショットを消す前に
+        // 新WindowIdへコピーを書く。"ready"がそもそも届かない=WebView2の初期化に失敗する
+        // ケースもそちらで救える)。ここでは、その後さらに時間が経ってから(次の自動保存Tick=
+        // 既定30秒より前に)落ちた場合に備え、"ready"を受け取れてこのメソッドまで来られた
+        // 時点で、SavedAtUtcを更新しつつ改めて書き直しておく(内容は変わらないが、
+        // 「このウィンドウが最後に生存確認できた時刻」を新しくする意味がある)。
+        AutoSaveService.WriteSnapshot(WindowId, snapshot with { SavedAtUtc = DateTime.UtcNow });
     }
 
     private static bool IsFileReadOnly(string path)
@@ -2623,6 +2701,26 @@ internal sealed class MainForm : Form
         try
         {
             return File.GetAttributes(path).HasFlag(FileAttributes.ReadOnly);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 仕様書 第8.3節: pathのファイルサイズが、設定(既定10MB)のしきい値を超えているか。
+    /// 判定そのものは<see cref="LargeFileGuard"/>(依存の無いクラス、Pane.Tests参照)に
+    /// 集約してあり、ここではファイルのstatと設定読み込みだけを行う。
+    /// サイズ取得に失敗した場合(取得中に削除された等)は、開けるかどうか自体は後続の
+    /// TextFileService.Load側の例外処理に任せ、ここでは安全側(大容量ではない)を返す。
+    /// </summary>
+    private static bool IsLargeFile(string path)
+    {
+        try
+        {
+            long thresholdBytes = SettingsService.Load().LargeFileThresholdBytes;
+            return LargeFileGuard.IsLargeFile(new FileInfo(path).Length, thresholdBytes);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
