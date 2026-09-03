@@ -188,7 +188,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
         {
             if (!_settings.RecoverUnsavedDrafts)
             {
-                Logger.Write($"復元確認をスキップ(recoverUnsavedDrafts=false): スナップショットを破棄: {snapshot.OriginalPath ?? "無題のドキュメント"}");
+                Logger.Write($"復元確認をスキップ(recoverUnsavedDrafts=false): スナップショットを破棄: {(snapshot.OriginalPath is null ? "無題のドキュメント" : PrivacyLogFormatter.ShortenPath(snapshot.OriginalPath))}");
                 AutoSaveService.DeleteSnapshot(windowId);
                 continue;
             }
@@ -264,14 +264,15 @@ internal sealed class PaneApplicationContext : ApplicationContext
             string? folder = _settings.StartupFolderPath;
             if (!string.IsNullOrWhiteSpace(folder) && Directory.Exists(folder))
             {
-                Logger.Write($"起動時のカスタムフォルダを読み込む: {folder}");
+                Logger.Write($"起動時のカスタムフォルダを読み込む: {PrivacyLogFormatter.ShortenPath(folder)}");
+                Logger.Debug($"起動時のカスタムフォルダ(フルパス): {folder}");
                 OpenWindow(null, initialFolderPath: folder, forceActivate: forceActivate);
                 openedAny = true;
             }
             else
             {
                 // 指定フォルダが存在しない場合は空文書で起動する(下の!openedAnyフォールバックへ)。
-                Logger.Write($"起動時のカスタムフォルダが存在しないため空文書で起動する: {folder ?? "(未設定)"}");
+                Logger.Write($"起動時のカスタムフォルダが存在しないため空文書で起動する: {(folder is null ? "(未設定)" : PrivacyLogFormatter.ShortenPath(folder))}");
             }
         }
 
@@ -312,7 +313,8 @@ internal sealed class PaneApplicationContext : ApplicationContext
         // であることが確定している)はこの判定の対象外にする。
         if (path is not null && recoverFrom is null && droppedFile is null && initialFolderPath is null && Directory.Exists(path))
         {
-            Logger.Write($"OpenWindow: 起動引数がフォルダのためフォルダとして開く: {path}");
+            Logger.Write($"OpenWindow: 起動引数がフォルダのためフォルダとして開く: {PrivacyLogFormatter.ShortenPath(path)}");
+            Logger.Debug($"OpenWindow(フルパス): {path}");
             OpenWindow(null, initialFolderPath: path, forceActivate: forceActivate);
             return;
         }
@@ -339,7 +341,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
             // 重い初期化は無い)。新しいウィンドウを作る経路のほうは、実際に画面へ出るまでを
             // MainForm.ReadyToUse で測っている。
             PerfWatch.Report("既存ウィンドウへのタブ追加", tabStopwatch.ElapsedMilliseconds, 300);
-            Logger.Write($"[計測] 既存ウィンドウへ新しいタブとして開いた: {tabStopwatch.ElapsedMilliseconds}ms (目標300ms以内, path={path ?? "(なし)"})");
+            Logger.Write($"[計測] 既存ウィンドウへ新しいタブとして開いた: {tabStopwatch.ElapsedMilliseconds}ms (目標300ms以内, path={(path is null ? "(なし)" : PrivacyLogFormatter.ShortenPath(path))})");
             return;
         }
 
@@ -580,7 +582,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
         if (_initialOpenPending)
         {
             _initialOpenPending = false;
-            Logger.Write($"preload: 最初のウィンドウ要求を受信(path={path ?? "(なし)"})。復元確認・セッション復元を行う");
+            Logger.Write($"preload: 最初のウィンドウ要求を受信(path={(path is null ? "(なし)" : PrivacyLogFormatter.ShortenPath(path))})。復元確認・セッション復元を行う");
             RunRecoveryAndInitialOpen(path, forceActivate: true);
             // ログオン直後の待機中は見送っていた更新確認を、ここから改めて動かす
             // (StartStartupUpdateCheckTimerのコメント参照)。

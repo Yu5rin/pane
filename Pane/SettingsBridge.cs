@@ -889,25 +889,41 @@ internal static class SettingsBridge
 
     private static bool? _pandocAvailableCache;
 
-    /// <summary>Pandocの導入有無を検出する(Word/EPUBエクスポートに必要)。プロセス起動1回のみでキャッシュする。</summary>
+    /// <summary>
+    /// Pandocの導入有無を検出する(Word/EPUBエクスポートに必要)。プロセス起動1回のみでキャッシュする。
+    ///
+    /// PATH環境変数に列挙されたフォルダの中だけを<see cref="ExternalToolLocator.ResolveFromPath"/>で
+    /// 自前で探し、見つかった絶対パスでのみ起動する(理由は<see cref="ExternalToolLocator"/>参照)。
+    /// 実行ファイル(Pane.exe)のフォルダやカレントディレクトリに"pandoc.exe"という名前の別ファイルが
+    /// あっても、そこは検索対象に入らないため実行されない。見つからなければ従来どおり
+    /// 「Pandocが無い」扱いにする。
+    /// </summary>
     public static bool DetectPandocAvailable()
     {
         if (_pandocAvailableCache is bool cached) return cached;
         bool available;
         try
         {
-            using var proc = Process.Start(new ProcessStartInfo("pandoc", "--version")
+            string? pandocPath = ExternalToolLocator.ResolveFromPath("pandoc", Environment.GetEnvironmentVariable("PATH"), File.Exists);
+            if (pandocPath is null)
             {
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true,
-            });
-            available = proc is not null && proc.WaitForExit(3000) && proc.ExitCode == 0;
+                available = false; // Pandoc未導入(PATHに無い)
+            }
+            else
+            {
+                using var proc = Process.Start(new ProcessStartInfo(pandocPath, "--version")
+                {
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                });
+                available = proc is not null && proc.WaitForExit(3000) && proc.ExitCode == 0;
+            }
         }
         catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or IOException)
         {
-            available = false; // Pandoc未導入(PATHに無い)
+            available = false; // Pandoc未導入、または起動に失敗
         }
         _pandocAvailableCache = available;
         return available;

@@ -205,7 +205,8 @@ internal static class FolderService
         try
         {
             using var proc = Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
-            Logger.Write($"open-in-default-app: {path}");
+            Logger.Write($"open-in-default-app: {PrivacyLogFormatter.ShortenPathOrUri(path)}");
+            Logger.Debug($"open-in-default-app(完全な形): {path}");
         }
         catch (Exception ex)
         {
@@ -220,7 +221,8 @@ internal static class FolderService
         try
         {
             using var proc = Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{path}\"") { UseShellExecute = true });
-            Logger.Write($"reveal-in-explorer: {path}");
+            Logger.Write($"reveal-in-explorer: {PrivacyLogFormatter.ShortenPath(path)}");
+            Logger.Debug($"reveal-in-explorer(フルパス): {path}");
         }
         catch (Exception ex)
         {
@@ -250,7 +252,8 @@ internal static class FolderService
                 error = "対象が見つかりません。";
                 return false;
             }
-            Logger.Write($"delete-path: ごみ箱へ送った: {path}");
+            Logger.Write($"delete-path: ごみ箱へ送った: {PrivacyLogFormatter.ShortenPath(path)}");
+            Logger.Debug($"delete-path(フルパス): {path}");
             return true;
         }
         catch (Exception ex)
@@ -342,7 +345,8 @@ internal static class FolderService
             if (Directory.Exists(path)) Directory.Move(path, dest);
             else if (File.Exists(path)) File.Move(path, dest);
             else { error = "対象が見つかりません。"; return false; }
-            Logger.Write($"rename-path: {path} → {dest}");
+            Logger.Write($"rename-path: {PrivacyLogFormatter.ShortenPath(path)} → {PrivacyLogFormatter.ShortenPath(dest)}");
+            Logger.Debug($"rename-path(フルパス): {path} → {dest}");
             return true;
         }
         catch (Exception ex)
@@ -364,7 +368,8 @@ internal static class FolderService
             if (File.Exists(dest)) { error = "同名のファイルが既にあります。"; return false; }
             if (Directory.Exists(dest)) { error = "同名のフォルダが既にあります。"; return false; }
             File.WriteAllText(dest, "");
-            Logger.Write($"create-file-in-folder: {dest}");
+            Logger.Write($"create-file-in-folder: {PrivacyLogFormatter.ShortenPath(dest)}");
+            Logger.Debug($"create-file-in-folder(フルパス): {dest}");
             return true;
         }
         catch (Exception ex)

@@ -2027,7 +2027,8 @@ internal sealed class MainForm : Form
             SetDirty(false);
             AutoSaveService.DeleteSnapshot(WindowId);
             StartWatching(targetPath);
-            Logger.Write($"保存成功: {targetPath}");
+            Logger.Write($"保存成功: {PrivacyLogFormatter.ShortenPath(targetPath)}");
+            Logger.Debug($"保存成功(フルパス): {targetPath}");
             CompleteSave(ok: true);
             PostToWeb(new
             {
@@ -2078,7 +2079,8 @@ internal sealed class MainForm : Form
     /// </summary>
     public void OpenFile(string path)
     {
-        Logger.Write($"OpenFile: {path}");
+        Logger.Write($"OpenFile: {PrivacyLogFormatter.ShortenPath(path)}");
+        Logger.Debug($"OpenFile(フルパス): {path}");
         try
         {
             LoadResult result = TextFileService.Load(path);
@@ -2149,7 +2151,8 @@ internal sealed class MainForm : Form
             return;
         }
 
-        Logger.Write($"OpenInNewTab: {path}");
+        Logger.Write($"OpenInNewTab: {PrivacyLogFormatter.ShortenPath(path)}");
+        Logger.Debug($"OpenInNewTab(フルパス): {path}");
         try
         {
             LoadResult result = TextFileService.Load(path);
@@ -2353,7 +2356,8 @@ internal sealed class MainForm : Form
     /// </summary>
     private async Task LoadFolderAsync(string path, bool autoLoaded = false)
     {
-        Logger.Write($"LoadFolderAsync開始: {path}, autoLoaded={autoLoaded}");
+        Logger.Write($"LoadFolderAsync開始: {PrivacyLogFormatter.ShortenPath(path)}, autoLoaded={autoLoaded}");
+        Logger.Debug($"LoadFolderAsync開始(フルパス): {path}");
         // 走査中に別のフォルダ読み込みが始まった場合、前のCTSはCancelするだけでなく
         // ここでDisposeまで行う(不具合修正: 従来はCancelのみで、置き換えられた前のCTSが
         // 誰にもDisposeされないまま残っていた)。
@@ -2372,7 +2376,8 @@ internal sealed class MainForm : Form
             if (cts.IsCancellationRequested) return;
 
             _loadedFolderRootPath = result.RootPath;
-            Logger.Write($"LoadFolderAsync完了: {result.RootPath}, 件数={result.Entries.Count}, truncated={result.Truncated}");
+            Logger.Write($"LoadFolderAsync完了: {PrivacyLogFormatter.ShortenPath(result.RootPath)}, 件数={result.Entries.Count}, truncated={result.Truncated}");
+            Logger.Debug($"LoadFolderAsync完了(フルパス): {result.RootPath}");
             PostToWeb(new
             {
                 type = "folder-loaded",
@@ -2392,7 +2397,7 @@ internal sealed class MainForm : Form
         catch (OperationCanceledException)
         {
             // 後続のフォルダ読み込みに置き換えられた場合の正常なキャンセル。何もしない。
-            Logger.Write($"LoadFolderAsync: キャンセルされた: {path}");
+            Logger.Write($"LoadFolderAsync: キャンセルされた: {PrivacyLogFormatter.ShortenPath(path)}");
         }
         catch (Exception ex)
         {
@@ -2454,7 +2459,11 @@ internal sealed class MainForm : Form
         previousSearchCts?.Dispose();
         string rootPath = _loadedFolderRootPath;
         var query = new SearchQuery(queryText, caseSensitive, regexp, wholeWord);
-        Logger.Write($"global-search開始: root={rootPath}, text=\"{queryText}\", caseSensitive={caseSensitive}, regexp={regexp}, wholeWord={wholeWord}");
+        // 検索語そのものはログへ書かない(.review-security.md B「検索語がログに残る」対応)。
+        // ログは%LOCALAPPDATA%\Pane\に残り、利用者が開発者へ送る運用があるため、
+        // 人名・パスワード等が入りうる検索語を平文で残さない。再現に要る情報は文字数と
+        // フラグ類だけで足りるため、それだけを記録する。
+        Logger.Write($"global-search開始: root={rootPath}, textLength={queryText.Length}, caseSensitive={caseSensitive}, regexp={regexp}, wholeWord={wholeWord}");
 
         _ = RunGlobalSearchAsync(rootPath, query, cts);
     }
@@ -4048,11 +4057,16 @@ internal sealed class MainForm : Form
 
     private static async Task ExportViaPandocAsync(string markdownText, string targetPath)
     {
+        // DetectPandocAvailableと同じくPATHの中だけを自前で探す(実行ファイルのフォルダや
+        // カレントディレクトリの"pandoc.exe"が先に実行されるのを防ぐ。理由はExternalToolLocator参照)。
+        string? pandocPath = ExternalToolLocator.ResolveFromPath("pandoc", Environment.GetEnvironmentVariable("PATH"), File.Exists);
+        if (pandocPath is null) throw new InvalidOperationException("Pandocが見つかりませんでした。");
+
         string tempMd = Path.Combine(Path.GetTempPath(), $"pane-export-{Guid.NewGuid():N}.md");
         try
         {
             await File.WriteAllTextAsync(tempMd, markdownText, new UTF8Encoding(false));
-            var psi = new ProcessStartInfo("pandoc")
+            var psi = new ProcessStartInfo(pandocPath)
             {
                 UseShellExecute = false,
                 RedirectStandardError = true,
