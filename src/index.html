@@ -43,7 +43,12 @@
   /* overflow: hidden は、幅が狭くて全項目が収まらないとき(main.js側のResizeObserverが
      優先度の低い項目から短縮・非表示にする前の一瞬や、フォント環境差などで再計算が
      間に合わなかった場合の保険)にstatusbarの外へはみ出させないための保険。 */
-  #statusbar { display: flex; gap: 16px; padding: 0 10px; height: 24px; align-items: center; border-top: 1px solid var(--rule); font-size: 11px; color: var(--ink-mute); flex: none; font-family: var(--font-mono); overflow: hidden; background: var(--chrome-bg); }
+  /* UI点検(.review-ui.md 指摘3)の修正: 文字色は従来var(--ink-mute)(本文の--paper上で
+     調整された補助文字色)を直接使っていたが、背景のvar(--chrome-bg)は「本文より濃い」
+     という別の設計方針の色(src/style.css :rootブロックのコメント参照)のため、5テーマ
+     (既定ライト/sepia/solarized-light/solarized-dark/night)でAA(4.5:1)未満だった。
+     バー専用の文字色var(--chrome-fg)(src/style.css・src/themes.css)に差し替える。 */
+  #statusbar { display: flex; gap: 16px; padding: 0 10px; height: 24px; align-items: center; border-top: 1px solid var(--rule); font-size: 11px; color: var(--chrome-fg); flex: none; font-family: var(--font-mono); overflow: hidden; background: var(--chrome-bg); }
   /* 実機不具合の修正: 幅を狭めたとき各項目が縮んでテキストが1〜2文字ずつ折り返し、
      height:24pxを超えて縦に伸び、本文エリアに被っていた。原因はflex-shrinkが既定値の
      ままで、white-space:nowrapも無かったこと。nowrap+flex:noneで「そもそも縮んで

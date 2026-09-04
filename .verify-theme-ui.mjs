@@ -28,6 +28,14 @@
 //       優先度の低い項目から順に隠れる、幅を戻すと再表示される、常に残す項目は残る
 //   (E) 設定画面のフォーカストラップ(Tab10回で外へ出ない・閉じたら元の要素へ戻る)
 //   (F) コマンドパレットのフォーカストラップ(同様)
+//   (G) UI点検(.review-ui.md 指摘1・2・3・6・17)の修正確認: var(--accent)を文字色や
+//       (明るい文字を乗せる)背景色として使っていた箇所のコントラスト不足、および
+//       ステータスバー(var(--ink-mute) on var(--chrome-bg))のコントラスト不足。
+//       9テーマすべてで、新設した--accent-ink/--chrome-fgがWCAG AA(4.5:1、いずれも
+//       18.66px未満の小さい文字のため通常文字の基準を適用)を満たすことを、
+//       (a)CSS変数の実測値そのもの、(b)実際にレンダリングされたDOM要素の
+//       computed style、の両方で確認する。
+//       .fix-contrast.mdに、修正前に実際にNGになることを確認した記録がある。
 import pw from "playwright";
 const { chromium } = pw;
 
@@ -344,6 +352,163 @@ function setPreset(page, { theme, lightTheme = "default", darkTheme = "default" 
   await page.waitForTimeout(200);
   ok("(F) コマンドパレットが閉じる", (await page.$(".palette-overlay")) === null);
   ok("(F) 閉じたあと元の要素(ヘルプボタン)へフォーカスが戻る", await page.evaluate(() => document.activeElement.id === "btn-menu-help"));
+  await page.close();
+}
+
+// ============================================================
+// (G) UI点検 指摘1・2・3・6・17: --accent-ink / --chrome-fg のコントラスト確認
+// ============================================================
+// WCAG相対輝度・コントラスト比の計算(.verify-codefold.mjs (Z)節と同じ式)。
+function relLum(colorStr) {
+  // 未定義のCSS変数(トークンを導入する前のコードを検証するときなど)を解決しようとすると
+  // resolveVarColor/probeVar側が空文字列相当(null)を返すことがあるため、ここで弾く
+  // (弾かないとcolorStr.matchで例外になり、後続のテストが実行されないまま落ちてしまう)。
+  if (!colorStr) return null;
+  // color-mix()の解決結果はブラウザによって"color(srgb r g b)"形式(0-1)で
+  // 返ることがある(rgb()の0-255表記とは別形式なので、両対応させる)。
+  const cm = colorStr.match(/color\(srgb\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/);
+  let vals;
+  if (cm) vals = [1, 2, 3].map((i) => parseFloat(cm[i]));
+  else {
+    const m = colorStr.match(/rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)/);
+    if (!m) return null;
+    vals = [1, 2, 3].map((i) => parseFloat(m[i]) / 255);
+  }
+  const [r, g, b] = vals.map((v) => (v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+function contrastRatio(a, b) {
+  const L1 = relLum(a), L2 = relLum(b);
+  if (L1 == null || L2 == null) return null;
+  const [hi, lo] = L1 > L2 ? [L1, L2] : [L2, L1];
+  return (hi + 0.05) / (lo + 0.05);
+}
+const GTHEMES = [
+  { label: "default-light", theme: "light", lightTheme: "default", darkTheme: "default" },
+  { label: "default-dark", theme: "dark", lightTheme: "default", darkTheme: "default" },
+  { label: "sepia", theme: "light", lightTheme: "sepia", darkTheme: "default" },
+  { label: "github", theme: "light", lightTheme: "github", darkTheme: "default" },
+  { label: "solarized-light", theme: "light", lightTheme: "solarized-light", darkTheme: "default" },
+  { label: "nord", theme: "dark", lightTheme: "default", darkTheme: "nord" },
+  { label: "dracula", theme: "dark", lightTheme: "default", darkTheme: "dracula" },
+  { label: "solarized-dark", theme: "dark", lightTheme: "default", darkTheme: "solarized-dark" },
+  { label: "night", theme: "dark", lightTheme: "default", darkTheme: "night" },
+];
+const AA_NORMAL = 4.5; // 対象はいずれも18.66px未満の小さい文字のため、大きな文字用の3.0ではなく通常文字の基準を使う
+
+// ---- (G-1) --accent-ink / --chrome-fg というCSS変数自体の実測値 ----
+// var(--accent)を文字色に使っていた箇所は、乗る背景がvar(--paper)(本文中のリンク・
+// 脚注番号等)/var(--surface)(メニュー・パレット等の浮遊パネル)/var(--accent-soft)
+// (サイドバーの選択行・設定の選択中カテゴリ等)のいずれかで、かつvar(--accent)を
+// 背景にして明るい文字(var(--surface)/var(--paper))を乗せるボタン類
+// (.pane-dialog-btn-primary等)も存在する。コントラスト比はA vs BもB vs Aも同じ値
+// (WCAGの計算式は対称)なので、--accent-ink自体がこの3つの背景いずれに対しても
+// 4.5以上であることを確認すれば、上記の「文字として使う」「背景にして明るい文字を
+// 乗せる」の両方向を一括して保証できる。
+{
+  const page = await newPlainPage();
+  for (const th of GTHEMES) {
+    await setPreset(page, th);
+    const accentInk = await resolveVarColor(page, "--accent-ink");
+    const paper = await resolveVarColor(page, "--paper");
+    const surface = await resolveVarColor(page, "--surface");
+    const accentSoft = await resolveVarColor(page, "--accent-soft");
+    const chromeFg = await resolveVarColor(page, "--chrome-fg");
+    const chromeBg = await resolveVarColor(page, "--chrome-bg");
+    const rPaper = contrastRatio(accentInk, paper);
+    const rSurface = contrastRatio(accentInk, surface);
+    const rSoft = contrastRatio(accentInk, accentSoft);
+    const rChrome = contrastRatio(chromeFg, chromeBg);
+    ok(`(G-1) ${th.label}: --accent-ink vs --paper >= 4.5 (実測${rPaper?.toFixed(2)})`, rPaper >= AA_NORMAL);
+    ok(`(G-1) ${th.label}: --accent-ink vs --surface >= 4.5 (実測${rSurface?.toFixed(2)})`, rSurface >= AA_NORMAL);
+    ok(`(G-1) ${th.label}: --accent-ink vs --accent-soft >= 4.5 (実測${rSoft?.toFixed(2)})`, rSoft >= AA_NORMAL);
+    ok(`(G-1) ${th.label}: --chrome-fg vs --chrome-bg >= 4.5 (実測${rChrome?.toFixed(2)})`, rChrome >= AA_NORMAL);
+  }
+  await page.close();
+}
+
+// ---- (G-2) 実際にレンダリングされたDOM要素での確認(トークンの配線ミスを検出) ----
+// (G-1)はCSS変数の値そのものを見るだけなので、「トークンは正しく定義したが、
+// 実際のセレクタにvar(--accent-ink)を適用し忘れた」ような取り違えは検出できない。
+// 実際に該当セレクタを画面に出し、getComputedStyleで実測することで配線を確認する。
+{
+  const page = await newBridgedPage();
+  await page.evaluate(() => window.__reply({
+    type: "file-opened", fileName: "contrast.md", path: "C:\\work\\contrast.md",
+    text: "見出し\n\n[リンク文字列](https://example.com)\n\n- 箇条書き項目",
+    encoding: "UTF-8", lineEnding: "CRLF", readOnly: false,
+  }));
+  await page.waitForTimeout(400);
+
+  for (const th of GTHEMES) {
+    await page.evaluate((th) => window.__reply({ type: "apply-settings", ...th }), th);
+    // body { transition: background .2s, color .2s; }(index.html)が効いているため、
+    // 待ちが短いと遷移アニメーションの途中の色を読んでしまい、正しいテーマの色を
+    // 読めない(実際に120msで読んだところ、遷移前後の中間色になり誤ってNGを検出した
+    // ことがある)。0.2sの遷移時間より長い350ms待つ。
+    await page.waitForTimeout(350);
+
+    // .tok-link(本文リンク、指摘17)・.cm-bullet(箇条書き記号、指摘17)がvar(--paper)上で4.5以上
+    const linkInfo = await page.evaluate(() => {
+      const link = document.querySelector(".tok-link");
+      const bullet = document.querySelector(".cm-bullet");
+      const paper = getComputedStyle(document.body).backgroundColor;
+      return { link: link && getComputedStyle(link).color, bullet: bullet && getComputedStyle(bullet).color, paper };
+    });
+    ok(`(G-2) ${th.label}: .tok-link が見つかる`, !!linkInfo.link);
+    ok(`(G-2) ${th.label}: .tok-link の文字色が--paperに対し4.5以上(実測${contrastRatio(linkInfo.link, linkInfo.paper)?.toFixed(2)})`, contrastRatio(linkInfo.link, linkInfo.paper) >= AA_NORMAL);
+    ok(`(G-2) ${th.label}: .cm-bullet が見つかる`, !!linkInfo.bullet);
+    ok(`(G-2) ${th.label}: .cm-bullet の文字色が--paperに対し4.5以上(実測${contrastRatio(linkInfo.bullet, linkInfo.paper)?.toFixed(2)})`, contrastRatio(linkInfo.bullet, linkInfo.paper) >= AA_NORMAL);
+
+    // #statusbar(指摘3)の文字色が実際の背景に対し4.5以上
+    const sb = await page.evaluate(() => {
+      const el = document.getElementById("statusbar");
+      const cs = getComputedStyle(el);
+      return { color: cs.color, background: cs.backgroundColor };
+    });
+    ok(`(G-2) ${th.label}: #statusbar の文字色が実背景に対し4.5以上(実測${contrastRatio(sb.color, sb.background)?.toFixed(2)})`, contrastRatio(sb.color, sb.background) >= AA_NORMAL);
+  }
+  await page.close();
+}
+
+// ---- (G-3) ダイアログの主ボタン(指摘2)・取説検索の現在ヒット(指摘6) ----
+// .pane-dialog-btn-primary(background: var(--accent-ink), color: var(--surface))を
+// gotoLineFlow()(行番号を指定ダイアログ、.verify-dialog.mjsと同じ呼び出し方)で
+// 実際に開いて確認する。取説側(mark.help-search-hit.current)は別ウィンドウ
+// (help-window.html)のため、.verify-help.mjs側の対象外だったこの回帰確認は
+// (G-1)のvar(--accent-ink) vs var(--paper)実測(mark.help-search-hit.currentは
+// background: var(--accent-ink), color: var(--paper)で、コントラスト比は対称の
+// ため同じ値になる)で兼ねる。
+{
+  // window.__paneDebugCtx はブリッジ(window.chrome.webview)が無いときだけmain.js側で
+  // 公開される(src/main.js "if (!bridge) { ... window.__paneDebugCtx = ctx; }"参照)ため、
+  // ここではnewBridgedPageではなくnewPlainPageを使う(.verify-dialog.mjs (B)節と同じ作法)。
+  // テーマ切り替えも、ブリッジ経由のapply-settingsメッセージではなく、setPreset()
+  // ((A)(C)節で使っているdata-theme属性の直接操作)を使う。
+  const page = await newPlainPage();
+  await page.evaluate(() => { window.__paneDebugEditor.setValue("1行目\n2行目\n3行目"); });
+  await page.waitForTimeout(200);
+
+  for (const th of GTHEMES) {
+    await setPreset(page, th);
+    // body { transition: background .2s, color .2s; }(index.html)の遷移時間より長く待つ
+    // (G-2節と同じ理由。詳細は同節のコメント参照)。
+    await page.waitForTimeout(350);
+    await page.evaluate(() => { window.__paneDebugCtx.actions.gotoLineFlow(); });
+    await page.waitForTimeout(200);
+    const info = await page.evaluate(() => {
+      const btn = document.querySelector(".pane-dialog-btn-primary");
+      if (!btn) return null;
+      const cs = getComputedStyle(btn);
+      return { color: cs.color, background: cs.backgroundColor };
+    });
+    ok(`(G-3) ${th.label}: .pane-dialog-btn-primary が見つかる`, !!info);
+    if (info) {
+      ok(`(G-3) ${th.label}: .pane-dialog-btn-primary の文字色が背景に対し4.5以上(実測${contrastRatio(info.color, info.background)?.toFixed(2)})`, contrastRatio(info.color, info.background) >= AA_NORMAL);
+    }
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(150);
+  }
   await page.close();
 }
 

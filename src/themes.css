@@ -87,6 +87,29 @@ html[data-theme="light"][data-light-theme="sepia"] {
      紙色(#F4ECD8)に対しコントラスト比6.51、通常線--rule(#E3D5B8、淡い黄褐色)に対して
      色相・明度ともはっきり異なる(コントラスト比5.29)ため、強調中の線だけが際立って見える。 */
   --fold-guide-hover: #8B3A2B;
+  /* UI点検(.review-ui.md 指摘1・2・6・17)の修正で追加: var(--accent)を文字色として
+     使う箇所(本文リンク・脚注番号・サイドバー選択行・ダイアログ主ボタン等)の
+     コントラスト不足。詳細な経緯・作法はstyle.css :rootブロックの--accent-ink
+     定義部コメント参照。
+     sepiaのvar(--accent)(#A9762C)は実測3.02〜3.58(vs paper/surface/accent-soft)で
+     いずれもAA未満。var(--ink)(#3B2F22、このテーマの本文文字色)へcolor-mix()で
+     寄せて補正するが、境界ぎりぎりの混合率(36%、理論値4.59)では実ブラウザの
+     color-mix()の丸め誤差でAAを僅かに割り込むことがあったため(.verify-theme-ui.mjs
+     (G)節で実際に4.5未満となるケースを検出。丸め誤差の詳細は下の--chrome-fgの
+     コメント参照)、9テーマ共通で最低でも0.3程度の余裕を持たせる方針にし、40%
+     (#7D5A28)を採用する(色相は保ったまま暗くするだけ、CLAUDE.mdの配色制約により
+     新しい色は導入しない)。
+     補正後の実測: vs paper 5.30 / vs surface 5.66 / vs accent-soft 4.76。
+     ボタン背景として使う場合(.btn.primary等、文字は#fff/#0E1513固定)でも
+     vs #fff = 6.0前後で問題ない。 */
+  --accent-ink: color-mix(in srgb, var(--accent) 60%, var(--ink) 40%);
+  /* UI点検 指摘3の修正で追加。var(--ink-mute)(#7A6A55)とvar(--chrome-bg)(#EAD9B5)の
+     実測コントラスト比は3.75でAA未満。var(--ink)へ寄せて補正するが、20%(理論値4.50)
+     では実ブラウザのcolor-mix()の丸め誤差でAAを僅かに割り込むことがあった
+     (.verify-theme-ui.mjs (G)節で実測4.49を検出。ノードのハンド計算(sRGBの単純な
+     線形補間)とブラウザ実装のcolor-mix()とで丸め方が完全には一致しないため、
+     境界値ぎりぎりの混合率は避け余裕を持たせる)。25%寄せる(実測4.71)。 */
+  --chrome-fg: color-mix(in srgb, var(--ink-mute) 75%, var(--ink) 25%);
 }
 
 /* github: GitHub風。白背景+青系アクセント。
@@ -146,6 +169,13 @@ html[data-theme="light"][data-light-theme="github"] {
      白地(#FFFFFF)に対しコントラスト比7.34、通常線--rule(#D0D7DE)に対しても
      はっきり異なる(コントラスト比5.06)ため、リンクと混同せずに強調線だと分かる。 */
   --fold-guide-hover: #6639BA;
+  /* UI点検 指摘1・2・6・17の修正で追加。var(--accent)(#0969DA)はvar(--paper)/
+     var(--surface)/var(--accent-soft)いずれに対しても実測4.5以上(5.19/4.88/4.56)の
+     ためvar(--accent)のまま問題ない。 */
+  --accent-ink: var(--accent);
+  /* UI点検 指摘3の修正で追加。var(--ink-mute)とvar(--chrome-bg)の実測コントラスト比は
+     5.24でAA基準を満たすため、var(--ink-mute)のまま問題ない。 */
+  --chrome-fg: var(--ink-mute);
 }
 
 /* solarized-light: Solarized(Ethan Schoonover配色)のライト側。
@@ -210,6 +240,19 @@ html[data-theme="light"][data-light-theme="solarized-light"] {
      目立つ暖色)。紙色(#FDF6E3)に対しコントラスト比6.71、通常線--rule(#D3CBB7、
      淡い黄褐色)に対してもはっきり異なる(コントラスト比4.48)。 */
   --fold-guide-hover: #A52623;
+  /* UI点検(.review-ui.md 指摘1・2・6・17)の修正で追加。詳細な経緯・作法はstyle.css
+     :rootブロックの--accent-ink定義部コメント参照。
+     solarized-lightのvar(--accent)(#268BD2)は実測3.00〜3.41(vs paper/surface/
+     accent-soft)でいずれもAA未満(9テーマ中もっとも低い部類)。var(--ink)(#073642)へ
+     40%だけcolor-mix()で寄せた#1A6998に補正する(境界ぎりぎりの混合率だと実
+     ブラウザのcolor-mix()の丸め誤差でAAを割り込むことがあるため、sepiaの
+     --accent-ink定義部コメントの経緯を踏まえ余裕を持たせた値)。
+     補正後の実測: vs paper 5.53 / vs surface 4.87 / vs accent-soft 5.11。 */
+  --accent-ink: color-mix(in srgb, var(--accent) 60%, var(--ink) 40%);
+  /* UI点検 指摘3の修正で追加。var(--ink-mute)(#657B83)とvar(--chrome-bg)(#D1CCBB)の
+     実測コントラスト比は2.77で9テーマ中もっとも低い。var(--ink)へ52%だけ寄せた
+     #345761に補正する(実測4.87、丸め誤差への余裕は上の--accent-inkと同じ理由)。 */
+  --chrome-fg: color-mix(in srgb, var(--ink-mute) 48%, var(--ink) 52%);
 }
 
 /* ---- ダーク用プリセット ---- */
@@ -270,6 +313,13 @@ html[data-theme="dark"][data-dark-theme="nord"] {
      コントラスト比8.00、通常線--rule(#434C5E)に対してもはっきり異なる
      (コントラスト比5.52)。 */
   --fold-guide-hover: #EBCB8B;
+  /* UI点検 指摘1・2・6・17の修正で追加。var(--accent)(#88C0D0)はvar(--paper)/
+     var(--surface)/var(--accent-soft)いずれに対しても実測4.5以上(6.24/5.03/4.59)の
+     ためvar(--accent)のまま問題ない。 */
+  --accent-ink: var(--accent);
+  /* UI点検 指摘3の修正で追加。var(--ink-mute)とvar(--chrome-bg)の実測コントラスト比は
+     5.83でAA基準を満たすため、var(--ink-mute)のまま問題ない。 */
+  --chrome-fg: var(--ink-mute);
 }
 
 /* dracula: Dracula配色。
@@ -332,6 +382,18 @@ html[data-theme="dark"][data-dark-theme="dracula"] {
      配色の中でもっとも彩度・輝度が高く、9テーマ中最大のコントラスト比が出る
      (本文#282A36に対し10.38、通常線--rule#44475Aに対しても6.67とはっきり異なる)。 */
   --fold-guide-hover: #50FA7B;
+  /* UI点検(.review-ui.md 指摘1・2・6・17)の修正で追加。詳細な経緯・作法はstyle.css
+     :rootブロックの--accent-ink定義部コメント参照。
+     draculaのvar(--accent)(#BD93F9)はvs paper 5.90 / vs surface 4.89と単体では
+     AAを満たすが、vs accent-soft(#3B3D52)は実測4.41でわずかに未満(サイドバーの
+     選択行等)。白へcolor-mix()で寄せて補正するが、境界ぎりぎりの3%(理論値4.53)は
+     実ブラウザのcolor-mix()の丸め誤差でAAを割り込むことがあるため(sepiaの
+     --accent-ink定義部コメント参照)、8%(#C29CF9)に補正する(色の変化はわずか)。
+     補正後の実測: vs paper 6.39 / vs surface 5.29 / vs accent-soft 4.77。 */
+  --accent-ink: color-mix(in srgb, var(--accent) 92%, white 8%);
+  /* UI点検 指摘3の修正で追加。var(--ink-mute)とvar(--chrome-bg)の実測コントラスト比は
+     5.48でAA基準を満たすため、var(--ink-mute)のまま問題ない。 */
+  --chrome-fg: var(--ink-mute);
 }
 
 /* solarized-dark: Solarizedのダーク側。
@@ -398,6 +460,20 @@ html[data-theme="dark"][data-dark-theme="solarized-dark"] {
      暗さ補正と対になる「ダーク側は明るさ補正」)を採用する。本文に対しコントラスト比
      6.85、通常線--rule(#0A3C4A)に対してもはっきり異なる(コントラスト比5.45)。 */
   --fold-guide-hover: #F092C0;
+  /* UI点検(.review-ui.md 指摘1・2・6・17)の修正で追加。詳細な経緯・作法はstyle.css
+     :rootブロックの--accent-ink定義部コメント参照。
+     solarized-darkのvar(--accent)(#268BD2)は実測2.61〜4.08(vs paper/surface/
+     accent-soft)でいずれもAA未満(9テーマ中もっとも厳しい。特にvs accent-soft 2.61は
+     最低値)。上のvar(--menu-hover-fg)と同じ理由(暗背景でvar(--ink)(#93A1A1)へ
+     寄せても3.59までしか出ない)で、白へcolor-mix()で寄せて補正するが、境界ぎりぎりの
+     混合率だと実ブラウザのcolor-mix()の丸め誤差でAAを割り込むことがあるため(sepiaの
+     --accent-ink定義部コメント参照)、45%(#88BFE6)に補正する。
+     補正後の実測: vs paper 7.61 / vs surface 6.59 / vs accent-soft 4.87。 */
+  --accent-ink: color-mix(in srgb, var(--accent) 55%, white 45%);
+  /* UI点検 指摘3の修正で追加。var(--ink-mute)(#586E75)とvar(--chrome-bg)(#00252E)の
+     実測コントラスト比は2.99で9テーマ中もっとも低い部類。白へ25%だけ寄せた#829298に
+     補正する(実測5.00、丸め誤差への余裕は上の--accent-inkと同じ理由)。 */
+  --chrome-fg: color-mix(in srgb, var(--ink-mute) 75%, white 25%);
 }
 
 /* night: Typoraの「Night」テーマ移植(ユーザー要望、id/ラベルは実機フィードバックで
@@ -569,4 +645,14 @@ html[data-theme="dark"][data-dark-theme="night"] {
      採用する。本文(#363B40)に対しコントラスト比7.22、通常線--rule(#555555、
      中間グレー)に対してもはっきり異なる(コントラスト比4.76)。 */
   --fold-guide-hover: #E4CC9A;
+  /* UI点検 指摘1・2・6・17の修正で追加。var(--accent)(#6dc1e7)はvar(--paper)/
+     var(--surface)/var(--accent-soft)いずれに対しても実測4.5以上(5.62/6.57/4.66)の
+     ためvar(--accent)のまま問題ない。 */
+  --accent-ink: var(--accent);
+  /* UI点検 指摘3の修正で追加。var(--ink-mute)(#6A7280)とvar(--chrome-bg)(#26282B)の
+     実測コントラスト比は3.05でAA未満。var(--ink)(#b8bfc6)へcolor-mix()で寄せて
+     補正するが、境界ぎりぎりの混合率だと実ブラウザのcolor-mix()の丸め誤差でAAを
+     割り込むことがあるため(sepiaの--accent-ink定義部コメント参照)、45%(#8D95A0)に
+     補正する(実測4.88)。 */
+  --chrome-fg: color-mix(in srgb, var(--ink-mute) 55%, var(--ink) 45%);
 }
