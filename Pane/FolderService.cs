@@ -259,7 +259,9 @@ internal static class FolderService
         catch (Exception ex)
         {
             Logger.WriteException($"delete-path失敗: {path}", ex);
-            error = ex.Message;
+            // 総点検 指摘16: ex.Messageを生のまま返すと、英語の.NET例外メッセージやパスが
+            // そのまま利用者に見える。詳細はすぐ上のLogger.WriteExceptionへ残っている。
+            error = ExceptionMessages.Describe(ex);
             return false;
         }
     }
@@ -352,7 +354,9 @@ internal static class FolderService
         catch (Exception ex)
         {
             Logger.WriteException($"rename-path失敗: {path} → {newName}", ex);
-            error = ex.Message;
+            // 総点検 指摘16: ex.Messageを生のまま返すと、英語の.NET例外メッセージやパスが
+            // そのまま利用者に見える。詳細はすぐ上のLogger.WriteExceptionへ残っている。
+            error = ExceptionMessages.Describe(ex);
             return false;
         }
     }
@@ -375,7 +379,9 @@ internal static class FolderService
         catch (Exception ex)
         {
             Logger.WriteException($"create-file-in-folder失敗: {dirPath}/{name}", ex);
-            error = ex.Message;
+            // 総点検 指摘16: ex.Messageを生のまま返すと、英語の.NET例外メッセージやパスが
+            // そのまま利用者に見える。詳細はすぐ上のLogger.WriteExceptionへ残っている。
+            error = ExceptionMessages.Describe(ex);
             return false;
         }
     }

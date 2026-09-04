@@ -1365,7 +1365,19 @@ const ctx = {
       if (!bridge) return;
       bridge.postMessage({ type: "duplicate", name: currentName, text: editor.getValue() });
     },
+    // 総点検 指摘H5: Ctrl+N(新規作成)とCtrl+Shift+N(新しいウィンドウ)が常に同じ動作(新しい
+    // ウィンドウ)になっていた。Windowsの慣習ではCtrl+Nは「新規」であって「新しいウィンドウ」を
+    // 期待させないため、タブ形式(displayMode==="tab")のときだけ意味を分ける。
     async newDocument() {
+      // タブ形式: 現在のウィンドウ内に新しいタブを追加する("+"ボタン・file.newTabと同じnewTab()
+      // をそのまま使う。C#側への通知は不要、タブ管理はJS側だけで完結しているため)。
+      // 別ウィンドウが欲しい場合は引き続きnewWindow()(Ctrl+Shift+N)を使う。
+      if (displayMode === "tab") { await newTab(); return; }
+      // ウィンドウ形式(既定): 開く(HandleOpenRequest)と同じく、常に新しいウィンドウで開く
+      // (仕様書外・ユーザー要望。Pane/MainForm.cs HandleOpenRequestのコメント参照)。
+      // 1ウィンドウ1ファイルが前提のこの形式では「現在のウィンドウの中に新規文書を作る」という
+      // 状態自体が存在しないため、新規作成と新しいウィンドウを意味的に区別できない
+      // (総点検の指摘への対応として、区別が付けられるタブ形式の方だけ分けた)。
       if (bridge) { bridge.postMessage({ type: "new" }); return; }
       if (isDirty && !(await paneConfirm({ title: "新規文書を開きますか?", message: "保存されていない変更があります。新規文書を開くと失われますが、よろしいですか?", okLabel: "開く", danger: true }))) return;
       pushClosedFile(currentPath);
@@ -1710,8 +1722,8 @@ function buildEditorContextMenuTree(c, e) {
       { label: "コピー", enabled: hasSelection, run: () => document.execCommand("copy") },
       { label: "貼り付け", run: () => pasteRichFromContextMenu() },
       { label: "すべて選択", run: () => editor.applyAction("selectAll"), separatorAfter: true },
-      { label: "元に戻す", run: () => editor.applyAction("undo") },
-      { label: "やり直す", run: () => editor.applyAction("redo"), separatorAfter: true },
+      fromCommand("edit.undo"),
+      { ...fromCommand("edit.redo"), separatorAfter: true },
       fromCommand("edit.find"),
       { ...fromCommand("edit.replace"), separatorAfter: mode !== "code" },
     ];
@@ -1821,16 +1833,16 @@ function buildEditorContextMenuTree(c, e) {
         fromCommand("para.h1"), fromCommand("para.h2"), fromCommand("para.h3"),
         fromCommand("para.h4"), fromCommand("para.h5"), { ...fromCommand("para.h6"), separatorAfter: true },
         fromCommand("para.p"), fromCommand("para.quote"), fromCommand("para.list"), fromCommand("para.olist"),
-        { label: "タスクリスト", run: () => editor.applyAction("check"), separatorAfter: true },
+        { ...fromCommand("para.taskList"), separatorAfter: true },
         fromCommand("para.table"), fromCommand("para.codeblock"), fromCommand("para.mathBlock"),
-        { label: "水平線", run: () => editor.applyAction("hr") },
+        fromCommand("para.hr"),
       ],
     });
   }
 
   // 2.10: その他セクション(常時)
-  tree.push({ label: "元に戻す", run: () => editor.applyAction("undo") });
-  tree.push({ label: "やり直す", run: () => editor.applyAction("redo"), separatorAfter: true });
+  tree.push(fromCommand("edit.undo"));
+  tree.push({ ...fromCommand("edit.redo"), separatorAfter: true });
   tree.push({ label: "検索…", run: () => ctx.actions.openSearch() });
   if (hasSelection) tree.push({ label: "選択箇所を検索", run: () => ctx.actions.openSearch() });
 

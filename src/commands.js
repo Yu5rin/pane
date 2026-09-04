@@ -85,6 +85,14 @@ export function buildCommands(ctx) {
     // 横取りするとそれらの中で本文が操作されてしまう。キー入力そのものはCodeMirrorと
     // 各入力欄のネイティブ動作に任せ、ここではメニューからの実行経路とキーの案内だけを出す
     // (設定のキーバインド画面からは、必要ならユーザーが独自の割り当てを追加できる)。
+    // 元に戻す/やり直す(仕様書10.1「メニューバーと機能を重複させ、どちらか一方だけでも
+    // 全操作に到達できる状態にする」)。実際のキー入力はCodeMirrorのhistoryKeymap(editor.js)が
+    // 元から処理しており、この2項目が無くても動作自体はしていた(総点検 指摘H3で発覚)。
+    // これまで右クリックメニュー(main.js buildContextMenuTree)にしか出ておらず、
+    // マウス派・タッチ操作の利用者には到達手段が無かった。他の基本キーと同じ理由で
+    // shortcutではなくkeyHintにする(Ctrl+Z/Ctrl+Yはbindshortcutsで横取りしない)。
+    { id: "edit.undo", menu: "Edit", label: "元に戻す", keyHint: `${MOD}+Z`, run: () => editor().applyAction("undo") },
+    { id: "edit.redo", menu: "Edit", label: "やり直す", keyHint: `${MOD}+Y`, run: () => editor().applyAction("redo"), separatorAfter: true },
     { id: "edit.newParagraph", menu: "Edit", label: "段落を追加", keyHint: "Enter", run: () => editor().applyAction("newParagraph") },
     { id: "edit.softBreak", menu: "Edit", label: "改行(ソフトブレーク)", keyHint: "Shift+Enter", run: () => editor().applyAction("softBreak"), separatorAfter: true },
     { id: "edit.cut", menu: "Edit", label: "切り取り", keyHint: `${MOD}+X`, enabled: () => ctx.getState().hasSelection, run: () => document.execCommand("cut") },
@@ -127,9 +135,16 @@ export function buildCommands(ctx) {
     { id: "para.table", menu: "Paragraph", label: "表を挿入", shortcut: `${MOD}+T`, run: () => editor().applyAction("table") },
     { id: "para.codeblock", menu: "Paragraph", label: "コードブロックを挿入", shortcut: `${MOD}+Shift+K`, run: () => editor().applyAction("codeblock") },
     { id: "para.mathBlock", menu: "Paragraph", label: "数式ブロックを挿入", shortcut: `${MOD}+Shift+M`, run: () => editor().applyAction("mathBlock") },
+    // 水平線: 右クリックの「段落」サブメニュー(main.js)にしか無く、メニューバー・コマンドパレット
+    // からは呼べなかった(総点検 指摘H3/M5)。挿入処理自体(applyAction("hr"))は右クリックと共用。
+    { id: "para.hr", menu: "Paragraph", label: "水平線", run: () => editor().applyAction("hr") },
     { id: "para.quote", menu: "Paragraph", label: "引用", shortcut: `${MOD}+Shift+Q`, run: () => editor().applyAction("quote") },
     { id: "para.olist", menu: "Paragraph", label: "番号付きリスト", shortcut: `${MOD}+Shift+[`, run: () => editor().applyAction("olist") },
     { id: "para.list", menu: "Paragraph", label: "箇条書きリスト", shortcut: `${MOD}+Shift+]`, run: () => editor().applyAction("list") },
+    // タスクリスト: 新しい行に「- [ ] 」を挿入する(applyAction("check"))。既存の行をタスク
+    // リストへ変換する para.listCheck(下のcontextOnly、"listCheck"アクション)とは別物で、
+    // 右クリックの「段落」サブメニューにあったものをこちらもメニューバーへ出す(H3/M5)。
+    { id: "para.taskList", menu: "Paragraph", label: "タスクリスト", run: () => editor().applyAction("check") },
     { id: "para.indent", menu: "Paragraph", label: "インデント", shortcut: `${MOD}+[`, run: () => editor().applyAction("indent") },
     { id: "para.outdent", menu: "Paragraph", label: "アウトデント", shortcut: `${MOD}+]`, run: () => editor().applyAction("outdent"), separatorAfter: true },
     { id: "para.listBullet", menu: "Paragraph", label: "箇条書きに変換", contextOnly: true, run: () => editor().applyAction("listBullet") },
@@ -153,7 +168,9 @@ export function buildCommands(ctx) {
     // ---- View(第2.5節) ----
     { id: "view.sidebar", menu: "View", label: "サイドバーの表示切替", shortcut: `${MOD}+Shift+L`, run: app((c) => c.actions.toggleSidebar()), checked: () => ctx.getState().sidebarOpen },
     { id: "view.outline", menu: "View", label: "アウトラインパネル", shortcut: `${MOD}+Shift+1`, run: app((c) => c.actions.showSidebarPanel("outline")), checked: () => ctx.getState().sidebarOpen && ctx.getState().sidebarPanel === "outline" },
-    { id: "view.articleList", menu: "View", label: "記事リスト", shortcut: `${MOD}+Shift+2`, run: app((c) => c.actions.showSidebarPanel("files")), checked: () => ctx.getState().sidebarOpen && ctx.getState().sidebarPanel === "files" },
+    // id(view.articleList)は仕様策定初期の仮名の名残。表示名は「ファイルリスト」に統一済み(仕様書 S-02)だが、
+    // idはユーザーのキーボード設定(keyBindings、コマンドID→ショートカット文字列)が参照しているため変えない。
+    { id: "view.articleList", menu: "View", label: "ファイルリスト", shortcut: `${MOD}+Shift+2`, run: app((c) => c.actions.showSidebarPanel("files")), checked: () => ctx.getState().sidebarOpen && ctx.getState().sidebarPanel === "files" },
     { id: "view.fileTree", menu: "View", label: "ファイルツリー", shortcut: `${MOD}+Shift+3`, run: app((c) => c.actions.showSidebarPanel("tree")), checked: () => ctx.getState().sidebarOpen && ctx.getState().sidebarPanel === "tree", separatorAfter: true },
     { id: "view.modeMarkdown", menu: "View", label: "Markdownモード", run: app((c) => c.actions.setMode("markdown")), checked: () => ctx.getState().mode === "markdown" },
     { id: "view.modePlain", menu: "View", label: "プレーンテキストモード", run: app((c) => c.actions.setMode("plain")), checked: () => ctx.getState().mode === "plain" },

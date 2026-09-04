@@ -28,6 +28,9 @@
     <Compile Include="../Pane/SettingsRecoveryLogic.cs" Link="取り込み/SettingsRecoveryLogic.cs" />
     <Compile Include="../Pane/ExternalToolLocator.cs" Link="取り込み/ExternalToolLocator.cs" />
     <Compile Include="../Pane/PrivacyLogFormatter.cs" Link="取り込み/PrivacyLogFormatter.cs" />
+    <Compile Include="../Pane/OpenDialogFilterBuilder.cs" Link="取り込み/OpenDialogFilterBuilder.cs" />
+    <Compile Include="../Pane/FileTypes.generated.cs" Link="取り込み/FileTypes.generated.cs" />
+    <Compile Include="../Pane/ExceptionMessages.cs" Link="取り込み/ExceptionMessages.cs" />
   </ItemGroup>
 
   <ItemGroup>

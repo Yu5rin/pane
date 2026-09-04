@@ -1964,7 +1964,7 @@ internal sealed class MainForm : Form
     {
         using var dialog = new OpenFileDialog
         {
-            Filter = "Markdown / テキスト (*.md;*.markdown;*.mdown;*.txt)|*.md;*.markdown;*.mdown;*.txt|すべてのファイル (*.*)|*.*",
+            Filter = OpenDialogFilterBuilder.Build(),
         };
         if (dialog.ShowDialog(this) == DialogResult.OK)
         {
@@ -2044,7 +2044,9 @@ internal sealed class MainForm : Form
         {
             Logger.WriteException($"保存失敗: {targetPath}", ex);
             CompleteSave(ok: false);
-            PostToWeb(new { type = "save-result", ok = false, error = ex.Message });
+            // msg.errorは現状JS側では表示に使っていない(main.js "save-result"のコメント
+            // 参照)が、将来表示されたときに型名・生の.NETメッセージが出ないよう先に直しておく。
+            PostToWeb(new { type = "save-result", ok = false, error = ExceptionMessages.Describe(ex) });
         }
     }
 
@@ -2115,7 +2117,7 @@ internal sealed class MainForm : Form
             Logger.WriteException($"ファイルを開けなかった: {path}", ex);
             PaneDialog.Show(
                 this,
-                $"ファイルを開けませんでした。\n{ex.Message}",
+                $"ファイルを開けませんでした。\n{ExceptionMessages.Describe(ex)}",
                 "Pane",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
@@ -2178,7 +2180,7 @@ internal sealed class MainForm : Form
             Logger.WriteException($"タブとして開けなかった: {path}", ex);
             PaneDialog.Show(
                 this,
-                $"ファイルを開けませんでした。\n{ex.Message}",
+                $"ファイルを開けませんでした。\n{ExceptionMessages.Describe(ex)}",
                 "Pane",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
@@ -2402,7 +2404,9 @@ internal sealed class MainForm : Form
         catch (Exception ex)
         {
             Logger.WriteException($"フォルダの読み込みに失敗: {path}", ex);
-            PostToWeb(new { type = "folder-loaded", error = ex.Message });
+            // 総点検 指摘16: sidebar.jsが「フォルダの読み込みに失敗しました: ${folder.error}」の
+            // 形でそのまま画面へ出す。ex.Messageを生で渡すと英語の.NET例外メッセージが出る。
+            PostToWeb(new { type = "folder-loaded", error = ExceptionMessages.Describe(ex) });
         }
         finally
         {
@@ -2496,7 +2500,8 @@ internal sealed class MainForm : Form
             Logger.WriteException($"global-search失敗: root={rootPath}", ex);
             if (ReferenceEquals(_searchCts, cts))
             {
-                PostToWeb(new { type = "search-done", error = ex.Message });
+                // 総点検 指摘16: global-search.jsがエラーをそのまま本文に表示する。
+                PostToWeb(new { type = "search-done", error = ExceptionMessages.Describe(ex) });
             }
             return;
         }
@@ -2598,7 +2603,7 @@ internal sealed class MainForm : Form
         catch (Exception ex)
         {
             Logger.WriteException($"ドロップされたファイルを開けなかった: {name}", ex);
-            PaneDialog.Show(this, $"ファイルを開けませんでした。\n{ex.Message}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            PaneDialog.Show(this, $"ファイルを開けませんでした。\n{ExceptionMessages.Describe(ex)}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
@@ -3372,7 +3377,7 @@ internal sealed class MainForm : Form
                 catch (Exception ex)
                 {
                     Logger.WriteException("ファイルの関連付け設定の変更に失敗", ex);
-                    errorMessage = $"ファイルの関連付け設定を変更できませんでした。\n{ex.Message}";
+                    errorMessage = $"ファイルの関連付け設定を変更できませんでした。\n{ExceptionMessages.Describe(ex)}";
                 }
             }
 
@@ -3388,7 +3393,7 @@ internal sealed class MainForm : Form
                 catch (Exception ex)
                 {
                     // StartupService側で既にLogger.WriteException済みのため、ここではUI表示のみ。
-                    string msg = $"スタートアップ登録を変更できませんでした。\n{ex.Message}";
+                    string msg = $"スタートアップ登録を変更できませんでした。\n{ExceptionMessages.Describe(ex)}";
                     errorMessage = errorMessage is null ? msg : $"{errorMessage}\n{msg}";
                 }
             }
@@ -3845,7 +3850,7 @@ internal sealed class MainForm : Form
         catch (Exception ex)
         {
             Logger.WriteException($"エクスポートに失敗: format={format}, targetPath={targetPath}", ex);
-            PaneDialog.Show(this, $"エクスポートに失敗しました。\n{ex.Message}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            PaneDialog.Show(this, $"エクスポートに失敗しました。\n{ExceptionMessages.Describe(ex)}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
         {
@@ -4169,7 +4174,7 @@ internal sealed class MainForm : Form
         catch (Exception ex)
         {
             Logger.WriteException("画像挿入に失敗", ex);
-            PaneDialog.Show(this, $"画像を挿入できませんでした。\n{ex.Message}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            PaneDialog.Show(this, $"画像を挿入できませんでした。\n{ExceptionMessages.Describe(ex)}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 }

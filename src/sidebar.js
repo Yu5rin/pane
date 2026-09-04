@@ -274,7 +274,7 @@ export function createSidebar(editor, ctx) {
     ];
   }
 
-  // 4.2 記事リスト・ファイルツリーのファイル行(entry: { path, name, relativePath }相当)
+  // 4.2 ファイルリスト・ファイルツリーのファイル行(entry: { path, name, relativePath }相当)
   async function renameEntryFlow(entry) {
     const name = await paneInput({ title: "名前の変更", message: "新しい名前を入力してください", value: entry.name, okLabel: "変更", validate: validateEntryName });
     if (!name || name === entry.name) return;
