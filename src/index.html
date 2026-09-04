@@ -43,7 +43,12 @@
   /* overflow: hidden は、幅が狭くて全項目が収まらないとき(main.js側のResizeObserverが
      優先度の低い項目から短縮・非表示にする前の一瞬や、フォント環境差などで再計算が
      間に合わなかった場合の保険)にstatusbarの外へはみ出させないための保険。 */
-  #statusbar { display: flex; gap: 16px; padding: 0 10px; height: 24px; align-items: center; border-top: 1px solid var(--rule); font-size: 11px; color: var(--ink-mute); flex: none; font-family: var(--font-mono); overflow: hidden; background: var(--chrome-bg); }
+  /* UI点検(.review-ui.md 指摘3)の修正: 文字色は従来var(--ink-mute)(本文の--paper上で
+     調整された補助文字色)を直接使っていたが、背景のvar(--chrome-bg)は「本文より濃い」
+     という別の設計方針の色(src/style.css :rootブロックのコメント参照)のため、5テーマ
+     (既定ライト/sepia/solarized-light/solarized-dark/night)でAA(4.5:1)未満だった。
+     バー専用の文字色var(--chrome-fg)(src/style.css・src/themes.css)に差し替える。 */
+  #statusbar { display: flex; gap: 16px; padding: 0 10px; height: 24px; align-items: center; border-top: 1px solid var(--rule); font-size: 11px; color: var(--chrome-fg); flex: none; font-family: var(--font-mono); overflow: hidden; background: var(--chrome-bg); }
   /* 実機不具合の修正: 幅を狭めたとき各項目が縮んでテキストが1〜2文字ずつ折り返し、
      height:24pxを超えて縦に伸び、本文エリアに被っていた。原因はflex-shrinkが既定値の
      ままで、white-space:nowrapも無かったこと。nowrap+flex:noneで「そもそも縮んで
@@ -88,7 +93,7 @@
         <button type="button" class="sidebar-tab" data-panel="outline" data-tip="sidebar-tab-outline" title="アウトライン">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h10M4 18h13"/></svg>
         </button>
-        <button type="button" class="sidebar-tab" data-panel="files" data-tip="sidebar-tab-files" title="ファイル">
+        <button type="button" class="sidebar-tab" data-panel="files" data-tip="sidebar-tab-files" title="ファイルリスト">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>
         </button>
         <button type="button" class="sidebar-tab" data-panel="tree" data-tip="sidebar-tab-tree" title="ファイルツリー">
@@ -113,6 +118,10 @@
     <button id="status-wrap" type="button" title="折り返し表示を切り替え"></button>
     <button id="status-count" type="button" title="クリックで文字数の詳細を表示">0文字</button>
     <button id="status-zoom" type="button" title="クリックで実際のサイズに戻す">100%</button>
+    <!-- エクスポート実行中であることを文字で示す(総点検 指摘20)。Pandoc/PrintToPdfAsyncの
+         完了(export-done)まで表示し続ける。グローバル検索の「検索中…」(global-search.js)と
+         同じ「動詞+中…」の語彙・見た目(装飾なしのテキストのみ)に揃える。 -->
+    <span id="status-export" hidden>エクスポートしています…</span>
     <span style="flex:1"></span>
     <!-- 未保存の変更があることを文字で示す(タイトルバーの"(未保存)"と対になる表示)。 -->
     <span id="status-dirty" hidden>未保存</span>

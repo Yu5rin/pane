@@ -166,6 +166,12 @@ export function createSidebar(editor, ctx) {
   // setFolder()経由で渡される。{ rootPath, rootName, entries, truncated } または
   // 失敗時は { error }。未読み込みならnull。
   let folder = null;
+  // フォルダ走査が進行中かどうか(総点検 指摘18)。従来はfolderがnullか結果かの2状態しか
+  // 持たず、「フォルダを開く」から走査完了(folder-loaded)までの間はrenderFolderPrompt()の
+  // 「フォルダが読み込まれていません」が出続けていた。走査中は失敗したように見えるため、
+  // main.jsのhandleHostMessage("folder-loading")からsetFolderLoading(true)で立て、
+  // folder-loaded(成功/失敗いずれも)で必ずfalseに戻す。
+  let folderLoading = false;
   // 現在エディタで開いているファイルのフルパス。setCurrentPath()で更新し、
   // files/treeパネルのハイライト(.current)に使う。
   let openFilePath = null;
@@ -207,6 +213,23 @@ export function createSidebar(editor, ctx) {
     empty.className = "sidebar-empty";
     empty.textContent = message;
     bodyEl.appendChild(empty);
+  }
+
+  // フォルダ走査が進行中であることの表示(指摘18)。グローバル検索の「検索中…」
+  // (global-search.js)と同じ語彙・同じ見せ方(sidebar-empty)に揃える。新しいUI部品
+  // (モーダルのスピナー等)は増やさない。
+  function renderFolderLoading() {
+    renderEmpty("フォルダを読み込んでいます…");
+  }
+
+  // 既にフォルダが読み込み済みの状態で、別フォルダの読み込み(再走査)が進行中であることの
+  // 注記。現在表示中の内容は消さずに残したまま、末尾に一言添えるだけにする
+  // (グローバル検索が既存のヒットを残したまま「検索中…」を添えるのと同じ考え方)。
+  function appendLoadingNotice() {
+    const notice = document.createElement("div");
+    notice.className = "sidebar-notice";
+    notice.textContent = "フォルダを読み込んでいます…";
+    bodyEl.appendChild(notice);
   }
 
   // フォルダ未読み込み時の空状態。文言だけでなく「フォルダを開く」ボタンを置き、
@@ -274,7 +297,7 @@ export function createSidebar(editor, ctx) {
     ];
   }
 
-  // 4.2 記事リスト・ファイルツリーのファイル行(entry: { path, name, relativePath }相当)
+  // 4.2 ファイルリスト・ファイルツリーのファイル行(entry: { path, name, relativePath }相当)
   async function renameEntryFlow(entry) {
     const name = await paneInput({ title: "名前の変更", message: "新しい名前を入力してください", value: entry.name, okLabel: "変更", validate: validateEntryName });
     if (!name || name === entry.name) return;
@@ -406,12 +429,17 @@ export function createSidebar(editor, ctx) {
 
   // ファイルリストパネル(S-02): isDirectory===falseのエントリを平坦に一覧表示する。
   function renderFiles() {
-    if (!folder) { renderFolderPrompt(); return; }
+    if (!folder) {
+      if (folderLoading) { renderFolderLoading(); return; }
+      renderFolderPrompt();
+      return;
+    }
     if (folder.error) { renderEmpty(`フォルダの読み込みに失敗しました: ${folder.error}`); return; }
 
     const files = folder.entries.filter((e) => !e.isDirectory);
     bodyEl.innerHTML = "";
     if (folder.truncated) appendTruncatedNotice();
+    if (folderLoading) appendLoadingNotice();
     if (!files.length) {
       const empty = document.createElement("div");
       empty.className = "sidebar-empty";
@@ -523,11 +551,16 @@ export function createSidebar(editor, ctx) {
 
   // ファイルツリーパネル(S-03): relativePathの階層で折りたたみ式ツリー表示する。
   function renderTree() {
-    if (!folder) { renderFolderPrompt(); return; }
+    if (!folder) {
+      if (folderLoading) { renderFolderLoading(); return; }
+      renderFolderPrompt();
+      return;
+    }
     if (folder.error) { renderEmpty(`フォルダの読み込みに失敗しました: ${folder.error}`); return; }
 
     bodyEl.innerHTML = "";
     if (folder.truncated) appendTruncatedNotice();
+    if (folderLoading) appendLoadingNotice();
     const header = document.createElement("div");
     header.className = "tree-root-label";
     header.textContent = folder.rootName;
@@ -571,10 +604,19 @@ export function createSidebar(editor, ctx) {
     debounceTimer = setTimeout(renderOutline, REFRESH_DEBOUNCE_MS);
   }
 
+  // フォルダ走査の開始を受け取る(main.jsのhandleHostMessage("folder-loading")から、
+  // C#側MainForm.cs LoadFolderAsyncが走査開始時に送る)。指摘18の対応。
+  function setFolderLoading(v) {
+    folderLoading = !!v;
+    if (isOpenFlag && (currentPanelName === "files" || currentPanelName === "tree")) renderActivePanelNow();
+  }
+
   // フォルダ読み込み結果を受け取る(main.jsのhandleHostMessage("folder-loaded")から)。
   // ルートフォルダが変わった場合のみ開閉状態を初期化し(既定でルート直下のみ開く)、
   // 同じフォルダの再読み込み(ファイルを開いた際の自動読み込み等)では開閉状態を保持する。
   function setFolder(data) {
+    // 走査が完了した(成功/失敗いずれも)ので、読み込み中表示は必ず解除する。
+    folderLoading = false;
     const isNewRoot = !folder || !data || data.error || folder.rootPath !== data.rootPath;
     folder = data;
     if (isNewRoot) {
@@ -693,6 +735,7 @@ export function createSidebar(editor, ctx) {
     currentPanel: () => currentPanelName,
     refresh: scheduleOutlineRefresh,
     setFolder,
+    setFolderLoading,
     setCurrentPath,
     setCollapsibleOutline,
     setWidth,

@@ -27,6 +27,7 @@ const statusMode = document.getElementById("status-mode");
 const statusPosition = document.getElementById("status-position");
 const statusCount = document.getElementById("status-count");
 const statusDirty = document.getElementById("status-dirty");
+const statusExport = document.getElementById("status-export");
 const statusZoom = document.getElementById("status-zoom");
 const statusEncoding = document.getElementById("status-encoding");
 const statusLineEnding = document.getElementById("status-line-ending");
@@ -383,6 +384,22 @@ let exportSettings = {
 // { rootPath, rootName, entries, truncated } 。未読み込み・読み込み失敗時はnullのまま
 // (失敗時のエラー表示はサイドバー側にだけ渡し、ここでは保持しない)。
 let folderData = null;
+// エクスポート(Pandoc委譲のWord/EPUB等・WebView2委譲のPDF)が進行中かどうか(総点検 指摘20)。
+// 押した後に何も表示されず、外部プロセス(Pandoc)の起動待ちの間もう一度メニューを選べて
+// しまい保存ダイアログが2回出ていた不具合の対応。exportAs()の冒頭で同期的に立て(postMessage
+// より前。イベントハンドラは最初のawaitまで中断されないためJS側での早すぎる二重発火を防げる)、
+// "export-done"(C#側HandleExportRequestAsyncのfinally、成功/失敗いずれでも必ず届く)で戻す。
+// commands.jsのenabled: () => !ctx.getState().exportingがメニュー・コマンドパレット・
+// ショートカットの入口をまとめて塞ぐ「見た目」の防御であり、実際にPandoc/PrintToPdfAsyncを
+// 二重に起動しないための本当の防御はC#側(MainForm.cs _exportInProgress)に別途持たせている
+// (JS側の状態とC#側の実行状態は非同期メッセージでしか繋がっておらず、タイミングのずれで
+// JS側の判定だけをすり抜ける経路が将来増えても、実行の実体を持つC#側さえ守っていれば
+// 二重起動そのものは起きない、という考え方)。
+let exportInProgress = false;
+function setExportInProgress(v) {
+  exportInProgress = !!v;
+  if (statusExport) statusExport.hidden = !exportInProgress;
+}
 // ダーティ・読み取り専用の表示はOSネイティブのウィンドウタイトルが兼ねる(C#側UpdateTitle)ため、
 // HTML側は確認ダイアログの判定等に使う内部状態としてのみ保持する。
 let isDirty = false;
@@ -1334,6 +1351,7 @@ function getState() {
     sidebarOpen: sidebar.isOpen(),
     sidebarPanel: sidebar.currentPanel(),
     folderLoaded: !!folderData,
+    exporting: exportInProgress,
     sourceMode: editor.isSourceMode(),
     focusMode: editor.isFocusMode(),
     typewriterMode: editor.isTypewriterMode(),
@@ -1365,7 +1383,19 @@ const ctx = {
       if (!bridge) return;
       bridge.postMessage({ type: "duplicate", name: currentName, text: editor.getValue() });
     },
+    // 総点検 指摘H5: Ctrl+N(新規作成)とCtrl+Shift+N(新しいウィンドウ)が常に同じ動作(新しい
+    // ウィンドウ)になっていた。Windowsの慣習ではCtrl+Nは「新規」であって「新しいウィンドウ」を
+    // 期待させないため、タブ形式(displayMode==="tab")のときだけ意味を分ける。
     async newDocument() {
+      // タブ形式: 現在のウィンドウ内に新しいタブを追加する("+"ボタン・file.newTabと同じnewTab()
+      // をそのまま使う。C#側への通知は不要、タブ管理はJS側だけで完結しているため)。
+      // 別ウィンドウが欲しい場合は引き続きnewWindow()(Ctrl+Shift+N)を使う。
+      if (displayMode === "tab") { await newTab(); return; }
+      // ウィンドウ形式(既定): 開く(HandleOpenRequest)と同じく、常に新しいウィンドウで開く
+      // (仕様書外・ユーザー要望。Pane/MainForm.cs HandleOpenRequestのコメント参照)。
+      // 1ウィンドウ1ファイルが前提のこの形式では「現在のウィンドウの中に新規文書を作る」という
+      // 状態自体が存在しないため、新規作成と新しいウィンドウを意味的に区別できない
+      // (総点検の指摘への対応として、区別が付けられるタブ形式の方だけ分けた)。
       if (bridge) { bridge.postMessage({ type: "new" }); return; }
       if (isDirty && !(await paneConfirm({ title: "新規文書を開きますか?", message: "保存されていない変更があります。新規文書を開くと失われますが、よろしいですか?", okLabel: "開く", danger: true }))) return;
       pushClosedFile(currentPath);
@@ -1391,36 +1421,48 @@ const ctx = {
     },
     async exportAs(format) {
       if (!bridge) { await paneAlert({ title: "エクスポートできません", message: "エクスポートはデスクトップアプリ版でのみ利用できます。" }); return; }
-      // exportReadYamlFrontMatter(仕様書): trueならFront Matterのページ設定等を読んで上書きする。
-      // 読み取るキーの一覧はmd-to-html.jsのFRONT_MATTER_KEYSを参照(このファイルが正)。
-      const fm = exportSettings.exportReadYamlFrontMatter ? parseFrontMatterOverrides(editor.getValue()) : {};
-      let text;
-      if (format === "html" || format === "html-plain") {
-        // exportPageBreakBetweenTopHeadings/exportIncludeOutline/exportAppendHead/exportAppendBody/
-        // exportMathAsはHTMLエクスポートにのみ適用する(PDF/印刷はライブプレビューのDOMをそのまま
-        // 印刷するため、これらの構造的な変更はHTML生成側でしか意味を持たない)。
-        text = await editor.getStandaloneHtml({
-          title: fm.title ?? currentName,
-          styled: format === "html",
-          mathAs: exportSettings.exportMathAs,
-          pageBreakBetweenTopHeadings: exportSettings.exportPageBreakBetweenTopHeadings,
-          includeOutline: exportSettings.exportIncludeOutline,
-          outlineWidthPx: exportSettings.exportOutlineWidthPx,
-          appendHead: exportSettings.exportAppendHead,
-          appendBody: exportSettings.exportAppendBody,
-          rootUrl: fm.rootUrl ?? null,
-          // エクスポートしたHTMLは単体のファイルとして開かれ、pane-file.localホスト
-          // (実行中のPaneアプリ内でのみ有効)は使えないため、ローカル画像はここでdata:として
-          // 埋め込む(md-to-html.js resolveLocalImageFsPath/substituteImagePlaceholders参照)。
-          resolveLocalImage: requestLocalImageDataUri,
-        });
-      } else {
-        text = editor.getValue(); // pdfは本文を使わない。docx/epubはMarkdown原文をPandocへ渡す。
+      // 二重実行防止(指摘20)。commands.jsのenabled判定で通常はここまで来ないが、
+      // 万一の場合に備えてここでも弾く(setExportInProgress参照)。
+      if (exportInProgress) return;
+      setExportInProgress(true);
+      try {
+        // exportReadYamlFrontMatter(仕様書): trueならFront Matterのページ設定等を読んで上書きする。
+        // 読み取るキーの一覧はmd-to-html.jsのFRONT_MATTER_KEYSを参照(このファイルが正)。
+        const fm = exportSettings.exportReadYamlFrontMatter ? parseFrontMatterOverrides(editor.getValue()) : {};
+        let text;
+        if (format === "html" || format === "html-plain") {
+          // exportPageBreakBetweenTopHeadings/exportIncludeOutline/exportAppendHead/exportAppendBody/
+          // exportMathAsはHTMLエクスポートにのみ適用する(PDF/印刷はライブプレビューのDOMをそのまま
+          // 印刷するため、これらの構造的な変更はHTML生成側でしか意味を持たない)。
+          text = await editor.getStandaloneHtml({
+            title: fm.title ?? currentName,
+            styled: format === "html",
+            mathAs: exportSettings.exportMathAs,
+            pageBreakBetweenTopHeadings: exportSettings.exportPageBreakBetweenTopHeadings,
+            includeOutline: exportSettings.exportIncludeOutline,
+            outlineWidthPx: exportSettings.exportOutlineWidthPx,
+            appendHead: exportSettings.exportAppendHead,
+            appendBody: exportSettings.exportAppendBody,
+            rootUrl: fm.rootUrl ?? null,
+            // エクスポートしたHTMLは単体のファイルとして開かれ、pane-file.localホスト
+            // (実行中のPaneアプリ内でのみ有効)は使えないため、ローカル画像はここでdata:として
+            // 埋め込む(md-to-html.js resolveLocalImageFsPath/substituteImagePlaceholders参照)。
+            resolveLocalImage: requestLocalImageDataUri,
+          });
+        } else {
+          text = editor.getValue(); // pdfは本文を使わない。docx/epubはMarkdown原文をPandocへ渡す。
+        }
+        // PDF/印刷はbeforeprint/afterprintで自動的にレイアウトを展開・復元する(enterExportLayout参照)。
+        // pageOptionsは主にformat==="pdf"のときC#側(CoreWebView2PrintSettings)が使う。
+        // それ以外の形式でもexportDefaultFolder等の出力先設定は共通で使う。
+        bridge.postMessage({ type: "export", format, text, pageOptions: buildExportPageOptions(fm) });
+      } catch (err) {
+        // ここでの失敗はC#側へメッセージが届く前(HTML生成中の例外等)なので、"export-done"は
+        // 永遠に届かない。setExportInProgress(false)を待つ相手がいないまま「実行中」表示や
+        // メニューの無効化が固まったままにならないよう、ここで自分から戻す。
+        setExportInProgress(false);
+        throw err;
       }
-      // PDF/印刷はbeforeprint/afterprintで自動的にレイアウトを展開・復元する(enterExportLayout参照)。
-      // pageOptionsは主にformat==="pdf"のときC#側(CoreWebView2PrintSettings)が使う。
-      // それ以外の形式でもexportDefaultFolder等の出力先設定は共通で使う。
-      bridge.postMessage({ type: "export", format, text, pageOptions: buildExportPageOptions(fm) });
     },
     print() {
       // 用紙サイズ・余白・ヘッダー/フッター等の詳細設定(仕様書「エクスポート・印刷」節)は、
@@ -1710,8 +1752,8 @@ function buildEditorContextMenuTree(c, e) {
       { label: "コピー", enabled: hasSelection, run: () => document.execCommand("copy") },
       { label: "貼り付け", run: () => pasteRichFromContextMenu() },
       { label: "すべて選択", run: () => editor.applyAction("selectAll"), separatorAfter: true },
-      { label: "元に戻す", run: () => editor.applyAction("undo") },
-      { label: "やり直す", run: () => editor.applyAction("redo"), separatorAfter: true },
+      fromCommand("edit.undo"),
+      { ...fromCommand("edit.redo"), separatorAfter: true },
       fromCommand("edit.find"),
       { ...fromCommand("edit.replace"), separatorAfter: mode !== "code" },
     ];
@@ -1821,16 +1863,16 @@ function buildEditorContextMenuTree(c, e) {
         fromCommand("para.h1"), fromCommand("para.h2"), fromCommand("para.h3"),
         fromCommand("para.h4"), fromCommand("para.h5"), { ...fromCommand("para.h6"), separatorAfter: true },
         fromCommand("para.p"), fromCommand("para.quote"), fromCommand("para.list"), fromCommand("para.olist"),
-        { label: "タスクリスト", run: () => editor.applyAction("check"), separatorAfter: true },
+        { ...fromCommand("para.taskList"), separatorAfter: true },
         fromCommand("para.table"), fromCommand("para.codeblock"), fromCommand("para.mathBlock"),
-        { label: "水平線", run: () => editor.applyAction("hr") },
+        fromCommand("para.hr"),
       ],
     });
   }
 
   // 2.10: その他セクション(常時)
-  tree.push({ label: "元に戻す", run: () => editor.applyAction("undo") });
-  tree.push({ label: "やり直す", run: () => editor.applyAction("redo"), separatorAfter: true });
+  tree.push(fromCommand("edit.undo"));
+  tree.push({ ...fromCommand("edit.redo"), separatorAfter: true });
   tree.push({ label: "検索…", run: () => ctx.actions.openSearch() });
   if (hasSelection) tree.push({ label: "選択箇所を検索", run: () => ctx.actions.openSearch() });
 
@@ -2774,8 +2816,11 @@ async function handleHostMessage(msg) {
       editor.applyAction("image", { alt: msg.alt ?? "", path: msg.path ?? "" });
       break;
     case "export-done":
-      // PNGエクスポート完了(成功・失敗いずれでも届く)。enterExportLayout()での展開を復元する。
+      // エクスポート完了(成功・失敗いずれでも届く。C#側MainForm.cs HandleExportRequestAsyncの
+      // finallyから必ず送られる)。enterExportLayout()での展開を復元しつつ、指摘20の
+      // 「実行中」表示・メニューの無効化(getState().exporting)もここで解除する。
       exitExportLayout();
+      setExportInProgress(false);
       break;
     case "read-local-image-result":
       // HTMLエクスポートでのローカル画像data:埋め込み(requestLocalImageDataUri参照)の応答。
@@ -2785,6 +2830,13 @@ async function handleHostMessage(msg) {
         pendingLocalImageResolvers.delete(msg.requestId);
         resolve?.(msg.dataUri ?? null);
       }
+      break;
+    case "folder-loading":
+      // フォルダ走査の開始通知(総点検 指摘18)。C#側MainForm.cs LoadFolderAsyncが
+      // ユーザーの明示操作(ダイアログでの選択・D&D・起動時のフォルダ指定)による走査を
+      // 開始した時点で送る(autoLoadedな背景再走査では送らない。ファイルを開くたび・
+      // 名前変更のたびに「読み込み中」がチラつくのを避けるため)。
+      sidebar.setFolderLoading(true);
       break;
     case "folder-loaded":
       // フォルダ読み込み結果(仕様書 第2.8節 S-02/S-03)。"open-folder"/"load-folder"に加え、

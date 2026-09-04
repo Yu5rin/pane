@@ -292,8 +292,10 @@ internal static class SettingsBridge
         }
         catch (Exception ex)
         {
+            // 総点検 指摘16: ex.Messageを生のまま出すと、英語の.NET例外メッセージや
+            // パスがそのまま利用者に見えてしまう。詳細はLogger.WriteExceptionへ残す。
             Logger.WriteException("更新の適用に失敗", ex);
-            Report("error", $"更新に失敗しました: {ex.Message}");
+            Report("error", $"更新に失敗しました。{ExceptionMessages.Describe(ex)}");
         }
     }
 
@@ -622,7 +624,10 @@ internal static class SettingsBridge
                 }
                 catch (Exception ex)
                 {
-                    errorMessage = $"ファイルの関連付け設定を変更できませんでした。{ex.Message}";
+                    // FileAssociationService.Apply内の個別のログ(バージョン読み取り失敗等)とは別に、
+                    // ここで一段上の文脈(「関連付け設定の変更」全体が失敗したこと)を記録しておく。
+                    Logger.WriteException("ファイルの関連付け設定の変更に失敗", ex);
+                    errorMessage = $"ファイルの関連付け設定を変更できませんでした。{ExceptionMessages.Describe(ex)}";
                 }
             }
 
@@ -639,9 +644,10 @@ internal static class SettingsBridge
                 catch (Exception ex)
                 {
                     // ShellNewService側で既にLogger.WriteException済み。
+                    string detail = ExceptionMessages.Describe(ex);
                     errorMessage = errorMessage is null
-                        ? $"エクスプローラーの「新規作成」メニューを変更できませんでした。{ex.Message}"
-                        : $"{errorMessage}\nエクスプローラーの「新規作成」メニューを変更できませんでした。{ex.Message}";
+                        ? $"エクスプローラーの「新規作成」メニューを変更できませんでした。{detail}"
+                        : $"{errorMessage}\nエクスプローラーの「新規作成」メニューを変更できませんでした。{detail}";
                 }
             }
 
@@ -655,9 +661,10 @@ internal static class SettingsBridge
                 catch (Exception ex)
                 {
                     // StartupService側で既にLogger.WriteException済み。
+                    string detail = ExceptionMessages.Describe(ex);
                     errorMessage = errorMessage is null
-                        ? $"スタートアップ登録を変更できませんでした。{ex.Message}"
-                        : $"{errorMessage}\nスタートアップ登録を変更できませんでした。{ex.Message}";
+                        ? $"スタートアップ登録を変更できませんでした。{detail}"
+                        : $"{errorMessage}\nスタートアップ登録を変更できませんでした。{detail}";
                 }
             }
 
@@ -671,9 +678,10 @@ internal static class SettingsBridge
                 catch (Exception ex)
                 {
                     // PathEnvironmentService側で既にLogger.WriteException済み。
+                    string detail = ExceptionMessages.Describe(ex);
                     errorMessage = errorMessage is null
-                        ? $"PATHへの登録を変更できませんでした。{ex.Message}"
-                        : $"{errorMessage}\nPATHへの登録を変更できませんでした。{ex.Message}";
+                        ? $"PATHへの登録を変更できませんでした。{detail}"
+                        : $"{errorMessage}\nPATHへの登録を変更できませんでした。{detail}";
                 }
             }
 

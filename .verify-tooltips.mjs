@@ -69,11 +69,17 @@ async function titleOf(page, sel) {
   const stdTheme = await titleOf(page, "#btn-theme");
   const stdHelp = await titleOf(page, "#btn-menu-help");
   const stdOutline = await titleOf(page, '[data-tip="sidebar-tab-outline"]');
+  const stdFiles = await titleOf(page, '[data-tip="sidebar-tab-files"]');
   const stdFallback = await titleOf(page, "#test-fallback-el");
   ok(`(1) standard: テーマ切替 "${stdTheme}"`, stdTheme === "ライトテーマとダークテーマを切り替えます");
   ok(`(1) standard: ヘルプ "${stdHelp}"`, stdHelp === "ヘルプメニューを開きます");
   ok(`(1) standard: サイドバー(アウトライン)にショートカット付記 "${stdOutline}"`,
     stdOutline === "見出しの一覧(アウトライン)を表示します (Ctrl+Shift+1)");
+  // 指摘2: サイドバー「ファイル」タブは、実装上は読み込んだフォルダ内のファイルの平坦な一覧であり
+  // (sidebar.js renderFiles、仕様書 S-02)、ファイルメニューの「最近使ったファイル」とは別物。
+  // 「最近使ったファイル」を指すかのような文言に戻っていないかをここで固定する。
+  ok(`(2) サイドバー「ファイルリスト」タブが「最近使ったファイル」と説明されていない "${stdFiles}"`,
+    !stdFiles.includes("最近使った") && !stdFiles.includes("最近開いた"));
   ok(`(5) standard: テーブルに無い要素は元のtitleのまま "${stdFallback}"`, stdFallback === "もともとの説明文です");
 
   // ---- detailed ----
@@ -150,6 +156,24 @@ async function titleOf(page, sel) {
   // 「一般」カテゴリの「ステータスバーを表示」チェックボックス(data-tip="showStatusBar")。
   const showStatusBarTitleStd = await page.$eval('[data-tip="showStatusBar"]', (el) => el.title);
   ok(`(設定画面) standardで項目自体にもツールチップが付く "${showStatusBarTitleStd}"`, showStatusBarTitleStd.length > 0);
+
+  // ---- 指摘1: 自動保存はスナップショット方式であり、元ファイルを上書きしない(Pane/AutoSaveService.cs参照)。
+  // 「自動的に上書き保存します」のような、元ファイルが書き変わる誤解を招く表現になっていないか確認する。
+  // tooltipDetailセレクト自体は「一般」カテゴリにしか無いため、カテゴリを切り替える前に変更する。
+  await page.selectOption('[data-field="tooltipDetail"]', "detailed");
+  await page.waitForTimeout(200);
+  await page.click('[data-cat="file"]');
+  await page.waitForTimeout(100);
+  const autoSaveTitleDetailed = await page.$eval('[data-tip="autoSaveEnabled"]', (el) => el.title);
+  ok(`(自動保存) 「上書き保存」という表現が無い "${autoSaveTitleDetailed}"`,
+    !autoSaveTitleDetailed.includes("上書き保存"));
+  ok("(自動保存) バックアップ(スナップショット)であることに触れている",
+    autoSaveTitleDetailed.includes("バックアップ") || autoSaveTitleDetailed.includes("スナップショット"));
+  ok("(自動保存) 元のファイルを書き換えない旨に触れている",
+    autoSaveTitleDetailed.includes("元のファイル"));
+  // 後続の検証は「一般」カテゴリの項目を見るため、カテゴリを元に戻しておく。
+  await page.click('[data-cat="general"]');
+  await page.waitForTimeout(100);
 
   // ---- (4) 設定画面を閉じずに、tooltipDetailセレクトを変更 → 本文側に即時反映 ----
   await page.selectOption('[data-field="tooltipDetail"]', "detailed");

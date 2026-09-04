@@ -101,6 +101,22 @@ async function tabCount(page) {
   const newTabItem = findItem(openMenuMsg?.items, "新しいタブ");
   ok("(A) ウィンドウ形式では「新しいタブ」メニュー項目が無効(enabled:false)", newTabItem?.enabled === false);
   await page.evaluate(() => window.__reply({ type: "menu-closed", menu: "File" }));
+
+  // 総点検 指摘H5: ウィンドウ形式(既定)では、Ctrl+N相当(commands.js file.new、
+  // ネイティブメニューからは"menu-command"で発火する。id→実行関数の対応表はメニューを
+  // 開くたびに作り直されるため、送る前に「ファイル」を開き直す)は従来どおりbridgeへ
+  // type:"new"を送るだけで、タブは増えない(1ウィンドウ1ファイルが前提のため、
+  // Ctrl+Shift+N=newWindowと同じ「新しいウィンドウを開く」動作のまま)。
+  await clearSent(page);
+  await page.click("text=ファイル");
+  await page.waitForTimeout(150);
+  await page.evaluate(() => window.__reply({ type: "menu-command", id: "file.new" }));
+  await page.waitForTimeout(150);
+  const newMsgWindow = await lastMsg(page, "new");
+  ok("(A) ウィンドウ形式のfile.new(新規作成)はbridgeへtype:newを送る", !!newMsgWindow);
+  const tabCountAfterWindow = await tabCount(page);
+  ok(`(A) ウィンドウ形式ではタブは増えない(タブ要素数=${tabCountAfterWindow})`, tabCountAfterWindow === 0);
+
   await page.close();
 }
 
@@ -387,6 +403,60 @@ await page.close();
   const hasTabWord = await spage.evaluate(() => document.body.textContent.includes("タブ形式"));
   ok('(H) 設定画面の文言に「タブ形式」という語も出てこない', !hasTabWord);
   await spage.close();
+}
+
+// ============================================================
+// (H') 総点検 指摘H5: Ctrl+N(newDocument)とCtrl+Shift+N(newWindow)が常に同じ動作(常に
+// bridgeへ"new"/"new-window"を送って新しいウィンドウを開く)になっていた問題の再発防止。
+// 独立した新しいページで検証する((B)〜(G)で使う共有pageのタブ数を狂わせないため)。
+//   - ウィンドウ形式(既定): 両方とも従来どおり新しいウィンドウを開く(タブは増えない)。
+//     1ウィンドウ1ファイルが前提のこの形式では、両者を意味的に区別しようがないため
+//     (仕様書外・ユーザー要望。Pane/MainForm.cs HandleOpenRequestのコメント参照)。
+//   - タブ形式: newDocument()は現在のウィンドウに新しいタブを追加し、bridgeへは何も
+//     送らない。newWindow()は従来どおりtype:"new-window"を送って別ウィンドウを開く。
+// ============================================================
+{
+  const page = await newBridgedPage();
+  // 実際のCtrl+N/Ctrl+Shift+Nはbindshortcuts経由でcommands.jsのfile.new/file.newWindowを
+  // 実行する。ここではネイティブメニューの実行経路(menu-command、.verify-nativemenu.mjs
+  // (e)と同じ流儀)で同じコマンドを直接発火させる(ブリッジ環境では__paneDebugCtxが
+  // 公開されないため)。id→実行関数の対応表はメニューを開くたびに作り直されるので、
+  // 送信の直前に毎回「ファイル」を開き直す(menu-command実行後は自動で閉じる)。
+  const runFileCommand = async (id) => {
+    await page.click("text=ファイル");
+    await page.waitForTimeout(150);
+    await page.evaluate((cmdId) => window.__reply({ type: "menu-command", id: cmdId }), id);
+    await page.waitForTimeout(150);
+  };
+
+  // ---- ウィンドウ形式(既定) ----
+  await clearSent(page);
+  await runFileCommand("file.new");
+  ok("(H'-window) file.new(新規作成)はbridgeへtype:newを送る", !!(await lastMsg(page, "new")));
+  ok("(H'-window) file.newを実行してもタブは増えない(タブ機能自体が無効なため)", (await tabCount(page)) === 0);
+
+  await clearSent(page);
+  await runFileCommand("file.newWindow");
+  ok("(H'-window) file.newWindow(新しいウィンドウ)はbridgeへtype:new-windowを送る", !!(await lastMsg(page, "new-window")));
+
+  // ---- タブ形式へ切り替え ----
+  await applySettings(page, { displayMode: "tab" });
+  const tabsBefore = await tabCount(page);
+  ok(`(H'-tab前提) タブ形式化した時点でタブ1枚 (${tabsBefore})`, tabsBefore === 1);
+
+  await clearSent(page);
+  await runFileCommand("file.new");
+  const tabsAfterNewDoc = await tabCount(page);
+  ok(`(H'-tab) タブ形式のfile.newでタブが1枚増える(${tabsBefore}→${tabsAfterNewDoc})`, tabsAfterNewDoc === tabsBefore + 1);
+  ok("(H'-tab) タブ形式のfile.newはbridgeへtype:newを送らない(新しいウィンドウを開かない)", !(await lastMsg(page, "new")));
+  ok("(H'-tab) タブ形式のfile.newはtype:new-windowも送らない", !(await lastMsg(page, "new-window")));
+
+  await clearSent(page);
+  await runFileCommand("file.newWindow");
+  ok("(H'-tab) タブ形式でもfile.newWindowはタブを増やさない", (await tabCount(page)) === tabsAfterNewDoc);
+  ok("(H'-tab) タブ形式でもfile.newWindowはbridgeへtype:new-windowを送る", !!(await lastMsg(page, "new-window")));
+
+  await page.close();
 }
 
 // ============================================================

@@ -222,9 +222,13 @@ internal static class UpdateService
         }
         catch (Exception ex)
         {
+            // 利用者に見せる文言から例外の型名を外す(総点検 指摘: 「更新を確認できません
+            // でした(HttpRequestException)」等、型名が生で出ていて次に何をすればいいか
+            // 伝わらなかった)。詳細はLogger.WriteExceptionが型名・メッセージ・スタック
+            // トレースまで含めて残すので、調査に必要な情報は失われない。
             Logger.WriteException("更新の確認に失敗", ex);
             if (knownNewerTag is not null) return NewerButNoDetails(currentVersionText, knownNewerTag, knownReleaseUrl);
-            return Error(currentVersionText, $"更新を確認できませんでした({ex.GetType().Name})。");
+            return Error(currentVersionText, $"更新を確認できませんでした。{ExceptionMessages.Describe(ex)}");
         }
     }
 

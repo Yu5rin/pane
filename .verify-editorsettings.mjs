@@ -654,12 +654,19 @@ async function computedPadding(page) {
   await menuCommand(page, "ファイル", "file.exportHtml");
   const ignoreHtml = await page.evaluate(() => window.__sent.find((m) => m.type === "export")?.text ?? "");
   ok(`(23) whitespaceOnExport:ignore ではエクスポートHTMLに<br>が入らない`, !ignoreHtml.includes("<br>"));
+  // 総点検 指摘20の対応でexportAs()に二重実行防止(exportInProgress)が入ったため、
+  // 実機同様ここで"export-done"を返してから次のエクスポートを始めないと、2回目が
+  // 「実行中」のまま弾かれてしまう(src/main.js exportAs()参照)。
+  await page.evaluate(() => window.__reply({ type: "export-done" }));
+  await page.waitForTimeout(100);
 
   await applySettings(page, { whitespaceOnExport: "preserve" });
   await page.evaluate(() => { window.__sent.length = 0; });
   await menuCommand(page, "ファイル", "file.exportHtml");
   const preserveHtml = await page.evaluate(() => window.__sent.find((m) => m.type === "export")?.text ?? "");
   ok(`(23) whitespaceOnExport:preserve ではエクスポートHTMLの段落内改行が<br>になる`, preserveHtml.includes("<br>"));
+  await page.evaluate(() => window.__reply({ type: "export-done" }));
+  await page.waitForTimeout(100);
   await page.close();
 }
 

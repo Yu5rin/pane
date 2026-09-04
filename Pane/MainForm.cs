@@ -161,6 +161,14 @@ internal sealed class MainForm : Form
     /// <summary>実行中のグローバル検索を中断するためのトークン。フォルダ走査用とは独立させ、
     /// 検索中に別のフォルダ走査(ファイルを開いた際の自動読み込み等)が走っても互いに干渉しないようにする。</summary>
     private CancellationTokenSource? _searchCts;
+    /// <summary>エクスポート(Pandoc委譲のWord/EPUB等・WebView2委譲のPDF)が実行中かどうか
+    /// (総点検 指摘20)。JS側(src/commands.js)のenabled判定がメニュー・コマンドパレット・
+    /// ショートカットの入口をまとめて塞ぐ「見た目」の防御であるのに対し、こちらは
+    /// Pandoc/PrintToPdfAsyncを実際に二重起動しないための本体側の防御。JS側の状態と
+    /// この実行状態は非同期メッセージ経由でしか繋がっておらず、タイミングのずれでJS側の
+    /// 判定だけをすり抜ける経路が将来増えても、実行の実体を持つこちら側さえ守っていれば
+    /// 二重起動そのものは起きない、という考え方(HandleExportRequestAsync参照)。</summary>
+    private bool _exportInProgress;
 
     /// <summary><see cref="ResolveOneLevelCached"/>が使う、パス1階層ぶんのリンク解決結果キャッシュ
     /// (不具合修正: 中間ディレクトリのシンボリックリンク対策)。キーは解決前のパス、値は解決後の
@@ -1964,7 +1972,7 @@ internal sealed class MainForm : Form
     {
         using var dialog = new OpenFileDialog
         {
-            Filter = "Markdown / テキスト (*.md;*.markdown;*.mdown;*.txt)|*.md;*.markdown;*.mdown;*.txt|すべてのファイル (*.*)|*.*",
+            Filter = OpenDialogFilterBuilder.Build(),
         };
         if (dialog.ShowDialog(this) == DialogResult.OK)
         {
@@ -2044,7 +2052,9 @@ internal sealed class MainForm : Form
         {
             Logger.WriteException($"保存失敗: {targetPath}", ex);
             CompleteSave(ok: false);
-            PostToWeb(new { type = "save-result", ok = false, error = ex.Message });
+            // msg.errorは現状JS側では表示に使っていない(main.js "save-result"のコメント
+            // 参照)が、将来表示されたときに型名・生の.NETメッセージが出ないよう先に直しておく。
+            PostToWeb(new { type = "save-result", ok = false, error = ExceptionMessages.Describe(ex) });
         }
     }
 
@@ -2115,7 +2125,7 @@ internal sealed class MainForm : Form
             Logger.WriteException($"ファイルを開けなかった: {path}", ex);
             PaneDialog.Show(
                 this,
-                $"ファイルを開けませんでした。\n{ex.Message}",
+                $"ファイルを開けませんでした。\n{ExceptionMessages.Describe(ex)}",
                 "Pane",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
@@ -2178,7 +2188,7 @@ internal sealed class MainForm : Form
             Logger.WriteException($"タブとして開けなかった: {path}", ex);
             PaneDialog.Show(
                 this,
-                $"ファイルを開けませんでした。\n{ex.Message}",
+                $"ファイルを開けませんでした。\n{ExceptionMessages.Describe(ex)}",
                 "Pane",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
@@ -2366,6 +2376,16 @@ internal sealed class MainForm : Form
         var cts = new CancellationTokenSource();
         _folderScanCts = cts;
         previousFolderScanCts?.Dispose();
+        // 総点検 指摘18: 走査開始をJS側へ知らせる。従来は走査完了(folder-loaded)まで
+        // 何も送っておらず、大きなフォルダではサイドバーが「フォルダが読み込まれていません」の
+        // まま数秒固まったように見えていた。autoLoaded(ファイルを開いた際の親フォルダ自動読み込み・
+        // 削除/名前変更/新規作成後の再走査・設定変更後の再走査)では、元々サイドバーの表示を
+        // 変えない設計(autoLoadedの他の用途を参照)に合わせ、ここでも送らない
+        // (毎回の裏側の再走査で「読み込み中」がチラつくのを避けるため)。
+        if (!autoLoaded)
+        {
+            PostToWeb(new { type = "folder-loading" });
+        }
         try
         {
             // 隠しファイル表示・除外パターン(仕様書「詳細」節 showHiddenFilesInTree/fileTreePatterns)は
@@ -2402,7 +2422,9 @@ internal sealed class MainForm : Form
         catch (Exception ex)
         {
             Logger.WriteException($"フォルダの読み込みに失敗: {path}", ex);
-            PostToWeb(new { type = "folder-loaded", error = ex.Message });
+            // 総点検 指摘16: sidebar.jsが「フォルダの読み込みに失敗しました: ${folder.error}」の
+            // 形でそのまま画面へ出す。ex.Messageを生で渡すと英語の.NET例外メッセージが出る。
+            PostToWeb(new { type = "folder-loaded", error = ExceptionMessages.Describe(ex) });
         }
         finally
         {
@@ -2496,7 +2518,8 @@ internal sealed class MainForm : Form
             Logger.WriteException($"global-search失敗: root={rootPath}", ex);
             if (ReferenceEquals(_searchCts, cts))
             {
-                PostToWeb(new { type = "search-done", error = ex.Message });
+                // 総点検 指摘16: global-search.jsがエラーをそのまま本文に表示する。
+                PostToWeb(new { type = "search-done", error = ExceptionMessages.Describe(ex) });
             }
             return;
         }
@@ -2598,7 +2621,7 @@ internal sealed class MainForm : Form
         catch (Exception ex)
         {
             Logger.WriteException($"ドロップされたファイルを開けなかった: {name}", ex);
-            PaneDialog.Show(this, $"ファイルを開けませんでした。\n{ex.Message}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            PaneDialog.Show(this, $"ファイルを開けませんでした。\n{ExceptionMessages.Describe(ex)}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
@@ -3372,7 +3395,7 @@ internal sealed class MainForm : Form
                 catch (Exception ex)
                 {
                     Logger.WriteException("ファイルの関連付け設定の変更に失敗", ex);
-                    errorMessage = $"ファイルの関連付け設定を変更できませんでした。\n{ex.Message}";
+                    errorMessage = $"ファイルの関連付け設定を変更できませんでした。\n{ExceptionMessages.Describe(ex)}";
                 }
             }
 
@@ -3388,7 +3411,7 @@ internal sealed class MainForm : Form
                 catch (Exception ex)
                 {
                     // StartupService側で既にLogger.WriteException済みのため、ここではUI表示のみ。
-                    string msg = $"スタートアップ登録を変更できませんでした。\n{ex.Message}";
+                    string msg = $"スタートアップ登録を変更できませんでした。\n{ExceptionMessages.Describe(ex)}";
                     errorMessage = errorMessage is null ? msg : $"{errorMessage}\n{msg}";
                 }
             }
@@ -3784,6 +3807,30 @@ internal sealed class MainForm : Form
     // 必ず"export-done"を返し、JS側の表示を元に戻せるようにする。 ----
     private async Task HandleExportRequestAsync(JsonElement message)
     {
+        // 総点検 指摘20: 二重実行の実際の防止。JS側(commands.jsのenabled判定)が通常はここへ
+        // 二重に届くこと自体を防ぐが、それはUIの入り口を塞ぐだけの一次防御であり、
+        // Pandoc/PrintToPdfAsyncを実際に二重起動しないという保証はこちら(_exportInProgress)に
+        // 持たせる。ここで弾いた場合は"export-done"を送らない(先に受理された側の処理が
+        // 完了すればfinallyから送られ、JS側の状態はそれで正しく戻るため。ここでも送ると
+        // まだ処理中の1件目より先に「完了」が届いてしまう)。
+        if (_exportInProgress)
+        {
+            Logger.Write("HandleExportRequestAsync: 既にエクスポートが進行中のため無視");
+            return;
+        }
+        _exportInProgress = true;
+        try
+        {
+            await HandleExportRequestCoreAsync(message);
+        }
+        finally
+        {
+            _exportInProgress = false;
+        }
+    }
+
+    private async Task HandleExportRequestCoreAsync(JsonElement message)
+    {
         TryGetString(message, "format", out string format);
         TryGetString(message, "text", out string text);
         JsonElement pageOptions = message.TryGetProperty("pageOptions", out JsonElement poProp) && poProp.ValueKind == JsonValueKind.Object
@@ -3845,7 +3892,7 @@ internal sealed class MainForm : Form
         catch (Exception ex)
         {
             Logger.WriteException($"エクスポートに失敗: format={format}, targetPath={targetPath}", ex);
-            PaneDialog.Show(this, $"エクスポートに失敗しました。\n{ex.Message}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            PaneDialog.Show(this, $"エクスポートに失敗しました。\n{ExceptionMessages.Describe(ex)}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
         {
@@ -4169,7 +4216,7 @@ internal sealed class MainForm : Form
         catch (Exception ex)
         {
             Logger.WriteException("画像挿入に失敗", ex);
-            PaneDialog.Show(this, $"画像を挿入できませんでした。\n{ex.Message}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            PaneDialog.Show(this, $"画像を挿入できませんでした。\n{ExceptionMessages.Describe(ex)}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 }
