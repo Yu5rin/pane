@@ -20,7 +20,7 @@ public class OpenDialogFilterBuilderTests
     }
 
     [Fact]
-    public void 3種類のフィルタになっている_Markdownテキスト_コードファイル_すべてのファイル()
+    public void フィルタは3種類になっている_Markdownテキスト_コードファイル_すべてのファイル()
     {
         string[] parts = SplitParts(OpenDialogFilterBuilder.Build());
         Assert.Equal(6, parts.Length); // (説明,パターン) の組が3つ
