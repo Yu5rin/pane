@@ -118,6 +118,10 @@
     <button id="status-wrap" type="button" title="折り返し表示を切り替え"></button>
     <button id="status-count" type="button" title="クリックで文字数の詳細を表示">0文字</button>
     <button id="status-zoom" type="button" title="クリックで実際のサイズに戻す">100%</button>
+    <!-- エクスポート実行中であることを文字で示す(総点検 指摘20)。Pandoc/PrintToPdfAsyncの
+         完了(export-done)まで表示し続ける。グローバル検索の「検索中…」(global-search.js)と
+         同じ「動詞+中…」の語彙・見た目(装飾なしのテキストのみ)に揃える。 -->
+    <span id="status-export" hidden>エクスポートしています…</span>
     <span style="flex:1"></span>
     <!-- 未保存の変更があることを文字で示す(タイトルバーの"(未保存)"と対になる表示)。 -->
     <span id="status-dirty" hidden>未保存</span>
