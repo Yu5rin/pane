@@ -373,7 +373,15 @@ internal sealed class PaneApplicationContext : ApplicationContext
         //   ・2枚目以降のウィンドウ追加メモリ(目標60MB以内)
         //   ・既存インスタンスへのファイル追加表示(目標300ms以内。パイプ経由の要求が対象)
         // 1枚目は「起動」であってこの目標の対象外なので、2枚目以降だけを見る。
-        bool measureAdditionalWindow = _windows.Count > 0;
+        //
+        // 【実際に困ったこと】以前は枚数の上限を設けず、開くたびに毎回測っていた。
+        // メモリの計測(MeasureTotalMemoryBytes)はWebView2のプロセスを1つずつ開いて
+        // WorkingSetを足す処理で、ウィンドウが増えるほど数えるプロセスも増える。
+        // 実機ログ(2026-09-06)では2枚目で53ms、17枚目では157msかかっており、しかも
+        // ウィンドウを開く前と後の2回、UIスレッドの上で走っていた。
+        // 目標そのものは「2枚目以降のウィンドウ」であって17枚目を測る必要はないため、
+        // 確認に足りる枚数で打ち切る。
+        bool measureAdditionalWindow = _windows.Count > 0 && _windows.Count < MeasuredWindowLimit;
         bool memoryBeforeOwnOnly = false;
         long memoryBeforeBytes = measureAdditionalWindow ? MeasureTotalMemoryBytes(out memoryBeforeOwnOnly) : 0;
         var windowStopwatch = measureAdditionalWindow ? System.Diagnostics.Stopwatch.StartNew() : null;
@@ -547,6 +555,13 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// それらのプロセスも同じ名前で並ぶ。実機では2枚目のウィンドウのメモリ増加が373MBと
     /// 出ていたが、これは他のアプリのぶんを一緒に数えていた疑いが強く、数字として当てにならない。
     /// </summary>
+    /// <summary>
+    /// [計測] 仕様書8.4節の確認としてメモリと表示時間を測るウィンドウの上限。
+    /// この枚数に達したら測らない(理由は<see cref="OpenWindow"/>の該当箇所を参照)。
+    /// 2枚目から5枚目までを見れば、目標(2枚目以降のウィンドウ)の確認には足りる。
+    /// </summary>
+    private const int MeasuredWindowLimit = 5;
+
     private static long MeasureTotalMemoryBytes(out bool measuredOwnProcessesOnly)
     {
         long total = 0;
@@ -593,7 +608,10 @@ internal sealed class PaneApplicationContext : ApplicationContext
                     string breakdown = string.Join(", ", byKind
                         .OrderByDescending(entry => entry.Value.Bytes)
                         .Select(entry => $"{entry.Key}×{entry.Value.Count}={entry.Value.Bytes / (1024 * 1024)}MB"));
-                    Logger.Debug($"メモリの内訳(WebView2): {breakdown}");
+                    // 詳細ログ(Debug)にすると、実機で確かめてもらうたびに設定の変更をお願いする
+                    // ことになる。測るのは最初の数枚だけ(MeasuredWindowLimit)で行数も増えないため、
+                    // 既定のログに出す。
+                    Logger.Write($"[計測] メモリの内訳(WebView2): {breakdown}");
                 }
                 measuredOwnProcessesOnly = true;
                 return total;
