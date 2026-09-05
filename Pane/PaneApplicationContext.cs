@@ -479,7 +479,19 @@ internal sealed class PaneApplicationContext : ApplicationContext
             System.Diagnostics.Stopwatch stopwatch = windowStopwatch!;
             form.ReadyToUse += () =>
             {
+                // 【実際に間違えたこと】以前はこの下のMeasureTotalMemoryBytesを先に呼び、
+                // そのあとで stopwatch.ElapsedMilliseconds を読んでいた。メモリの計測は
+                // WebView2のプロセスを1つずつ開いてWorkingSetを足す処理で、ウィンドウが
+                // 増えるほど数えるプロセスも増える。その所要時間(実機で56〜82ms)が
+                // 「表示まで」に足し込まれ、2枚目302ms・6枚目357msと、目標の300msを
+                // 超えたように見えていた(実際は246〜278msで収まっていた)。
+                // 枚数が増えるほど報告値だけが伸びるのが、その兆候だった。
+                // 測り終えた時刻は、他のことをする前にここで確定させる。
+                long elapsedMs = stopwatch.ElapsedMilliseconds;
+
+                long measureStart = System.Diagnostics.Stopwatch.GetTimestamp();
                 long afterBytes = MeasureTotalMemoryBytes(out bool ownOnly);
+                long measureMs = (long)System.Diagnostics.Stopwatch.GetElapsedTime(measureStart).TotalMilliseconds;
                 long deltaMb = (afterBytes - beforeBytes) / (1024 * 1024);
                 // 前後で数え方が変わっていたら、その差は比べられない(片方に他アプリのぶんが
                 // 入っている)。黙って数字だけ出すと読み違えるので、その旨を添える。
@@ -491,9 +503,10 @@ internal sealed class PaneApplicationContext : ApplicationContext
                     _ => "メモリはPane本体とWebView2の各プロセスの合計。WebView2環境がまだ無く実行ファイル名で数えたため、" +
                          "他のアプリのWebView2が動いていると多めに出る",
                 };
-                Logger.Write($"[計測] {_windows.Count}枚目のウィンドウ: 表示まで{stopwatch.ElapsedMilliseconds}ms, " +
-                             $"メモリ増加{deltaMb}MB (目標: 表示300ms以内・メモリ60MB以内。{memoryNote})");
-                PerfWatch.Report($"{_windows.Count}枚目のウィンドウの表示", stopwatch.ElapsedMilliseconds, 300);
+                Logger.Write($"[計測] {_windows.Count}枚目のウィンドウ: 表示まで{elapsedMs}ms, " +
+                             $"メモリ増加{deltaMb}MB (目標: 表示300ms以内・メモリ60MB以内。{memoryNote}。" +
+                             $"このメモリ計測自体に{measureMs}msかかっており、表示までの時間には含めていない)");
+                PerfWatch.Report($"{_windows.Count}枚目のウィンドウの表示", elapsedMs, 300);
             };
         }
 
@@ -550,17 +563,37 @@ internal sealed class PaneApplicationContext : ApplicationContext
             {
                 // この環境が持っているプロセスだけを数える。他のアプリのWebView2は別の環境なので
                 // ここには出てこない。
+                //
+                // 種別ごとの内訳も控える。仕様書8.4節は「2枚目以降のウィンドウ追加メモリ
+                // 60MB以内」を目標にしているが、実機では101〜110MB増える。8.1節が
+                // 「プロセスを分ければ1枚あたり100MB超」と書いているとおり、WebView2は
+                // 同じプロセス内で使ってもウィンドウごとにレンダラー(Renderer)を作り、
+                // 共有されるのはブラウザ本体・GPU・ユーティリティだけである。
+                // 目標値を見直すのか短縮できるのかを判断するには、増えたぶんが本当に
+                // レンダラーなのかが分からないと決められないため、内訳を残す。
+                var byKind = new Dictionary<string, (int Count, long Bytes)>();
                 foreach (Microsoft.Web.WebView2.Core.CoreWebView2ProcessInfo info in env.GetProcessInfos())
                 {
                     try
                     {
                         using System.Diagnostics.Process p = System.Diagnostics.Process.GetProcessById(info.ProcessId);
                         total += p.WorkingSet64;
+
+                        string kind = info.Kind.ToString();
+                        (int Count, long Bytes) sum = byKind.TryGetValue(kind, out var current) ? current : (0, 0L);
+                        byKind[kind] = (sum.Count + 1, sum.Bytes + p.WorkingSet64);
                     }
                     catch (ArgumentException)
                     {
                         // 数え終わる前に終了したプロセス。数に入れないだけでよい。
                     }
+                }
+                if (byKind.Count > 0)
+                {
+                    string breakdown = string.Join(", ", byKind
+                        .OrderByDescending(entry => entry.Value.Bytes)
+                        .Select(entry => $"{entry.Key}×{entry.Value.Count}={entry.Value.Bytes / (1024 * 1024)}MB"));
+                    Logger.Debug($"メモリの内訳(WebView2): {breakdown}");
                 }
                 measuredOwnProcessesOnly = true;
                 return total;
