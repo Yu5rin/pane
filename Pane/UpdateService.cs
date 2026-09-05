@@ -544,7 +544,7 @@ internal static class UpdateService
             exeMoved = true;
             // 退避した時刻を「今」にしておく。リネームは元の更新時刻(=その版をビルドした
             // 日時)を引き継ぐため、そのままだと次の起動で「たった今更新された」と
-            // 判断できない(LooksLikeJustUpdated参照)。
+            // 判断できない(TryGetReplacementTimeUtc参照)。
             TrySetJustMovedTimestamp(exeBackup, isDirectory: false);
 
             if (Directory.Exists(currentDist))
@@ -666,12 +666,12 @@ internal static class UpdateService
 
     /// <summary>
     /// 「たった今更新された」とみなす猶予。これを過ぎた退避ファイルは、消しそこねた
-    /// 古い残骸として扱う(下の<see cref="LooksLikeJustUpdated"/>参照)。
+    /// 古い残骸として扱う(下の<see cref="TryGetReplacementTimeUtc"/>参照)。
     /// </summary>
     private static readonly TimeSpan JustUpdatedWindow = TimeSpan.FromMinutes(5);
 
     /// <summary>
-    /// 直前に更新が行われた形跡があるかどうか(退避ファイルが残っているか)。
+    /// 直前に更新が行われた形跡があれば、その入れ替えが起きた時刻を返す(無ければnull)。
     ///
     /// <see cref="ApplyUpdate"/>が退避したファイルは、次の起動で
     /// <see cref="CleanupLeftovers"/>が消すまで残る。つまり起動時にこれが在るということは、
@@ -681,8 +681,11 @@ internal static class UpdateService
     /// 「更新直後」と見なしてしまうと、通常の多重起動(2枚目のウィンドウを開く等)のたびに
     /// 他プロセスの終了を待って何秒も足止めしてしまう。そうならないよう、置かれてから
     /// <see cref="JustUpdatedWindow"/>以内のものだけを対象にする。
+    ///
+    /// 戻り値の時刻は、待つ相手を絞り込むためにも使う
+    /// (<see cref="UpdateProcessWaitPolicy"/>参照)。
     /// </summary>
-    private static bool LooksLikeJustUpdated(string folder)
+    private static DateTime? TryGetReplacementTimeUtc(string folder)
     {
         DateTime threshold = DateTime.UtcNow - JustUpdatedWindow;
 
@@ -691,24 +694,32 @@ internal static class UpdateService
         // そのため、これだけに頼らず下の判定も併せて見る。
         string exeBackup = Path.Combine(folder, "Pane.exe" + BackupSuffix);
         bool exeBackupExists = File.Exists(exeBackup);
-        if (exeBackupExists && File.GetLastWriteTimeUtc(exeBackup) > threshold) return true;
+        DateTime? newest = exeBackupExists ? File.GetLastWriteTimeUtc(exeBackup) : null;
 
         string distBackup = Path.Combine(folder, "dist" + BackupSuffix);
         bool distBackupExists = Directory.Exists(distBackup);
-        if (distBackupExists && Directory.GetLastWriteTimeUtc(distBackup) > threshold) return true;
+        if (distBackupExists)
+        {
+            DateTime distTime = Directory.GetLastWriteTimeUtc(distBackup);
+            if (newest is null || distTime > newest.Value) newest = distTime;
+        }
+
+        if (newest is DateTime backupTime && backupTime > threshold) return backupTime;
 
         // 退避ファイルが在るのに時刻が古い場合の受け皿。いま動いている自分自身が、
         // ついさっき置かれたファイルかどうかを見る。入れ替えはFile.Copyで新しく作るため、
         // 更新直後であれば作成時刻が「今」になっている。
-        if (!exeBackupExists && !distBackupExists) return false;
+        if (!exeBackupExists && !distBackupExists) return null;
         try
         {
             string? self = Environment.ProcessPath;
-            return self is not null && File.GetCreationTimeUtc(self) > threshold;
+            if (self is null) return null;
+            DateTime created = File.GetCreationTimeUtc(self);
+            return created > threshold ? created : null;
         }
         catch
         {
-            return false;
+            return null;
         }
     }
 
@@ -731,7 +742,8 @@ internal static class UpdateService
         try
         {
             string? folder = Path.GetDirectoryName(Environment.ProcessPath ?? "");
-            if (string.IsNullOrEmpty(folder) || !LooksLikeJustUpdated(folder)) return;
+            if (string.IsNullOrEmpty(folder)) return;
+            if (TryGetReplacementTimeUtc(folder) is not DateTime replacedAtUtc) return;
 
             int selfId = Environment.ProcessId;
             Process[] candidates = Process.GetProcessesByName("Pane");
@@ -745,6 +757,15 @@ internal static class UpdateService
                     string? otherPath = TryGetProcessPath(other);
                     if (otherPath is null) continue;
                     if (!string.Equals(Path.GetDirectoryName(otherPath), folder, StringComparison.OrdinalIgnoreCase)) continue;
+
+                    // 入れ替えより後に起動した相手は現役の常駐プロセスであって、
+                    // 入れ替えられた古いプロセスではない(UpdateProcessWaitPolicy参照)。
+                    DateTime? otherStartUtc = TryGetProcessStartTimeUtc(other);
+                    if (!UpdateProcessWaitPolicy.ShouldWait(replacedAtUtc, otherStartUtc))
+                    {
+                        Logger.Write($"更新直後の起動: 同じ場所のPane(PID={other.Id})は入れ替えより後に起動しているので待たない");
+                        continue;
+                    }
 
                     Logger.Write($"更新直後の起動: 同じ場所の古いPane(PID={other.Id})がまだ動いているので終了を待つ");
                     WaitForPreviousProcessExit(other.Id);
@@ -780,6 +801,13 @@ internal static class UpdateService
     private static string? TryGetProcessPath(Process process)
     {
         try { return process.MainModule?.FileName; }
+        catch { return null; }
+    }
+
+    /// <summary>プロセスの起動時刻(UTC)。権限等で読めなければnull。</summary>
+    private static DateTime? TryGetProcessStartTimeUtc(Process process)
+    {
+        try { return process.StartTime.ToUniversalTime(); }
         catch { return null; }
     }
 
@@ -836,7 +864,13 @@ internal static class UpdateService
             bool distBackupExists = Directory.Exists(distBackup);
             bool markerExists = File.Exists(marker);
 
-            switch (UpdateLeftoverPolicy.Decide(exeBackupExists, distBackupExists, markerExists))
+            // マーカーが無い場合の追加の手がかり(UpdateLeftoverPolicy.Decideの説明を参照)。
+            DateTime? backupTimeUtc = TryGetBackupTimeUtc(exeBackup, exeBackupExists, distBackup, distBackupExists);
+            TimeSpan? backupAge = backupTimeUtc is DateTime t ? DateTime.UtcNow - t : null;
+            bool currentExeIsNewer = backupTimeUtc is DateTime bt && IsCurrentExeNewerThan(bt);
+
+            switch (UpdateLeftoverPolicy.Decide(
+                exeBackupExists, distBackupExists, markerExists, backupAge, currentExeIsNewer))
             {
                 case UpdateLeftoverPolicy.Action.DeleteBackups:
                     bool removed = false;
@@ -844,6 +878,15 @@ internal static class UpdateService
                     if (distBackupExists) removed |= TryDeleteDirectory(distBackup);
                     TryDelete(marker);
                     if (removed) Logger.Write("更新: 前回の更新で退避した古いファイルを削除した");
+                    break;
+
+                case UpdateLeftoverPolicy.Action.DeleteStaleBackups:
+                    // 完了マーカーが無い版で更新した環境の残骸。入れ替えは実際には
+                    // 終わっているので、警告を出さずに片付ける。
+                    bool staleRemoved = false;
+                    if (exeBackupExists) staleRemoved |= TryDelete(exeBackup);
+                    if (distBackupExists) staleRemoved |= TryDeleteDirectory(distBackup);
+                    if (staleRemoved) Logger.Write("更新: 古い版で更新したときの退避ファイルを削除した");
                     break;
 
                 case UpdateLeftoverPolicy.Action.KeepBackups:
@@ -868,6 +911,39 @@ internal static class UpdateService
         catch (Exception ex)
         {
             Logger.Debug($"更新: 退避ファイルの掃除に失敗(次回また試す): {ex.GetType().Name}");
+        }
+    }
+
+    /// <summary>退避ファイルが置かれた時刻(UTC)。両方あれば新しいほう。読めなければnull。</summary>
+    private static DateTime? TryGetBackupTimeUtc(string exeBackup, bool exeBackupExists, string distBackup, bool distBackupExists)
+    {
+        try
+        {
+            DateTime? newest = exeBackupExists ? File.GetLastWriteTimeUtc(exeBackup) : null;
+            if (distBackupExists)
+            {
+                DateTime distTime = Directory.GetLastWriteTimeUtc(distBackup);
+                if (newest is null || distTime > newest.Value) newest = distTime;
+            }
+            return newest;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>いま動いているexeが、指定時刻より後に置かれたものか。読めなければfalse(安全側)。</summary>
+    private static bool IsCurrentExeNewerThan(DateTime timeUtc)
+    {
+        try
+        {
+            string? self = Environment.ProcessPath;
+            return self is not null && File.GetCreationTimeUtc(self) > timeUtc;
+        }
+        catch
+        {
+            return false;
         }
     }
 

@@ -915,6 +915,7 @@ internal static class SettingsBridge
     // 両方から使える共有ヘルパーへ切り出した。呼び出し方はusing staticにより従来と同じ)。
 
     private static bool? _pandocAvailableCache;
+    private static readonly object PandocDetectionGate = new();
 
     /// <summary>
     /// Pandocの導入有無を検出する(Word/EPUBエクスポートに必要)。プロセス起動1回のみでキャッシュする。
@@ -928,6 +929,20 @@ internal static class SettingsBridge
     public static bool DetectPandocAvailable()
     {
         if (_pandocAvailableCache is bool cached) return cached;
+
+        // 起動直後の事前準備(Program.WarmUpForSettingsWindow)とUIスレッドからの呼び出しが
+        // 重なりうるため、外部プロセスの起動が二重に走らないよう囲う。
+        lock (PandocDetectionGate)
+        {
+            if (_pandocAvailableCache is bool cachedInLock) return cachedInLock;
+            bool detected = DetectPandocAvailableCore();
+            _pandocAvailableCache = detected;
+            return detected;
+        }
+    }
+
+    private static bool DetectPandocAvailableCore()
+    {
         bool available;
         try
         {
@@ -952,7 +967,6 @@ internal static class SettingsBridge
         {
             available = false; // Pandoc未導入、または起動に失敗
         }
-        _pandocAvailableCache = available;
         return available;
     }
 }

@@ -142,6 +142,9 @@ internal static class Program
         // 消す仕組みが無いと使った日数ぶん溜まったままになる(StartupLogReview.CleanupOldLogs参照)。
         Task.Run(StartupLogReview.CleanupOldLogs);
 
+        // 設定ウィンドウが必要とする重い情報を、要求される前に用意しておく。
+        Task.Run(WarmUpForSettingsWindow);
+
         var context = new PaneApplicationContext(initialPath, preload);
 
         var server = new SingleInstanceServer(SynchronizationContext.Current!);
@@ -155,6 +158,41 @@ internal static class Program
         // 書き残しを出し切ってから終わる(Loggerのワーカーはバックグラウンドスレッドのため、
         // これが無いと終了直前の数百ms分のログが失われる)。
         Logger.Shutdown();
+    }
+
+    /// <summary>
+    /// 設定ウィンドウの応答(get-settings)に必要な、時間のかかる情報を先に用意しておく。
+    ///
+    /// 【実機で起きたこと】
+    /// 実機ログ(2026-09-05)で、設定ウィンドウの初回表示に8.5秒かかっていた。
+    /// <see cref="SettingsBridge.PostSettingsSnapshot"/>はUIスレッド上で応答を同期的に
+    /// 組み立てるが、その中に重いものが2つ含まれている。
+    ///   ・<see cref="FontService"/>: 全フォントの列挙と、ファミリごとの等幅判定
+    ///     (1つずつテキスト幅を実測する)
+    ///   ・<see cref="SettingsBridge.DetectPandocAvailable"/>: 外部プロセスの起動(最大3秒待ち)
+    /// どちらもプロセス内で一度計算すれば以後は使い回されるため、「初回だけ」遅い。
+    ///
+    /// この見立ての裏付けとして、同じログではHelpWindowの事前生成タイマー(本来22.6秒発火)と
+    /// 起動時の更新確認タイマー(本来25.1秒)が揃って30.0秒台までずれ込み、設定画面の描画完了
+    /// 直後に一斉に発火していた。UIスレッドがその間ふさがっていたことを示している。
+    ///
+    /// そこで、まだ誰も待っていない起動直後のうちにバックグラウンドで済ませておく。
+    /// 失敗しても、必要になった時点で改めて計算されるだけで実害は無い。
+    /// </summary>
+    private static void WarmUpForSettingsWindow()
+    {
+        try
+        {
+            long startTimestamp = Stopwatch.GetTimestamp();
+            int fontCount = FontService.AllFamilies.Count;
+            bool pandoc = SettingsBridge.DetectPandocAvailable();
+            long elapsedMs = (long)Stopwatch.GetElapsedTime(startTimestamp).TotalMilliseconds;
+            Logger.Write($"[計測] 設定画面の事前準備: {elapsedMs}ms (フォント{fontCount}件, pandoc={pandoc})");
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException("設定画面の事前準備に失敗(必要になった時点で改めて用意する)", ex);
+        }
     }
 
     /// <summary>

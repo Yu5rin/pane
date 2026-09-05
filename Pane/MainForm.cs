@@ -2491,7 +2491,12 @@ internal sealed class MainForm : Form
         // ファイルを開いた副作用としての自動読み込みであり、ユーザーが「フォルダを開いた」
         // わけではないためautoLoaded: trueにする(サイドバーを勝手に開いたり、見ている
         // パネルをファイルツリーへ強制的に切り替えたりしない)。
-        _ = LoadFolderAsync(parentDir, autoLoaded: true);
+        //
+        // ここだけはuseCache: trueにする。実機ログ(2026-09-05)で、ダウンロードフォルダ
+        // (約1万件)の中のファイルを開くたびに791〜1169msの走査が繰り返されていた。
+        // 同じフォルダの中のファイルを続けて開く場面がまさにこれで、走査条件も結果も
+        // 毎回同じになる(FolderService.ScanAsyncのuseCache参照)。
+        _ = LoadFolderAsync(parentDir, autoLoaded: true, useCache: true);
     }
 
     /// <summary>
@@ -2508,7 +2513,10 @@ internal sealed class MainForm : Form
     /// 直後はサイドバーを開いてファイルツリータブへ切り替える)を行わない。既に見ている
     /// パネルを勝手にツリーへ切り替えたり、閉じているサイドバーを毎回開いたりしないための区別。
     /// </summary>
-    private async Task LoadFolderAsync(string path, bool autoLoaded = false)
+    /// <param name="useCache">直近の同条件の走査結果を使い回してよいか
+    /// (<see cref="FolderService.ScanAsync"/>参照)。ファイルを開いた副作用での自動読み込み
+    /// でのみtrueにする。</param>
+    private async Task LoadFolderAsync(string path, bool autoLoaded = false, bool useCache = false)
     {
         Logger.Write($"LoadFolderAsync開始: {PrivacyLogFormatter.ShortenPath(path)}, autoLoaded={autoLoaded}");
         Logger.Debug($"LoadFolderAsync開始(フルパス): {path}");
@@ -2536,7 +2544,8 @@ internal sealed class MainForm : Form
             // 走査のたびに最新の設定を読み直す(設定画面を開いたまま値を変えても、次の再走査から
             // 反映されるようにするため。ReloadLoadedFolderIfAny/PostCapabilities側で再走査をトリガーする)。
             AppSettings settings = SettingsService.Load();
-            FolderScanResult result = await FolderService.ScanAsync(path, settings.ShowHiddenFilesInTree, settings.FileTreePatterns, cts.Token);
+            FolderScanResult result = await FolderService.ScanAsync(
+                path, settings.ShowHiddenFilesInTree, settings.FileTreePatterns, cts.Token, useCache);
             if (cts.IsCancellationRequested) return;
 
             _loadedFolderRootPath = result.RootPath;

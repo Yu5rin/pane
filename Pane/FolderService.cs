@@ -37,6 +37,25 @@ internal static class FolderService
     private const int MaxEntries = 10000;
 
     /// <summary>
+    /// 走査結果を使い回す時間(<see cref="ScanAsync"/>のuseCache=trueのときのみ)。
+    /// 短くしすぎると繰り返し走査が復活し、長くしすぎると外で増減したファイルが
+    /// いつまでも一覧に出ない。実機で「同じフォルダの中のファイルを続けて開く」場面を
+    /// カバーできる長さとして2分にしてある。
+    /// </summary>
+    private static readonly TimeSpan ScanCacheLifetime = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// 走査結果の使い回し(TimedCache参照)。キーには走査条件(パス・隠しファイル表示・
+    /// 除外パターン)をすべて含める。設定を変えれば別のキーになるため、古い条件の結果が
+    /// 返ることはない。
+    /// </summary>
+    private static readonly TimedCache<string, FolderScanResult> ScanCache =
+        new(ScanCacheLifetime, StringComparer.OrdinalIgnoreCase);
+
+    private static string BuildCacheKey(string fullRoot, bool showHiddenFiles, IReadOnlyList<string> excludePatterns)
+        => $"{fullRoot}\u0000{showHiddenFiles}\u0000{string.Join("\u0001", excludePatterns)}";
+
+    /// <summary>
     /// rootPath配下を再帰的に走査する。仕様書 第8.3節「フォルダ読み込みは非同期。
     /// ファイル数が多い場合も編集操作をブロックしない」に基づき、Task.Runで
     /// バックグラウンドスレッド上で実行する。
@@ -46,10 +65,27 @@ internal static class FolderService
     /// ファイル/フォルダ、およびドット始まりの名前も含める(既定false=従来どおり除外)。</param>
     /// <param name="excludePatterns">設定 fileTreePatterns。GlobMatcherで判定し、除外に該当する
     /// ファイル・フォルダを走査結果から取り除く(既定は空=何も除外しない)。</param>
+    /// <param name="useCache">
+    /// 直近<see cref="ScanCacheLifetime"/>以内の同条件の走査結果があれば、それを使い回してよいか。
+    /// 既定false(必ず走査し直す)。trueにしてよいのは「ファイルを開いた副作用としての親フォルダ
+    /// 自動読み込み」だけで、ユーザーが明示的にフォルダを開いた場合・Pane自身がファイルを
+    /// 作成/削除/改名したあとの再走査・設定変更後の再走査では必ずfalseにすること
+    /// (それらは「今の中身」が見えなければならない)。
+    /// </param>
     public static Task<FolderScanResult> ScanAsync(
-        string rootPath, bool showHiddenFiles = false, IReadOnlyList<string>? excludePatterns = null, CancellationToken ct = default)
+        string rootPath, bool showHiddenFiles = false, IReadOnlyList<string>? excludePatterns = null,
+        CancellationToken ct = default, bool useCache = false)
     {
         excludePatterns ??= Array.Empty<string>();
+        if (useCache)
+        {
+            string cacheKey = BuildCacheKey(Path.GetFullPath(rootPath), showHiddenFiles, excludePatterns);
+            if (ScanCache.TryGet(cacheKey, out FolderScanResult cached))
+            {
+                Logger.Write($"FolderService.ScanAsync: 直近の走査結果を使い回した(件数={cached.Entries.Count})");
+                return Task.FromResult(cached);
+            }
+        }
         return Task.Run(() =>
         {
             string fullRoot = Path.GetFullPath(rootPath);
@@ -72,7 +108,21 @@ internal static class FolderService
                 return string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
             });
 
-            return new FolderScanResult(fullRoot, Path.GetFileName(fullRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)), entries, truncated);
+            var result = new FolderScanResult(fullRoot, Path.GetFileName(fullRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)), entries, truncated);
+
+            // 打ち切った結果(MaxEntriesに達した)も使い回す。
+            //
+            // 【実際に落ちたこと】最初はここを `if (!truncated)` にしていた。「不完全な結果は
+            // 使い回さない」という理屈だったが、実機ログ(2026-09-05)で使い回しが1度も
+            // 起きなかった。直そうとしていたダウンロードフォルダがまさに1万件で打ち切られる
+            // フォルダで、この条件がそれを丸ごと除外していた。
+            // 打ち切りは走査の失敗ではなく、走査し直しても同じところで打ち切られる。
+            // 不完全さは使い回しとは無関係。
+            //
+            // 返した結果は読むだけ(呼び出し側で書き換えない)前提で共有する。
+            ScanCache.Set(BuildCacheKey(fullRoot, showHiddenFiles, excludePatterns), result);
+
+            return result;
         }, ct);
     }
 
