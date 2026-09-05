@@ -54,6 +54,61 @@ public class UpdateLeftoverPolicyTests
     }
 
     [Fact]
+    public void マーカーが無くても一日経ちexeが置き換わっていれば消してよい()
+    {
+        // 完了マーカーはv1.1.4で入れた仕組みなので、それより前の版で更新した環境には
+        // 「退避ファイルはあるがマーカーは無い」が最初から存在する。これをKeepBackupsに
+        // したままだと、実際には正常に更新できているのに警告が起動のたびに出続ける。
+        Assert.Equal(
+            UpdateLeftoverPolicy.Action.DeleteStaleBackups,
+            UpdateLeftoverPolicy.Decide(
+                exeBackupExists: true, distBackupExists: true, markerExists: false,
+                backupAge: TimeSpan.FromHours(25), currentExeIsNewerThanBackup: true));
+    }
+
+    [Fact]
+    public void 一日経っていてもexeが置き換わっていなければ残す()
+    {
+        // 入れ替えに失敗したまま放置された環境。退避ファイルが唯一の復旧材料なので消さない。
+        Assert.Equal(
+            UpdateLeftoverPolicy.Action.KeepBackups,
+            UpdateLeftoverPolicy.Decide(
+                exeBackupExists: true, distBackupExists: true, markerExists: false,
+                backupAge: TimeSpan.FromDays(30), currentExeIsNewerThanBackup: false));
+    }
+
+    [Fact]
+    public void 退避してすぐの残骸は消さない()
+    {
+        // 本当にdistのコピー中に力尽きた直後。ここで消すと復旧できなくなる。
+        Assert.Equal(
+            UpdateLeftoverPolicy.Action.KeepBackups,
+            UpdateLeftoverPolicy.Decide(
+                exeBackupExists: true, distBackupExists: true, markerExists: false,
+                backupAge: TimeSpan.FromMinutes(5), currentExeIsNewerThanBackup: true));
+    }
+
+    [Fact]
+    public void 退避時刻が読めなければ残す()
+    {
+        Assert.Equal(
+            UpdateLeftoverPolicy.Action.KeepBackups,
+            UpdateLeftoverPolicy.Decide(
+                exeBackupExists: true, distBackupExists: true, markerExists: false,
+                backupAge: null, currentExeIsNewerThanBackup: true));
+    }
+
+    [Fact]
+    public void 古い残骸でも完了マーカーがあれば通常の削除として扱う()
+    {
+        Assert.Equal(
+            UpdateLeftoverPolicy.Action.DeleteBackups,
+            UpdateLeftoverPolicy.Decide(
+                exeBackupExists: true, distBackupExists: true, markerExists: true,
+                backupAge: TimeSpan.FromDays(10), currentExeIsNewerThanBackup: true));
+    }
+
+    [Fact]
     public void 完了マーカーのファイル名は固定値()
     {
         // CleanupLeftovers・ApplyUpdateの両方がこの定数を参照する前提。名前が変わると
