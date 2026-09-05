@@ -4,7 +4,7 @@ namespace Pane.Tests;
 /// settings.jsonが壊れていた場合の退避ファイル名(<see cref="SettingsRecoveryLogic"/>)を
 /// 固定するテスト。
 ///
-/// 対応する不具合(.review-behavior.md「settings.jsonが壊れていると、最初の設定書き込みで
+/// 対応する不具合(docs/調査記録/点検-機能と動作.md「settings.jsonが壊れていると、最初の設定書き込みで
 /// 全設定が既定値で上書きされる」): 以前はLoad()がJsonExceptionを無言で握りつぶして
 /// 既定値を返すだけで、バックアップも警告ログも残らなかった。次のUpdate()(設定を1項目
 /// 変えるだけの操作)が、壊れたファイルの上から既定値ベースの設定を書き込み、最近使った

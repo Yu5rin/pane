@@ -94,8 +94,19 @@ export function createQuickOpen(ctx) {
     let sel = 0;
     let filtered = [];
 
+    // UI点検第2弾 指摘9の修正: 絞り込み結果が0件のとき、以前は入力欄の下が
+    // 空白のリストになり、「一致なし」なのか「読み込み中(まだ絞り込み処理が
+    // 終わっていない)」なのか区別が付かなかった。フォルダ未読み込み時の案内
+    // (.palette-empty、上のopen()内)と同じ見た目・クラスで「一致なし」を明示する。
     function render() {
       list.innerHTML = "";
+      if (filtered.length === 0) {
+        const li = document.createElement("li");
+        li.className = "palette-empty";
+        li.textContent = "一致するファイルがありません";
+        list.appendChild(li);
+        return;
+      }
       filtered.forEach((row, i) => {
         const li = document.createElement("li");
         li.className = i === sel ? "sel" : "";

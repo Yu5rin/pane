@@ -117,6 +117,7 @@ internal static class SettingsBridge
             imagePreferRelativePath = settings.ImagePreferRelativePath,
             imageAddDotSlash = settings.ImageAddDotSlash,
             imageAutoEscapeUrl = settings.ImageAutoEscapeUrl,
+            loadRemoteResources = settings.LoadRemoteResources,
 
             // ---- エクスポート・印刷 ----
             exportPaperSize = settings.ExportPaperSize,
@@ -251,12 +252,25 @@ internal static class SettingsBridge
     ///   ・未保存の文書が無いか(再起動を伴うため)
     /// どちらかを満たさない場合は何もせず、理由を画面へ返す。
     /// </summary>
+    /// <summary>「更新する」連打対策(docs/調査記録/点検-機能と動作.md「余裕があれば直すもの」)。
+    /// 通常はJS側(updatePhase="applying"でボタンを隠す)が抑止しているが、paneConfirm待ちの
+    /// 間に別経路(キーボード操作等)でもう一度apply-updateが送られると、75MBのダウンロードと
+    /// 入れ替えが二重に走ってしまう。結果自体は同じ新版になるため壊れはしないが、
+    /// 無駄な通信・書き込みを避けるためC#側でも進行中フラグで弾く。</summary>
+    private static bool _applyUpdateInProgress;
+
     public static async Task HandleApplyUpdateRequestAsync(
         Action<object> postToWeb, Func<bool> hasUnsavedDocuments, Action shutdown)
     {
         void Report(string stage, string message, int percent = -1)
             => postToWeb(new { type = "update-progress", stage, message, percent });
 
+        if (_applyUpdateInProgress)
+        {
+            Logger.Write("HandleApplyUpdateRequestAsync: 既に更新処理が進行中のため、この要求は無視する(連打対策)");
+            return;
+        }
+        _applyUpdateInProgress = true;
         try
         {
             if (hasUnsavedDocuments())
@@ -296,6 +310,10 @@ internal static class SettingsBridge
             // パスがそのまま利用者に見えてしまう。詳細はLogger.WriteExceptionへ残す。
             Logger.WriteException("更新の適用に失敗", ex);
             Report("error", $"更新に失敗しました。{ExceptionMessages.Describe(ex)}");
+        }
+        finally
+        {
+            _applyUpdateInProgress = false;
         }
     }
 
@@ -526,6 +544,7 @@ internal static class SettingsBridge
             if (TryGetBool(s, "imagePreferRelativePath", out bool imagePreferRelativePath)) settings.ImagePreferRelativePath = imagePreferRelativePath;
             if (TryGetBool(s, "imageAddDotSlash", out bool imageAddDotSlash)) settings.ImageAddDotSlash = imageAddDotSlash;
             if (TryGetBool(s, "imageAutoEscapeUrl", out bool imageAutoEscapeUrl)) settings.ImageAutoEscapeUrl = imageAutoEscapeUrl;
+            if (TryGetBool(s, "loadRemoteResources", out bool loadRemoteResources)) settings.LoadRemoteResources = loadRemoteResources;
 
             // ---- エクスポート・印刷 ----
             if (TryGetString(s, "exportPaperSize", out string exportPaperSize)) settings.ExportPaperSize = exportPaperSize;

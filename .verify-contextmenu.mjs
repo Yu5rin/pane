@@ -229,7 +229,7 @@ function hasItem(items, label) { return !!findItem(items, label); }
   const selMsg = await lastMsg(page, "open-context-menu");
   ok("(B) 選択あり: 「書式」サブメニューが出る", hasItem(selMsg.items, "書式"));
   ok("(B) 選択あり: 「選択箇所を検索」が出る", hasItem(selMsg.items, "選択箇所を検索"));
-  ok("(B) 選択あり: 「マークダウンとしてコピー」が有効", findItem(selMsg.items, "マークダウンとしてコピー")?.enabled === true);
+  ok("(B) 選択あり: 「Markdownとしてコピー」が有効", findItem(selMsg.items, "Markdownとしてコピー")?.enabled === true);
   ok("(B) 選択あり: 「切り取り」が有効", findItem(selMsg.items, "切り取り")?.enabled === true);
   ok("(B) 選択あり: 段落サブメニューは出ない", !hasItem(selMsg.items, "段落"));
   await page.evaluate(() => window.__reply({ type: "menu-closed", menu: "__context__" }));

@@ -157,6 +157,8 @@ const DEFAULT_EXT_TOGGLES = {
   defaultCodeLanguageApplyWhen: "menubar", emojiAutocomplete: "auto",
   // 厳格モード(仕様 strictMode、既定false)・コードブロック行番号(仕様 codeBlockLineNumbers、既定true)。
   strictMode: false, codeBlockLineNumbers: true,
+  // 文書中の外部画像・埋め込みの自動読み込み(既定false。docs/調査記録/修正-セキュリティ.md参照)。
+  loadRemoteResources: false,
 };
 const extTogglesField = StateField.define({
   create: () => DEFAULT_EXT_TOGGLES,
@@ -219,6 +221,95 @@ let currentDocDir = null;
 function isAbsoluteLocalPath(p) {
   return /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith("\\\\");
 }
+
+// ---- 外部リソースの自動読み込み(既定OFF。docs/調査記録/修正-セキュリティ.md「外部リソースの自動読み込みを、
+// 既定でオフにしてください」/docs/調査記録/点検-セキュリティ.md C-5 参照) ----
+// 文書に書かれた"http(s)://"の画像・iframeは、開いた瞬間にその参照先へ通信が発生し
+// (トラッキングピクセルに悪用できる)、README/取扱説明書が謳う「自分から外部へ問い合わせに
+// 行くのは更新の確認だけ」を裏切る経路になっていた。既定を「読み込まない」に変え、
+// 読み込むかどうかを利用者の明示操作(プレースホルダをクリック/「すべて読み込む」)に委ねる。
+// ローカル画像(相対パス・pane-file.local)やdata:はそもそも外部通信を伴わないため対象外。
+function isRemoteHttpUrl(raw) {
+  return /^https?:\/\//i.test(String(raw ?? "").trim());
+}
+// 文書ごとの明示的な同意(仕様書の設定"loadRemoteResources"とは別物)。
+//   allowAll: 「この文書の外部リソースをすべて読み込む」を押した後はtrue。
+//   urls: プレースホルダを1つずつクリックして読み込みを許可したURLの集合。
+// あえてextTogglesField(アプリ設定として文書の入れ替わりをまたいで復元される値。
+// setValue()内のprevExtToggles復元処理を参照)には含めない。ここは逆に「文書が入れ替われば
+// (setValue()でEditorState.create()し直されれば)既定のfalse/空集合へ戻ってほしい」状態、
+// すなわち文書の内容ではなく「この文書を今のセッションで開いている間に自分が読み込みを
+// 許可したかどうか」という一時的な合意なので、素のStateFieldとして持たせ、setValue()の
+// 復元対象からは意図的に外す(=新しい文書は毎回既定のブロック状態から始まる)。
+const setRemoteConsent = StateEffect.define();
+const DEFAULT_REMOTE_CONSENT = { allowAll: false, urls: new Set() };
+const remoteConsentField = StateField.define({
+  create: () => DEFAULT_REMOTE_CONSENT,
+  update: (v, tr) => { for (const ef of tr.effects) if (ef.is(setRemoteConsent)) v = ef.value; return v; },
+});
+function remoteConsentOf(state) { return state.field(remoteConsentField, false) ?? DEFAULT_REMOTE_CONSENT; }
+// rawSrc(生のMarkdown/HTML中のURL)を今読み込んでよいか。ローカル/data:は常に許可(対象外)。
+// toggles.loadRemoteResources(設定「文書中の外部画像・埋め込みを自動で読み込む」、既定false)が
+// ONならアプリ全体として常に許可。OFFでも、この文書で個別に/まとめて同意済みのURLは許可する。
+function isRemoteResourceAllowed(state, toggles, rawSrc) {
+  if (!isRemoteHttpUrl(rawSrc)) return true;
+  if (toggles.loadRemoteResources) return true;
+  const consent = remoteConsentOf(state);
+  return consent.allowAll || consent.urls.has(rawSrc);
+}
+// プレースホルダをクリックしたときに1件だけ同意へ追加する(呼び出し元はImageWidget/
+// html-sanitize.jsが返すプレースホルダのクリックハンドラ)。
+function allowOneRemoteUrl(view, rawSrc) {
+  const consent = remoteConsentOf(view.state);
+  if (consent.allowAll || consent.urls.has(rawSrc)) return;
+  const urls = new Set(consent.urls);
+  urls.add(rawSrc);
+  view.dispatch({ effects: setRemoteConsent.of({ allowAll: false, urls }) });
+}
+// ステータスバー「外部リソースを読み込む」から呼ばれる、この文書のぶんをまとめて許可する入口。
+function allowAllRemoteForView(view) {
+  view.dispatch({ effects: setRemoteConsent.of({ allowAll: true, urls: new Set() }) });
+}
+// ImageWidget/HtmlInlineWidget/HtmlBlockWidgetのeq()用の軽いキー。toDOM()自体は毎回
+// view.state(常に最新)からtoggles/consentを読み直すため実際の判定はここに依存しないが、
+// 「前回の描画から許可状況が変わっていないなら作り直さない」の判断にだけ使う。
+// consent.urlsは1件ずつしか増えない(allowOneRemoteUrl)ため、サイズだけを見ても
+// 同一文書内では「変わったかどうか」の判定として十分(値の集合そのものを毎回比較するより軽い)。
+function remoteGateKey(toggles, consent) {
+  if (toggles.loadRemoteResources) return "on";
+  if (consent.allowAll) return "all";
+  return "u" + consent.urls.size;
+}
+// 生HTML(HtmlInlineWidget/HtmlBlockWidget)の中に、今はブロックされうるhttp(s)のsrc/srcset/
+// posterが含まれていそうか、の軽い見積り(正規表現)。ステータスバーの「外部リソースを
+// 読み込む」ボタンを出すかどうかのヒントにのみ使い、実際にどのURLを止めるかの判定
+// (html-sanitize.js側)には使わない(見積りが甘くても安全側=表示するだけなので実害が無い)。
+const REMOTE_ATTR_HINT_RE = /\b(?:src|srcset|poster)\s*=\s*["']?\s*https?:\/\//i;
+function htmlMightHaveBlockedRemote(html, toggles, consent) {
+  if (toggles.loadRemoteResources || consent.allowAll) return false;
+  return REMOTE_ATTR_HINT_RE.test(html);
+}
+// sanitizeHtml()が返したDOMの中の「外部リソースを読み込んでいません」プレースホルダ
+// (html-sanitize.js側がdata-pane-remote-src付きで生成する)にクリックを配線する。
+// html-sanitize.js自身はCodeMirror/view.dispatchを知らない依存の無いモジュールに保つため、
+// クリック時の同意登録はこちら(editor.js)側で行う。
+function wireRemoteBlockedPlaceholders(container, view) {
+  for (const el of container.querySelectorAll("[data-pane-remote-src]")) {
+    el.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      allowOneRemoteUrl(view, el.getAttribute("data-pane-remote-src"));
+    });
+  }
+}
+// ライブプレビューの直近の構築で、この文書に「今はブロックしているhttp(s)リソース」が
+// 1つでも現れたか。ステータスバーの「外部リソースを読み込む」ボタンの表示/非表示にだけ使う
+// (livePreview.build()・buildHtmlBlockDeco()いずれも可視範囲/画面内のブロックしか見ないため、
+// 画面外にしか無い場合はスクロールするまで出ないことがある。文書全体を走査してまで正確に
+// 検出することはしない=第8章の性能要件を優先した割り切り)。
+let livePreviewHasBlockedRemote = false;
+let htmlBlockHasBlockedRemote = false;
 
 // 失敗しても例外を投げず元の文字列を返すdecodeURIComponent。
 // 画像挿入(Pane/ImageInsertService.cs、imageAutoEscapeUrl既定true)が生成するMarkdownの
@@ -517,6 +608,19 @@ class FootnoteRefWidget extends WidgetType {
       pop.className = "cm-footnote-popup";
       pop.textContent = this.content;
       sup.appendChild(pop);
+      // UI点検第2弾 指摘19の修正: ポップアップは既定で上方向(CSS側 bottom:125%)に
+      // 出すが、脚注参照が文書の先頭付近(スクロール領域の上端に近い行)にあると、
+      // 上半分が#cm-host .cm-scroller(overflow-y:auto)の外へはみ出して切れていた。
+      // ホバーのたびに実際の上方向の余白を測り、ポップアップの高さより狭ければ
+      // 下方向へ出す(.cm-footnote-popup-below、style.css参照)。CSSのvisibility:hidden
+      // (display:noneではない)により、非表示中でもoffsetHeightが実寸で測れる。
+      sup.addEventListener("mouseenter", () => {
+        const scroller = sup.closest(".cm-scroller");
+        if (!scroller) return;
+        const spaceAbove = sup.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+        // 8pxは余白(見出しコメント同様、ぎりぎりで詰まって見えないようにするため)。
+        pop.classList.toggle("cm-footnote-popup-below", spaceAbove < pop.offsetHeight + 8);
+      });
     }
     return sup;
   }
@@ -567,17 +671,38 @@ function smartQuoteChar(open, straightChar) {
 // 同じ扱いで問題ない(画像を含むcm-line自体が既にブロック単位で改行されるため、
 // 見た目上は他の行と同じく独立した1行として表示される)。
 class ImageWidget extends WidgetType {
-  constructor(alt, src, resolvedSrc, from) { super(); this.alt = alt; this.src = src; this.resolvedSrc = resolvedSrc; this.from = from; }
-  eq(o) { return o.alt === this.alt && o.src === this.src && o.resolvedSrc === this.resolvedSrc; }
+  // blocked: 外部リソースの自動読み込みが既定OFF(docs/調査記録/修正-セキュリティ.md参照)で、かつこの文書で
+  // まだ同意していないhttp(s)画像のときtrue。プレースホルダを出し、実際のimg要素は作らない
+  // (=この時点では一切通信しない)。
+  constructor(alt, src, resolvedSrc, from, blocked) {
+    super();
+    this.alt = alt; this.src = src; this.resolvedSrc = resolvedSrc; this.from = from; this.blocked = !!blocked;
+  }
+  eq(o) { return o.alt === this.alt && o.src === this.src && o.resolvedSrc === this.resolvedSrc && o.blocked === this.blocked; }
   toDOM(view) {
     const wrap = document.createElement("span");
     wrap.className = "cm-image-widget";
     wrap.dataset.resolvedSrc = this.resolvedSrc; // 読み込み失敗でimg要素が消えても解決後のパスを参照できるようにしておく
+    if (this.blocked) {
+      // プレースホルダ(仕様: 既定OFFのときここでは一切fetchしない。img要素自体を作らない)。
+      // クリックでこの1件だけ同意へ追加する(「すべて読み込む」はステータスバー側の入口)。
+      wrap.classList.add("cm-image-blocked");
+      wrap.title = "クリックして読み込む(この文書ですべて読み込むにはステータスバーの「外部リソースを読み込む」)";
+      wrap.textContent = `外部画像を読み込んでいません: ${safeDecodeURIComponent(this.src)}`;
+      wrap.addEventListener("mousedown", (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        allowOneRemoteUrl(view, this.src);
+      });
+      return wrap;
+    }
     const img = document.createElement("img");
     img.alt = this.alt;
     img.src = this.resolvedSrc;
-    // 読み込みに失敗した画像(このアプリは外部通信を行わないため、リモートURLの画像は
-    // 必ず失敗する)は、壊れたアイコンのまま残さず代替テキストに差し替える。
+    // 読み込みに失敗した画像(ローカルファイルが見つからない場合等。外部URLは上のblocked分岐で
+    // 同意しない限りここへ来ないが、同意後に読み込みそのものが失敗することはありうる)は、
+    // 壊れたアイコンのまま残さず代替テキストに差し替える。
     img.addEventListener("error", () => {
       img.remove();
       wrap.classList.add("cm-image-error");
@@ -703,28 +828,36 @@ class CheckboxWidget extends WidgetType {
 // video/iframe/aなど内部にクリック・再生操作を持つ要素を含みうるため、CodeMirrorに
 // クリック等を横取りさせずウィジェット自身のDOMに委ねる(TableWidget等と同じ扱い)。
 class HtmlInlineWidget extends WidgetType {
-  constructor(html) { super(); this.html = html; }
-  eq(o) { return o.html === this.html; }
+  // remoteGate: remoteGateKey()が返す軽い文字列。値そのものは使わず、eq()で
+  // 「前回描画時から外部リソースの許可状況が変わったか」だけを見るために持つ
+  // (実際の許可判定はtoDOM()がview.stateから毎回読み直す。外部リソース既定OFFの経緯は
+  // isRemoteResourceAllowed定義部のコメント参照)。
+  constructor(html, remoteGate) { super(); this.html = html; this.remoteGate = remoteGate; }
+  eq(o) { return o.html === this.html && o.remoteGate === this.remoteGate; }
   ignoreEvent() { return true; }
-  toDOM() {
+  toDOM(view) {
     const span = document.createElement("span");
     span.className = "cm-html-inline";
     // sanitizeHtml()は安全なDOMノード(DocumentFragment)を返す。innerHTMLへ生文字列を
     // 渡すことは一切しない(サニタイズ結果であっても、という意味ではなくそもそも文字列化
     // した時点でエスケープの取り違え等の事故を招きうるため、DOM要素のまま扱う)。
-    span.appendChild(sanitizeHtml(this.html));
+    const toggles = view.state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
+    span.appendChild(sanitizeHtml(this.html, { isRemoteAllowed: (url) => isRemoteResourceAllowed(view.state, toggles, url) }));
+    wireRemoteBlockedPlaceholders(span, view); // プレースホルダのクリックで1件だけ読み込みを許可する
     return span;
   }
 }
 // ブロックHTML(<iframe>や<div>...</div>が段落として単独で置かれている場合。M-29〜M-31)。
 class HtmlBlockWidget extends WidgetType {
-  constructor(html) { super(); this.html = html; }
-  eq(o) { return o.html === this.html; }
+  constructor(html, remoteGate) { super(); this.html = html; this.remoteGate = remoteGate; }
+  eq(o) { return o.html === this.html && o.remoteGate === this.remoteGate; }
   ignoreEvent() { return true; }
-  toDOM() {
+  toDOM(view) {
     const div = document.createElement("div");
     div.className = "cm-html-block";
-    div.appendChild(sanitizeHtml(this.html));
+    const toggles = view.state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
+    div.appendChild(sanitizeHtml(this.html, { isRemoteAllowed: (url) => isRemoteResourceAllowed(view.state, toggles, url) }));
+    wireRemoteBlockedPlaceholders(div, view);
     return div;
   }
 }
@@ -839,6 +972,10 @@ const livePreview = ViewPlugin.fromClass(class {
     const seenTables = new Set();
     const htmlTagNodes = []; // インラインHTML(M-27〜M-31)。ペアリングは木走査後にまとめて行う
     const toggles = state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
+    // 外部リソースの自動読み込み(既定OFF。isRemoteResourceAllowed定義部参照)。
+    const remoteConsent = remoteConsentOf(state);
+    const remoteGate = remoteGateKey(toggles, remoteConsent);
+    let blockedRemoteSeen = false;
     const fm = state.field(frontmatterField, false);
     const mathBlocks = state.field(mathBlocksField, false) ?? [];
     const inMathBlock = (pos) => mathBlocks.some((b) => pos >= b.from && pos < b.to);
@@ -974,7 +1111,9 @@ const livePreview = ViewPlugin.fromClass(class {
           const rawSrc = m[2].trim();
           if (!rawSrc) return false;
           const resolvedSrc = resolveImageSrc(rawSrc, imgRootUrl);
-          marks.push({ from: nf, to: nt, deco: Decoration.replace({ widget: new ImageWidget(alt, rawSrc, resolvedSrc, nf) }) });
+          const blocked = !isRemoteResourceAllowed(state, toggles, rawSrc);
+          if (blocked) blockedRemoteSeen = true;
+          marks.push({ from: nf, to: nt, deco: Decoration.replace({ widget: new ImageWidget(alt, rawSrc, resolvedSrc, nf, blocked) }) });
           return false; // 子ノード(LinkMark/URL)は個別処理不要
         }
         if (name === "Link") {
@@ -1136,11 +1275,15 @@ const livePreview = ViewPlugin.fromClass(class {
       const { pairs, singles } = pairInlineHtmlTags(state, htmlTagNodes);
       for (const p of pairs) {
         if (cursorInside(view, p.from, p.to)) continue;
-        marks.push({ from: p.from, to: p.to, deco: Decoration.replace({ widget: new HtmlInlineWidget(state.sliceDoc(p.from, p.to)) }) });
+        const html = state.sliceDoc(p.from, p.to);
+        if (htmlMightHaveBlockedRemote(html, toggles, remoteConsent)) blockedRemoteSeen = true;
+        marks.push({ from: p.from, to: p.to, deco: Decoration.replace({ widget: new HtmlInlineWidget(html, remoteGate) }) });
       }
       for (const s of singles) {
         if (cursorInside(view, s.from, s.to)) continue;
-        marks.push({ from: s.from, to: s.to, deco: Decoration.replace({ widget: new HtmlInlineWidget(state.sliceDoc(s.from, s.to)) }) });
+        const html = state.sliceDoc(s.from, s.to);
+        if (htmlMightHaveBlockedRemote(html, toggles, remoteConsent)) blockedRemoteSeen = true;
+        marks.push({ from: s.from, to: s.to, deco: Decoration.replace({ widget: new HtmlInlineWidget(html, remoteGate) }) });
       }
     }
     for (const { from, to } of view.visibleRanges) {
@@ -1191,7 +1334,9 @@ const livePreview = ViewPlugin.fromClass(class {
               const rawSrc = fim[3].trim();
               if (!rawSrc) continue;
               const resolvedSrc = resolveImageSrc(rawSrc, imgRootUrl);
-              marks.push({ from: ff, to: ft, deco: Decoration.replace({ widget: new ImageWidget(fim[2], rawSrc, resolvedSrc, ff) }) });
+              const blocked = !isRemoteResourceAllowed(state, toggles, rawSrc);
+              if (blocked) blockedRemoteSeen = true;
+              marks.push({ from: ff, to: ft, deco: Decoration.replace({ widget: new ImageWidget(fim[2], rawSrc, resolvedSrc, ff, blocked) }) });
             } else {
               const href = fim[3].trim();
               const textFrom = ff + fim[1].length + 1; // "！"(あれば)+"［"ぶん
@@ -1268,6 +1413,7 @@ const livePreview = ViewPlugin.fromClass(class {
         pos = line.to + 1;
       }
     }
+    livePreviewHasBlockedRemote = blockedRemoteSeen; // ステータスバー「外部リソースを読み込む」の表示判定用
     const ranges = marks.filter(m => m.from < m.to || m.deco.spec.widget || m.line).map(m => m.deco.range(m.from, m.to));
     return Decoration.set(ranges, true);
   }
@@ -1691,8 +1837,8 @@ class TableWidget extends WidgetType {
       const ctl = document.createElement("span"); ctl.className = "tbl-ctls";
       const cc = c;
       if (cc > 0) ctl.appendChild(mkBtn("&#x25C0;", "列を左へ移動", () => mutateTable(view, pos(), (x) => { for (const arr of [x.header, x.aligns, ...x.body]) arr.splice(cc - 1, 0, ...arr.splice(cc, 1)); })));
-      ctl.appendChild(mkBtn("+", "右に列を追加", () => mutateTable(view, pos(), (x) => { x.header.splice(cc + 1, 0, ""); x.aligns.splice(cc + 1, 0, null); for (const r of x.body) r.splice(cc + 1, 0, ""); })));
-      if (cols > 1) ctl.appendChild(mkBtn("&#x2212;", "この列を削除", () => mutateTable(view, pos(), (x) => { x.header.splice(cc, 1); x.aligns.splice(cc, 1); for (const r of x.body) r.splice(cc, 1); })));
+      ctl.appendChild(mkBtn("+", "列を右に挿入", () => mutateTable(view, pos(), (x) => { x.header.splice(cc + 1, 0, ""); x.aligns.splice(cc + 1, 0, null); for (const r of x.body) r.splice(cc + 1, 0, ""); })));
+      if (cols > 1) ctl.appendChild(mkBtn("&#x2212;", "列を削除", () => mutateTable(view, pos(), (x) => { x.header.splice(cc, 1); x.aligns.splice(cc, 1); for (const r of x.body) r.splice(cc, 1); })));
       if (cc < cols - 1) ctl.appendChild(mkBtn("&#x25B6;", "列を右へ移動", () => mutateTable(view, pos(), (x) => { for (const arr of [x.header, x.aligns, ...x.body]) arr.splice(cc + 1, 0, ...arr.splice(cc, 1)); })));
       th.appendChild(ctl);
       // 右クリックでは反応しない(理由はImageWidgetのmousedownコメントと同じ:
@@ -1719,8 +1865,8 @@ class TableWidget extends WidgetType {
         td.innerHTML = renderInline(r[c] ?? "");
         if (c === 0) {
           const ctl = document.createElement("span"); ctl.className = "tbl-ctls tbl-row-ctls";
-          ctl.appendChild(mkBtn("+", "下に行を追加", () => mutateTable(view, pos(), (x) => x.body.splice(ri + 1, 0, Array(cols).fill("")))));
-          ctl.appendChild(mkBtn("&#x2212;", "この行を削除", () => mutateTable(view, pos(), (x) => x.body.splice(ri, 1))));
+          ctl.appendChild(mkBtn("+", "行を下に挿入", () => mutateTable(view, pos(), (x) => x.body.splice(ri + 1, 0, Array(cols).fill("")))));
+          ctl.appendChild(mkBtn("&#x2212;", "行を削除", () => mutateTable(view, pos(), (x) => x.body.splice(ri, 1))));
           td.appendChild(ctl);
         }
         const rc = ri, cc = c;
@@ -2360,16 +2506,25 @@ const htmlBlocksField = StateField.define({
 function buildHtmlBlockDeco(state, blocks) {
   const focused = state.field(focusField, false) ?? false;
   const sel = state.selection.main;
+  const toggles = state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
+  const consent = remoteConsentOf(state);
+  const gate = remoteGateKey(toggles, consent);
   const decos = [];
+  let blockedSeen = false;
   for (const b of blocks) {
     if (focused && sel.from <= b.to && sel.to >= b.from) continue; // 編集モード(生テキスト)
-    decos.push(Decoration.replace({ widget: new HtmlBlockWidget(state.sliceDoc(b.from, b.to)), block: true }).range(b.from, b.to));
+    const html = state.sliceDoc(b.from, b.to);
+    if (htmlMightHaveBlockedRemote(html, toggles, consent)) blockedSeen = true;
+    decos.push(Decoration.replace({ widget: new HtmlBlockWidget(html, gate), block: true }).range(b.from, b.to));
   }
+  htmlBlockHasBlockedRemote = blockedSeen; // ステータスバー「外部リソースを読み込む」の表示判定用
   return Decoration.set(decos);
 }
 const htmlBlockDecoField = StateField.define({
   create: (state) => buildHtmlBlockDeco(state, state.field(htmlBlocksField)),
-  update: (v, tr) => (tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect)))
+  // setRemoteConsent/setExtToggles(外部リソースの許可状況)が変わったときも作り直す必要がある
+  // (プレースホルダ→実際のiframe/imgへの切替、または設定ONで最初から読み込む場合)。
+  update: (v, tr) => (tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect) || e.is(setRemoteConsent) || e.is(setExtToggles)))
     ? buildHtmlBlockDeco(tr.state, tr.state.field(htmlBlocksField))
     : v,
   provide: (f) => EditorView.decorations.from(f),
@@ -2950,6 +3105,9 @@ const codeCopyHoverPlugin = ViewPlugin.fromClass(class {
 const livePreviewExt = () => [
   livePreview, codeCopyHotBlockField, tableBlocksField, tableField, tableAutoFormat,
   frontmatterField, tocParasField, tocField, extTogglesField,
+  // 外部リソース読み込み同意(remoteConsentField、上記コメント参照)。extTogglesFieldと違い
+  // setValue()側では復元しない(文書が入れ替わるたび既定のfalse/空集合に戻すのが仕様のため)。
+  remoteConsentField,
   mathBlocksField, mathBlockDecoField,
   mermaidBlocksField, mermaidBlockDecoField, // Mermaid図(仕様書 第4.2節・第8.3節)
   codeMathBlocksField, codeMathBlockDecoField, // ```mathフェンス(仕様書 codeBlockMathEnabled)
@@ -4445,6 +4603,14 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
       ".cm-image-widget img": { maxWidth: "100%", display: "block", borderRadius: "4px" },
       // 読み込み失敗時の代替表示(壊れたアイコンのまま残さない)。数式エラーと同系統の見た目にする。
       ".cm-image-widget.cm-image-error": { display: "inline-block", padding: "3px 8px", fontSize: ".85em", color: "var(--danger)", background: "var(--code-bg)", borderRadius: "4px", fontFamily: "var(--font-mono)", cursor: "pointer" },
+      // 外部リソースの自動読み込み既定OFF(docs/調査記録/修正-セキュリティ.md)のプレースホルダ。エラー表示
+      // (var(--danger))とは違い「まだ何もしていないだけ」の中立な状態なので、危険色ではなく
+      // --accent-soft(面)/--accent-ink(その上で読める文字色。仕様書10.2節)の組み合わせにする
+      // (メニュー選択時の配色等と同じ考え方。style.cssは別エージェントが編集中のためここに書く)。
+      ".cm-image-widget.cm-image-blocked": { display: "inline-block", padding: "3px 8px", fontSize: ".85em", color: "var(--accent-ink)", background: "var(--accent-soft)", borderRadius: "4px", fontFamily: "var(--font-mono)", cursor: "pointer" },
+      // 生HTML(<img>/<iframe>)側のプレースホルダ(html-sanitize.js data-pane-remote-src)。
+      // 上と同じ配色に揃える。ブロック要素の中(cm-html-block)に単独で出ることもあるためblockにもする。
+      ".cm-remote-blocked-inline": { display: "inline-block", padding: "3px 8px", fontSize: ".85em", color: "var(--accent-ink)", background: "var(--accent-soft)", borderRadius: "4px", fontFamily: "var(--font-mono)", cursor: "pointer" },
       // 多段引用(仕様書 M-03)。.tok-quoteのborder-leftは1段ぶんの見た目のため、2段目以降は
       // JS側(livePreview)で計算したbox-shadowの重ね書きに置き換える(border-leftは無効化する)。
       ".cm-quote-nested": { borderLeft: "none" },
@@ -4567,7 +4733,12 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
           if ((u.docChanged || u.viewportChanged || u.selectionSet) && onRender) requestAnimationFrame(() => onRender());
           // 行/列・文字数カウント(ステータスバー)用の軽量な通知。doc変化でもカーソル位置は
           // ずれるため、docChangedとselectionSetの両方で呼ぶ(重い集計はここでは行わない)。
-          if ((u.docChanged || u.selectionSet) && onSelectionChange) onSelectionChange();
+          // 外部リソースの自動読み込み既定OFF(docs/調査記録/修正-セキュリティ.md参照): プレースホルダの
+          // クリック(allowOneRemoteUrl)・ステータスバーの「すべて読み込む」
+          // (allowAllRemoteForView)はいずれもsetRemoteConsentのeffectだけを積んだ
+          // transaction(docChanged/selectionSetを伴わない)のため、これらも
+          // onSelectionChange(main.js側でupdateRemoteBlockedStatus()も呼ぶ)の対象に含める。
+          if ((u.docChanged || u.selectionSet || u.transactions.some((tr) => tr.effects.some((e) => e.is(setRemoteConsent)))) && onSelectionChange) onSelectionChange();
         }),
         EditorView.domEventHandlers({
           compositionstart: () => { composing = true; onCompositionChange?.(true); },
@@ -5018,6 +5189,12 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
     // 拡張トグル(extTogglesField/setExtensionToggles)の仕組みにそのまま乗せる。
     setAutoLinks: (on) => view.dispatch({ effects: setExtToggles.of({ autoLinks: !!on }) }),
     isAutoLinks: () => (view.state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES).autoLinks,
+    // 外部リソースの自動読み込み(既定OFF。isRemoteResourceAllowed定義部のコメント参照)。
+    // 「この文書の外部リソースをすべて読み込む」(ステータスバー)の実体。
+    allowAllRemoteResources: () => allowAllRemoteForView(view),
+    // ステータスバーの「外部リソースを読み込む」表示判定用。直近のライブプレビュー構築
+    // (可視範囲のみ。文書全体は走査しない)で1件でもブロック中のものが見つかっていればtrue。
+    hasBlockedRemoteResources: () => livePreviewHasBlockedRemote || htmlBlockHasBlockedRemote,
     // ソースコードモード(仕様書 V-05): 記法マーカーを隠さない生表示。Markdownの構文ハイライト
     // (docModeComp)自体は外さない。markdownモード以外の時はlivePreviewComp自体が既に空なので
     // 見た目には影響しないが、状態は保持しておき次にmarkdownモードへ戻った時に反映する。

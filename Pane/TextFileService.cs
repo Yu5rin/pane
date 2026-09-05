@@ -2,17 +2,8 @@ using System.Text;
 
 namespace Pane;
 
-/// <summary>
-/// 仕様書 第6章で定めるエンコーディング。既定はUTF-8(BOMなし)。
-/// </summary>
-internal enum FileEncodingKind
-{
-    Utf8,
-    Utf8Bom,
-    Utf16Le,
-    Utf16Be,
-    ShiftJis,
-}
+// FileEncodingKindはPane/FileEncodingKind.csへ切り出した(EncodingLossGuardがPane.Tests側で
+// 参照するため。TextFileService自体はFile.ReadAllBytes等に依存しておりテスト対象に含められない)。
 
 /// <summary>
 /// 仕様書 第6.2節で定める改行コード。複数種が混在する場合は Mixed。

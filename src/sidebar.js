@@ -80,8 +80,8 @@ export function createSidebar(editor, ctx) {
   searchBarEl.className = "sidebar-search";
   searchBarEl.innerHTML = `
     <input id="sidebar-search-input" class="sidebar-search-input" type="text" placeholder="フォルダ内を検索" autocomplete="off">
-    <label class="search-toggle" data-tip="search-case" title="大文字・小文字を区別"><input id="sidebar-search-case" type="checkbox">Aa</label>
-    <label class="search-toggle" data-tip="search-word" title="単語単位"><input id="sidebar-search-word" type="checkbox">単語</label>
+    <label class="search-toggle" data-tip="search-case" title="大文字と小文字を区別"><input id="sidebar-search-case" type="checkbox">Aa</label>
+    <label class="search-toggle" data-tip="search-word" title="単語単位で検索"><input id="sidebar-search-word" type="checkbox">単語</label>
     <label class="search-toggle" data-tip="search-regex" title="正規表現"><input id="sidebar-search-regex" type="checkbox">.*</label>`;
   sidebarEl.insertBefore(searchBarEl, bodyEl);
   const searchInputEl = searchBarEl.querySelector("#sidebar-search-input");
@@ -316,7 +316,7 @@ export function createSidebar(editor, ctx) {
       { label: "フルパスをコピー", run: () => navigator.clipboard.writeText(entry.path).catch(() => {}) },
       { label: "ファイル名をコピー", run: () => navigator.clipboard.writeText(entry.name).catch(() => {}), separatorAfter: true },
       { label: "名前の変更…", enabled: hasBridge, run: () => renameEntryFlow(entry) },
-      { label: "削除(ごみ箱へ)", enabled: hasBridge, run: () => deleteEntryFlow(entry) },
+      { label: "ごみ箱へ移動", enabled: hasBridge, run: () => deleteEntryFlow(entry) },
     ];
   }
 

@@ -107,7 +107,16 @@ internal static class NativeMenu
         {
             foreach (MenuItemData item in data)
             {
-                var menuItem = new ToolStripMenuItem(item.Label)
+                // note(「Pandoc未導入」等)は、無効(グレーアウト)な項目ではToolTipTextだけに
+                // 入れても表示されない(WinFormsのToolStripは無効な項目に対してマウスの
+                // hover系イベントを配らないため、ToolTipTextを設定していてもポップアップが
+                // 出ない)。総点検 指摘: 無効項目でPandoc未導入の理由が見えないのはこれが原因
+                // だったため、無効な項目に限りラベル自体へ "(note)" を付記して常に見えるようにする
+                // (有効な項目・HTML版フォールバック(commands.js側)は従来どおりnoteをツールチップ
+                // 相当の位置に出すのみで、ラベルは変えない)。計算自体はMenuNoteFormatterへ切り出し、
+                // Pane.Testsで固定する(このファイルはWinForms依存でLinux上ではテストできないため)。
+                string displayLabel = MenuNoteFormatter.ComputeDisplayLabel(item.Label, item.Note, item.Enabled);
+                var menuItem = new ToolStripMenuItem(displayLabel)
                 {
                     Enabled = item.Enabled,
                     Checked = item.Checked,
@@ -116,7 +125,7 @@ internal static class NativeMenu
                 };
                 if (!string.IsNullOrEmpty(item.Note))
                 {
-                    // note(「Pandoc未導入」等)の表示は最小対応としてツールチップに入れる。
+                    // 有効な項目、および万一ツールチップが出せる環境向けの補助として引き続き設定する。
                     menuItem.ToolTipText = item.Note;
                 }
 

@@ -70,7 +70,7 @@ internal sealed class HelpWindow : Form
     {
         Logger.Write("HelpWindow: 生成開始");
 
-        Text = "Pane 取扱説明書";
+        Text = "Pane - 取扱説明書"; // ダイアログタイトルの区切り記法を統一(総点検)。他は"Pane - 復元の確認"(PaneApplicationContext.cs)
         MinimumSize = new Size(640, 480);
         Size = ComputeInitialSize(owner);
         StartPosition = FormStartPosition.Manual;
@@ -276,6 +276,15 @@ internal sealed class HelpWindow : Form
         // 開こうとするため、C#側のこの受け口が無いとPane内にポップアップが開いてしまう。
         _webView.CoreWebView2.NewWindowRequested += (_, e) =>
             ExternalLinkService.HandleNewWindowRequested(e, "[取扱説明書ウィンドウ] ");
+
+        // トップレベル遷移の保険(docs/調査記録/点検-セキュリティ.md C-4)。詳しい理由はMainForm側の同じ
+        // 購読のコメントを参照(3ウィンドウ共通の判定はNavigationGuardへ集約済み)。
+        _webView.CoreWebView2.NavigationStarting += (_, e) =>
+        {
+            if (NavigationGuard.IsAllowedTopLevelNavigation(e.Uri, VirtualHostName)) return;
+            e.Cancel = true;
+            Logger.Write($"[取扱説明書ウィンドウ] NavigationStarting: 想定外の遷移先のため中止: {PrivacyLogFormatter.ShortenUri(e.Uri)}");
+        };
 
         // 起動時の白フラッシュ対策の3層目(MainForm/SettingsWindowと同じ、多層防御のうちの1つ)。
         AppSettings navigateSettings = SettingsService.Load();

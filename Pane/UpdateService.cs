@@ -435,13 +435,25 @@ internal static class UpdateService
 
     /// <summary>
     /// ダウンロードしたファイルのSHA256を照合する。期待値が空の場合は照合を省く
-    /// (配布元がハッシュを提供していないケース。HTTPSで取得しているため通信路は保護されている)。
+    /// (配布元がハッシュを提供していないケース。HTTPSで取得しているため通信路自体は保護されている)。
+    ///
+    /// 【この照合が防げるもの・防げないもの】(docs/調査記録/点検-セキュリティ.md C-2)
+    /// ここで比較するハッシュ値(<see cref="FindZipAsset"/>が読む<c>digest</c>)は、Zip本体と
+    /// 同じGitHub API・同じリリースから取得している。つまり「転送中に破損していないか」の
+    /// 検出はできるが、GitHub上の配布元(リポジトリ・アカウント)そのものが乗っ取られて
+    /// Zipが差し替えられた場合は、ハッシュ値も一緒に差し替わった値を返してくるため
+    /// 検出できない。ファイルへの署名(コード署名)による検証も行っていない。
+    /// README・取扱説明書には、この限界を含めて実際の保証範囲を明記してある。
     /// </summary>
     private static void VerifyHash(string zipPath, string expected)
     {
         if (string.IsNullOrWhiteSpace(expected))
         {
-            Logger.Write("更新の検証: 配布元がSHA256を提供していないため照合を省いた");
+            // 過去のリリース(GitHubのdigest機能が付く前に作られたもの)や、updateCheckUrlを
+            // 差し替えた別配布元ではdigestが無いことがある。照合を省いてそのまま展開まで
+            // 進める(自動更新自体を止めない)判断は変えていないが、「無保証で展開している」
+            // ことが後から追いにくいログにならないよう、Warnで残す(docs/調査記録/点検-セキュリティ.md C-2)。
+            Logger.Warn("更新の検証: 配布元がSHA256(digest)を提供していないため照合を省いて続行する");
             return;
         }
         using FileStream stream = File.OpenRead(zipPath);
@@ -545,6 +557,13 @@ internal static class UpdateService
             File.Copy(newExe, currentExe);
             CopyDirectory(newDist, currentDist);
             WarmUpDist(currentDist);
+
+            // 入れ替えを最後までやり遂げた合図。ここより前(File.Copy/CopyDirectoryの途中)で
+            // 電源断・強制終了が起きればこのマーカーは書かれず、次回起動のCleanupLeftoversは
+            // 「入れ替えが未完了」と判断して退避ファイル(exeBackup/distBackup)を消さずに残す
+            // (UpdateLeftoverPolicy参照。退避ファイルはdistが欠けた状態を直す唯一の材料のため、
+            // 迷ったら消さない側に倒す)。
+            WriteCompletionMarker(installFolder);
 
             Logger.Write("更新の適用: 入れ替えが完了した");
 
@@ -796,6 +815,11 @@ internal static class UpdateService
     ///
     /// 更新直後の起動では、まだ古いプロセスが終了しきっていないことがある。その場合は
     /// 削除に失敗するが、次の起動でまた試すので放置してよい(エラーとして騒がない)。
+    ///
+    /// 削除してよいかどうかは<see cref="UpdateLeftoverPolicy"/>の判定に従う。完了マーカーが
+    /// 無い(=前回の入れ替えがdistのコピー途中などで力尽きた)場合は、消してしまうと
+    /// 復旧の材料が無くなるため、退避ファイルには一切触れない
+    /// (docs/調査記録/点検-機能と動作.md「更新の入れ替え途中の電源断で復旧不能」)。
     /// </summary>
     public static void CleanupLeftovers()
     {
@@ -806,17 +830,63 @@ internal static class UpdateService
 
             string exeBackup = Path.Combine(folder, "Pane.exe" + BackupSuffix);
             string distBackup = Path.Combine(folder, "dist" + BackupSuffix);
-            bool removed = false;
+            string marker = Path.Combine(folder, UpdateLeftoverPolicy.CompletionMarkerFileName);
 
-            if (File.Exists(exeBackup)) { removed |= TryDelete(exeBackup); }
-            if (Directory.Exists(distBackup)) { removed |= TryDeleteDirectory(distBackup); }
-            if (removed) Logger.Write("更新: 前回の更新で退避した古いファイルを削除した");
+            bool exeBackupExists = File.Exists(exeBackup);
+            bool distBackupExists = Directory.Exists(distBackup);
+            bool markerExists = File.Exists(marker);
+
+            switch (UpdateLeftoverPolicy.Decide(exeBackupExists, distBackupExists, markerExists))
+            {
+                case UpdateLeftoverPolicy.Action.DeleteBackups:
+                    bool removed = false;
+                    if (exeBackupExists) removed |= TryDelete(exeBackup);
+                    if (distBackupExists) removed |= TryDeleteDirectory(distBackup);
+                    TryDelete(marker);
+                    if (removed) Logger.Write("更新: 前回の更新で退避した古いファイルを削除した");
+                    break;
+
+                case UpdateLeftoverPolicy.Action.KeepBackups:
+                    // 前回の入れ替えが完了しないまま終わっている。distが欠けている可能性が高いが、
+                    // 退避ファイル(dist.pane-old等)さえ残っていれば手動で戻せるので、
+                    // ここでは消さずに警告だけ残す(自動での戻し入れはしない: 実行中のexeを
+                    // 自分自身で書き換える操作になり、かえって危険なため)。
+                    Logger.Warn("更新: 前回の入れ替えが完了しないまま終了した形跡があるため、" +
+                                "退避ファイル(*.pane-old)は削除せずに残す");
+                    break;
+
+                case UpdateLeftoverPolicy.Action.None:
+                default:
+                    // 退避ファイルは無いが、マーカーだけ残っていれば掃除しておく
+                    // (通常は無いはずの組み合わせだが、念のため)。
+                    if (markerExists) TryDelete(marker);
+                    break;
+            }
 
             CleanupTempFolders();
         }
         catch (Exception ex)
         {
             Logger.Debug($"更新: 退避ファイルの掃除に失敗(次回また試す): {ex.GetType().Name}");
+        }
+    }
+
+    /// <summary>
+    /// 入れ替えを最後までやり遂げた合図を書く(<see cref="UpdateLeftoverPolicy"/>参照)。
+    /// このファイル自体が書けなくても入れ替えそのものは完了しているため、失敗は無視する
+    /// (最悪でも次回起動が「未完了」側に倒れて退避ファイルを消さないだけで、安全側)。
+    /// </summary>
+    private static void WriteCompletionMarker(string installFolder)
+    {
+        try
+        {
+            File.WriteAllText(
+                Path.Combine(installFolder, UpdateLeftoverPolicy.CompletionMarkerFileName),
+                DateTime.UtcNow.ToString("O"));
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug($"更新: 完了マーカーの書き込みに失敗(次回起動時は退避ファイルを残す側になる): {ex.GetType().Name}");
         }
     }
 
@@ -917,16 +987,28 @@ internal static class UpdateService
         }
     }
 
+    /// <summary>
+    /// sourceの中身(サブフォルダ・ファイル)をdestinationへそのまま複製する。
+    ///
+    /// 不具合修正(docs/調査記録/点検-セキュリティ.md C-3): 以前は`path.Replace(source, destination)`で
+    /// コピー先のパスを組み立てていたが、これは文字列置換であり「sourceという文字列が
+    /// パスの途中にもう一度現れる」配置(例: source配下に同名のフォルダを含む
+    /// "C:\pane-update-x\extracted\pane-update-x\..."のような入れ子)では、意図しない
+    /// 箇所まで置換してしまい、コピー先のパスが壊れる。source・destinationとも
+    /// %TEMP%配下にPane自身が作るGUID付きフォルダ名なので今のところ衝突は起きないが、
+    /// パス文字列の一致に頼らず`Path.GetRelativePath`でsourceからの相対パスを
+    /// 計算してからdestinationへ繋ぐのが定石であり、堅牢性の面で直しておく。
+    /// </summary>
     private static void CopyDirectory(string source, string destination)
     {
         Directory.CreateDirectory(destination);
         foreach (string dir in Directory.GetDirectories(source, "*", SearchOption.AllDirectories))
         {
-            Directory.CreateDirectory(dir.Replace(source, destination));
+            Directory.CreateDirectory(Path.Combine(destination, Path.GetRelativePath(source, dir)));
         }
         foreach (string file in Directory.GetFiles(source, "*", SearchOption.AllDirectories))
         {
-            File.Copy(file, file.Replace(source, destination), overwrite: true);
+            File.Copy(file, Path.Combine(destination, Path.GetRelativePath(source, file)), overwrite: true);
         }
     }
 

@@ -28,6 +28,8 @@ const statusPosition = document.getElementById("status-position");
 const statusCount = document.getElementById("status-count");
 const statusDirty = document.getElementById("status-dirty");
 const statusExport = document.getElementById("status-export");
+// 外部リソースの自動読み込み既定OFF(docs/調査記録/修正-セキュリティ.md参照)。押すとこの文書のぶんをまとめて読み込む。
+const statusRemoteBlocked = document.getElementById("status-remote-blocked");
 const statusZoom = document.getElementById("status-zoom");
 const statusEncoding = document.getElementById("status-encoding");
 const statusLineEnding = document.getElementById("status-line-ending");
@@ -774,6 +776,13 @@ function updateCount() {
   setStatusFitText("count", selLen > 0 ? `${total}文字(選択 ${selLen}文字)` : `${total}文字`);
   applyTooltip(statusCount, tooltipLevel, { state: statusCount.textContent });
 }
+// 外部リソースの自動読み込み既定OFF(docs/調査記録/修正-セキュリティ.md参照)。直近のライブプレビュー構築
+// (可視範囲のみ。文書全体は走査しない)でブロック中のものが見つかっていればボタンを出す。
+// updateCount()と同じ箇所(タブ切替・ファイルを開いた直後・入力/選択の変化)から呼ぶ。
+function updateRemoteBlockedStatus() {
+  if (!statusRemoteBlocked) return;
+  statusRemoteBlocked.hidden = !editor.hasBlockedRemoteResources();
+}
 // 行/列(仕様書 N-03)。カーソル位置から直接取れる軽量な情報なので、選択変更のたびに呼んでよい。
 function updatePosition() {
   const { line, col } = editor.getCursorInfo();
@@ -1275,6 +1284,9 @@ const editor = createEditor(host, {
   onSelectionChange() {
     updateCount();
     updatePosition();
+    // 外部リソースの自動読み込み既定OFF: docChanged/selectionSetのたび軽く再判定する
+    // (editor.hasBlockedRemoteResources()はO(1)の読み出しのみ。文書全体は走査しない)。
+    updateRemoteBlockedStatus();
   },
   // スマートペースト(仕様書 第2.9.3節): クリップボードにHTMLがあればMarkdownへ変換して挿入する。
   // プレーンテキストのみの場合は既定の貼り付け(CM6の処理)に任せる。
@@ -1327,6 +1339,7 @@ const editor = createEditor(host, {
 // CodeMirrorのEditorView生成が終わった時点。ここまでが「エディタ本体の組み立て」。
 markStartup("エディタ生成");
 updateCount();
+updateRemoteBlockedStatus();
 updatePosition();
 updateStatusMeta();
 updateStatusMode();
@@ -1573,6 +1586,10 @@ const ctx = {
       wordWrapOn = !wordWrapOn;
       editor.setWordWrap(wordWrapOn);
       updateWrapButton();
+      // 総点検 指摘M2: 以前はここで永続化しておらず、ウィンドウを開き直すたびに既定の
+      // ONへ戻っていた。set-font-size/set-sidebar-widthと同じ「送るだけで応答は待たない」
+      // 経路で永続化する(次に開くウィンドウ以降に反映。開いている他ウィンドウは変えない)。
+      bridge?.postMessage({ type: "set-word-wrap", value: wordWrapOn });
     },
     async gotoLineFlow() {
       const total = editor.getValue().split("\n").length;
@@ -1961,9 +1978,15 @@ window.addEventListener("keydown", (e) => {
 statusWrapBtn.addEventListener("click", () => ctx.actions.toggleWordWrap());
 statusZoom.addEventListener("click", () => ctx.actions.zoomReset());
 statusCount.addEventListener("click", () => { if (showWordCount) wordCountPopup.toggle(statusCount); });
+// 外部リソースの自動読み込み既定OFF(docs/調査記録/修正-セキュリティ.md参照)。この文書のぶんをまとめて読み込む
+// (プレースホルダ1件だけならプレースホルダ自身のクリックで読み込める。ここは「まとめて」の入口)。
+statusRemoteBlocked?.addEventListener("click", () => {
+  editor.allowAllRemoteResources();
+  updateRemoteBlockedStatus();
+});
 
 // 本文の文字サイズを変更し、ズーム率表示を更新したうえでC#側へ永続化する(仕様書 V-09/V-10)。
-// Ctrl+マウスホイール(下記)とView メニューの拡大/縮小/実際のサイズ(ctx.actions)の
+// Ctrl+マウスホイール(下記)とView メニューの拡大/縮小/文字サイズを既定に戻す(ctx.actions)の
 // どちらから呼ばれても同じ経路を通る。
 function setFontSizeAndPersist(size) {
   const applied = editor.setFontSize(size);
@@ -2277,6 +2300,7 @@ function switchToTab(id, { skipSaveCurrent = false } = {}) {
     editor.view.scrollDOM.scrollLeft = scrollLeft || 0;
   });
   updateCount();
+  updateRemoteBlockedStatus(); // タブ切替で文書(=remoteConsentField)が入れ替わるため
   // 【不具合2の修正】検索パネルの「n / 総数」表示(ステータスバーのupdateCount()とは別物)。
   // ここを呼び忘れていたため、タブを切り替えても前のタブでの検索件数が表示されたまま残り、
   // 実際のハイライト件数(0件になりうる)とズレていた。refreshOpenSearchCount()自身が
@@ -2425,7 +2449,7 @@ async function applyFileOpened(msg) {
   pushClosedFile(currentPath);
   resetAutoDetectState(); // 文書が変わるので内容からの自動判定の状態(仕様書 第1章の拡張)もリセット
   // 拡張子だけでなく、拡張子ごとの既定モード上書き・ファイル単位の手動記憶も考慮する(仕様書 第1章)。
-  // 仕様書 第8.3節(不具合修正: .review-behavior.md「仕様書8.3『10MB超はライブプレビュー
+  // 仕様書 第8.3節(不具合修正: docs/調査記録/点検-機能と動作.md「仕様書8.3『10MB超はライブプレビュー
   // 自動無効化』が未実装」): C#側(MainForm.OpenFile/OpenDroppedContent)がファイルサイズを
   // 見てforcePlainMode:trueを付けてきた場合は、拡張子判定・per-file記憶(perFileModes)より
   // 優先してplainモードで開く。大きなMarkdownファイルでもライブプレビュー(表・Mermaid・
@@ -2476,6 +2500,7 @@ async function applyFileOpened(msg) {
     setDirty(!!msg.recovered); // 復元時はtrue、通常の読み込みはfalse(基準と一致しているため)
   }
   updateCount();
+  updateRemoteBlockedStatus(); // ファイルを開くたびremoteConsentFieldは既定へ戻る(setValue()参照)
   updateStatusMeta();
   updateStatusMode();
   sidebar.setCurrentPath(currentPath); // files/treeパネルの現在ファイルハイライトを更新
@@ -2515,6 +2540,7 @@ async function applyNewDocumentLocal(msg) {
   markSaved(); // ダーティ判定の基準を「空文書」に確定させる
   setDirty(false);
   updateCount();
+  updateRemoteBlockedStatus();
   updateStatusMeta();
   updateStatusMode();
   sidebar.setCurrentPath(null); // 無題の新規文書には対応するファイルが無いのでハイライトを外す
@@ -2542,6 +2568,14 @@ async function handleHostMessage(msg) {
     case "request-all-tabs-text":
       // 自動保存(仕様書 N-06)のタブ全件対応。request-text/text-responseの複数タブ版。
       respondAllTabsText();
+      break;
+    case "activate-tab":
+      // 同じファイルを二重に開こうとしたとき(C#側PaneApplicationContext.OpenWindowの
+      // 重複起動対策)、既にこのウィンドウの中で開いているタブへ切り替える依頼。
+      if (msg.guid) {
+        const target = tabs.find((t) => t.guid === msg.guid);
+        if (target) switchToTab(target.id);
+      }
       break;
     case "save-result":
       if (msg.ok) {
@@ -2633,6 +2667,11 @@ async function handleHostMessage(msg) {
         typewriterKeepCaretCentered: msg.typewriterKeepCaretCentered,
         shiftTabAutoIndent: msg.shiftTabAutoIndent,
         autoPairMarkdown: msg.autoPairMarkdown,
+        // 外部リソースの自動読み込み(既定OFF。docs/調査記録/修正-セキュリティ.md参照)。imageApplyToOnline等の
+        // 他の「画像」設定と違いC#側だけでは完結せず、ライブプレビューの表示そのもの
+        // (editor.js ImageWidget/html-sanitize.js)を切り替えるため、他の記法トグルと同じく
+        // ここでextTogglesField経由に乗せる。
+        loadRemoteResources: msg.loadRemoteResources,
         // 記法の書き方(メニューバーから作るときの形。仕様書「記法の書き方」節)。
         strictMode: msg.strictMode,
         codeBlockLineNumbers: msg.codeBlockLineNumbers,
@@ -2734,6 +2773,16 @@ async function handleHostMessage(msg) {
       if (typeof msg.showWordCount === "boolean") {
         showWordCount = msg.showWordCount;
         updateWordCountVisibility();
+      }
+      // 折り返し表示(仕様書 V-10相当、view.wordWrap)。総点検 指摘M2の修正:
+      // 以前はwordWrapOnがメモリ上だけの変数で、ウィンドウを開き直すたびに既定のONへ
+      // 戻っていた。set-word-wrapで永続化されるようになったのに合わせ、起動時・設定再送の
+      // たびにここで最新値を反映する(editorFontSize等と同じ扱い)。ブラウザ単体動作等で
+      // msg.wordWrapが届かない場合は、既定のON(wordWrapOnの初期値)を維持する。
+      if (typeof msg.wordWrap === "boolean" && msg.wordWrap !== wordWrapOn) {
+        wordWrapOn = msg.wordWrap;
+        editor.setWordWrap(wordWrapOn);
+        updateWrapButton();
       }
       // 本文フォントと等幅フォント(仕様書 第2.10節 C-08)。
       // インラインスタイルで#cm-hostへ直接当てると、コードブロック・インラインコード・
@@ -2940,6 +2989,7 @@ async function openFile() {
     markSaved(); // ダーティ判定の基準を「いま読み込んだ内容」に確定させる
     setDirty(false);
     updateCount();
+    updateRemoteBlockedStatus();
     updateStatusMode();
     return;
   }
@@ -2957,6 +3007,7 @@ fileInput.addEventListener("change", async () => {
   markSaved();
   setDirty(false);
   updateCount();
+  updateRemoteBlockedStatus();
   updateStatusMode();
   fileInput.value = "";
 });
@@ -3120,6 +3171,7 @@ window.addEventListener("drop", async (e) => {
   markSaved();
   setDirty(false);
   updateCount();
+  updateRemoteBlockedStatus();
   updateStatusMode();
 }, true);
 
@@ -3166,7 +3218,7 @@ function saveFileAndWait(forcePicker) {
   });
 }
 
-// 不具合修正(.review-behavior.md「タブ形式で、アクティブでないタブの未保存内容が
+// 不具合修正(docs/調査記録/点検-機能と動作.md「タブ形式で、アクティブでないタブの未保存内容が
 // 確認されない」): タブ形式でウィンドウを閉じる/更新する前の保存確認(C#側
 // ConfirmDiscardDirtyAsync)は、"request-save"(=saveFile())だとアクティブタブしか
 // 保存しない。非アクティブタブに残っていた未保存の変更は、保存するかを尋ねられることも

@@ -1,7 +1,7 @@
 namespace Pane.Tests;
 
 /// <summary>
-/// 総点検(.review-ui.md 指摘16)「エラー表示に例外の型名・例外メッセージがそのまま出る」の
+/// 総点検(docs/調査記録/点検-見た目とUI.md 指摘16)「エラー表示に例外の型名・例外メッセージがそのまま出る」の
 /// 再発防止。<see cref="ExceptionMessages.Describe"/>が、利用者に見せてよい日本語だけを
 /// 返し、型名や.NETの生の例外メッセージを漏らさないことを固定する。
 /// </summary>

@@ -86,8 +86,8 @@ const SEARCH_INDEX = {
   file: ["自動保存", "保存の間隔", "未保存の下書き", "復元", "ファイル切替", "文字コード", "エンコード", "改行コード", "既定の拡張子"],
   edit: ["インデント幅", "コードブロック", "折り返し", "Shift", "Tab", "自動ペアリング", "括弧", "引用符", "絵文字", "自動補完", "生表示", "コピー形式", "行コピー", "タイプライター", "スペルチェック", "自動修正", "読了時間", "読了速度", "自動判定", "拡張子ごとの編集モード", "カラープレビュー", "色のプレビュー", "色", "スウォッチ", "カラーピッカー", "現在の行", "現在行", "アクティブ行", "強調表示", "行番号ガター"],
   markdown: ["インライン数式", "数式", "上付き", "下付き", "ハイライト", "作図", "ダイアグラム", "自動リンク", "Callouts", "厳格モード", "見出しの記法", "箇条書き", "リスト記号", "番号付きリスト", "行番号", "自動採番", "アウトラインの階層", "コード言語", "空白", "改行", "スマート引用符", "スマートダッシュ", "句読点"],
-  image: ["画像の挿入", "画像フォルダ", "ローカル画像", "オンライン画像", "相対パス", "URLエスケープ"],
-  export: ["用紙サイズ", "余白", "マージン", "ヘッダー", "フッター", "ページ区切り", "アウトライン", "書き出し先フォルダ", "書き出し後", "保存ダイアログ", "数式の書き出し", "YAML", "フロントマター", "印刷"],
+  image: ["画像の挿入", "画像フォルダ", "ローカル画像", "オンライン画像", "相対パス", "URLエスケープ", "外部リソース", "外部画像", "埋め込み", "自動で読み込む", "トラッキングピクセル"],
+  export: ["用紙サイズ", "余白", "マージン", "ヘッダー", "フッター", "ページ区切り", "アウトライン", "エクスポート先フォルダ", "エクスポート後", "保存ダイアログ", "数式のエクスポート", "YAML", "フロントマター", "印刷"],
   appearance: ["テーマ", "ライトテーマ", "ダークテーマ", "本文フォント", "等幅フォント", "フォント", "文字サイズ", "行の高さ", "行間", "最大幅", "文字数カウント", "カスタムCSS"],
   fileTypes: ["拡張子", "関連付け", "エクスプローラー", "新規作成メニュー", "既定のアプリ"],
   keyboard: ["キーバインド", "ショートカット", "キー割り当て"],
@@ -189,6 +189,11 @@ const FIELD_DEFS = {
   imagePreferRelativePath: { kind: "bool", def: true },
   imageAddDotSlash: { kind: "bool", def: false },
   imageAutoEscapeUrl: { kind: "bool", def: true },
+  // 外部リソースの自動読み込み(既定false。docs/調査記録/修正-セキュリティ.md「外部リソースの自動読み込みを、
+  // 既定でオフに」参照)。文書中の"http(s)://"の画像・iframeは、開いた瞬間にその参照先へ
+  // 通信が発生する(トラッキングピクセルに悪用できる)ため、既定では読み込まずプレースホルダに
+  // 差し替える(editor.js ImageWidget/html-sanitize.js)。ローカル画像・data:は対象外。
+  loadRemoteResources: { kind: "bool", def: false },
 
   // ---- エクスポート・印刷 ----
   exportPaperSize: { kind: "enum", values: ["a4", "a3", "b5", "letter", "legal", "tabloid", "custom"], def: "a4" },
@@ -1345,14 +1350,13 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
         ${fieldCheckbox("codeAutoWrap", "コードブロックの長い行を折り返し")}
         ${fieldCheckbox("codeActiveLineHighlight", "現在の行を強調表示", "カーソルのある行を本文・行番号ガターの両方で背景色を淡く変えて示します。選択範囲があるときは表示しません")}
         ${fieldCheckbox("colorPreviewInCode", "コード中の色をプレビュー表示", "16進・rgb・hsl等の色指定にスウォッチと文字色を付けます")}
-        ${fieldCheckbox("shiftTabAutoIndent", "Shift+Tabでインデントを解除")}
-        <label class="settings-checkbox-row" data-tip="strictMode"><input type="checkbox" data-field="strictMode"><span class="settings-checkbox-title">厳格モード<span class="settings-field-desc">見出しやリスト記号の記法を厳密に解釈します</span></span></label>
+        ${fieldCheckbox("shiftTabAutoIndent", "Shift+Tabでインデント解除")}
       </div>
       <div class="settings-group">
         <div class="settings-group-title">コピー・カーソル</div>
         <label class="settings-select-row">コピー形式
           <select data-field="defaultCopyFormat">
-            <option value="markdown">マークダウン</option>
+            <option value="markdown">Markdown</option>
             <option value="html">HTML</option>
           </select>
           <span class="settings-field-desc">他アプリへ貼り付けるときに書式を保つか</span>
@@ -1460,14 +1464,14 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
         ${fieldCheckbox("autoLinksEnabled", "URLの自動リンク化")}
         <label class="settings-checkbox-row" data-tip="highlightEnabled"><input type="checkbox" data-field="highlightEnabled"><span class="settings-checkbox-title">ハイライト<span class="settings-field-desc">例: <code>==ハイライト==</code></span></span></label>
         <label class="settings-checkbox-row" data-tip="calloutsEnabled"><input type="checkbox" data-field="calloutsEnabled"><span class="settings-checkbox-title">Callouts<span class="settings-field-desc">例: <code>&gt; [!NOTE]</code></span></span></label>
-        ${fieldCheckbox("diagramsEnabled", "作図(Mermaidなどのダイアグラム)")}
+        ${fieldCheckbox("diagramsEnabled", "Mermaid図")}
         <label class="settings-checkbox-row" data-tip="superSubscriptEnabled"><input type="checkbox" data-field="superSubscriptEnabled"><span class="settings-checkbox-title">上付き・下付き<span class="settings-field-desc">例: <code>x^2^</code>、<code>H~2~O</code></span></span></label>
         <label class="settings-checkbox-row" data-tip="inlineMathEnabled"><input type="checkbox" data-field="inlineMathEnabled"><span class="settings-checkbox-title">インライン数式<span class="settings-field-desc">例: <code>$E=mc^2$</code></span></span></label>
         ${fieldCheckbox("codeBlockMathEnabled", "コードブロック内の数式記法")}
       </div>
       <div class="settings-group">
         <div class="settings-group-title">記法の書き方</div>
-        <label class="settings-checkbox-row" data-tip="strictMode"><input type="checkbox" data-field="strictMode"><span class="settings-checkbox-title">厳格モード(再掲)<span class="settings-field-desc">「編集」カテゴリと同じ項目です</span></span></label>
+        <label class="settings-checkbox-row" data-tip="strictMode"><input type="checkbox" data-field="strictMode"><span class="settings-checkbox-title">厳格モード<span class="settings-field-desc">見出しやリスト記号の記法を厳密に解釈します</span></span></label>
         ${fieldSelect("headingStyle", "見出しの記法", [["atx", "ATX形式(# 見出し)"], ["setext", "Setext形式(下線)"]])}
         ${fieldSelect("unorderedListMarker", "箇条書きの記号", [["-", "-"], ["*", "*"], ["+", "+"]])}
         ${fieldSelect("orderedListMarker", "番号付きリストの記号", [[".", "1."], [")", "1)"]])}
@@ -1480,7 +1484,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
       <div class="settings-group">
         <div class="settings-group-title">空白と改行</div>
         ${fieldSelect("whitespaceWhenWriting", "編集中の空白の扱い", [["preserve", "そのまま保持"], ["ignore", "余分な空白を無視"]])}
-        ${fieldSelect("whitespaceOnExport", "書き出し時の空白の扱い", [["preserve", "そのまま保持"], ["ignore", "余分な空白を無視"]])}
+        ${fieldSelect("whitespaceOnExport", "エクスポート時の空白の扱い", [["preserve", "そのまま保持"], ["ignore", "余分な空白を無視"]])}
       </div>
       <div class="settings-group">
         <div class="settings-group-title">スマート置換</div>
@@ -1508,6 +1512,10 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
         ${fieldCheckbox("imagePreferRelativePath", "できるだけ相対パスで記述")}
         ${fieldCheckbox("imageAddDotSlash", "相対パスの先頭に ./ を付加")}
         ${fieldCheckbox("imageAutoEscapeUrl", "画像URLの空白などを自動的にエスケープ")}
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title">外部リソースの読み込み</div>
+        ${fieldCheckbox("loadRemoteResources", "文書中の外部画像・埋め込みを自動で読み込む", "オフ(既定)の間は\"http(s)://\"の画像・iframeを開いた時点では読み込まず、代わりにプレースホルダを表示します。読み込むと相手にファイルを開いたことが伝わりうるため(トラッキングピクセル)、既定はオフです。プレースホルダをクリックすると1件だけ、ステータスバーの案内から文書内のすべてを読み込めます。ローカルの画像は影響を受けません")}
       </div>`;
     wireCommonFields(el);
     wireBrowseButtons(el);
@@ -1539,17 +1547,17 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
       </div>
       <div class="settings-group">
         <div class="settings-group-title">出力への追加(上級者向け)</div>
-        ${fieldTextarea("exportAppendHead", "&lt;head&gt;内に追加するHTML", "書き出したHTMLの&lt;head&gt;末尾にそのまま挿入します")}
-        ${fieldTextarea("exportAppendBody", "&lt;body&gt;内に追加するHTML", "書き出したHTMLの&lt;body&gt;末尾にそのまま挿入します")}
+        ${fieldTextarea("exportAppendHead", "&lt;head&gt;内に追加するHTML", "エクスポートしたHTMLの&lt;head&gt;末尾にそのまま挿入します")}
+        ${fieldTextarea("exportAppendBody", "&lt;body&gt;内に追加するHTML", "エクスポートしたHTMLの&lt;body&gt;末尾にそのまま挿入します")}
       </div>
       <div class="settings-group">
-        <div class="settings-group-title">書き出し先・後処理</div>
-        ${fieldSelect("exportDefaultFolder", "書き出し先フォルダ", [["sameAsFile", "ファイルと同じフォルダ"], ["custom", "指定したフォルダ"]])}
-        ${fieldPath(ctx, "exportCustomFolder", "folder", "書き出し先の指定フォルダ", "(未設定)")}
-        ${fieldSelect("exportAfter", "書き出し後の動作", [["none", "何もしない"], ["openFile", "ファイルを開く"], ["openFolder", "フォルダを開く"]])}
-        ${fieldCheckbox("exportShowSaveDialog", "書き出し時に保存ダイアログを表示")}
-        ${fieldSelect("exportMathAs", "数式の書き出し形式", [["svg", "SVG画像"], ["latex", "LaTeXソース"]])}
-        ${fieldCheckbox("exportReadYamlFrontMatter", "YAMLフロントマターを読み取り")}
+        <div class="settings-group-title">エクスポート先・後処理</div>
+        ${fieldSelect("exportDefaultFolder", "エクスポート先フォルダ", [["sameAsFile", "ファイルと同じフォルダ"], ["custom", "指定したフォルダ"]])}
+        ${fieldPath(ctx, "exportCustomFolder", "folder", "エクスポート先の指定フォルダ", "(未設定)")}
+        ${fieldSelect("exportAfter", "エクスポート後の動作", [["none", "何もしない"], ["openFile", "ファイルを開く"], ["openFolder", "フォルダを開く"]])}
+        ${fieldCheckbox("exportShowSaveDialog", "エクスポート時に保存ダイアログを表示")}
+        ${fieldSelect("exportMathAs", "数式のエクスポート形式", [["svg", "SVG画像"], ["latex", "LaTeXソース"]])}
+        ${fieldCheckbox("exportReadYamlFrontMatter", "YAML Front Matterを読み取り")}
       </div>`;
     wireCommonFields(el);
     wireBrowseButtons(el);
@@ -1780,7 +1788,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
         ${assocTargetHtml()}
       </div>
       <div class="ft-quickrow">
-        <button type="button" class="btn tiny" data-quick="markdown">マークダウンのみ</button>
+        <button type="button" class="btn tiny" data-quick="markdown">Markdownのみ</button>
         <button type="button" class="btn tiny" data-quick="all">すべて選択</button>
         <button type="button" class="btn tiny" data-quick="none">すべて解除</button>
         <span class="ft-count"></span>
@@ -2006,10 +2014,10 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
         ${fieldCheckbox("showHiddenFilesInTree", "隠しファイルを表示")}
       </div>
       <div class="settings-group">
-        ${fieldTextarea("fileTreePatterns", "ファイルツリーの除外パターン", "1行に1パターン(glob)。<code>!</code>で始めると除外の否定になります。", { lines: true, rows: 4 })}
+        ${fieldTextarea("fileTreePatterns", "ファイルツリー・全文検索の除外パターン", "1行に1パターン(glob)。<code>!</code>で始めると除外の否定になります。", { lines: true, rows: 4 })}
       </div>
       <div class="settings-group">
-        ${fieldCheckbox("addToPath", "コマンドラインからのPane起動を有効化", "exeのあるフォルダをユーザー環境変数PATHへ追加します(管理者権限は不要)。インストーラは使わない方針のため、この設定からのみ登録・解除します。")}
+        ${fieldCheckbox("addToPath", "コマンドラインからのPane起動を有効化", "exeのあるフォルダをユーザー環境変数PATHへ追加します(管理者権限は不要)。インストーラは使わない方針のため、この設定からのみ登録・解除します。<br>注意: PATHに追加したフォルダの中身は、他のアプリからも名前だけで実行できるようになります。ダウンロードしたフォルダのまま有効にせず、Pane専用のフォルダに置いてから有効にしてください。")}
       </div>
       <div class="settings-group">
         <div class="settings-group-title">操作</div>
@@ -2205,16 +2213,16 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
         <div class="settings-group-title">場所</div>
         <div class="settings-info-row">
           <span class="settings-info-label">設定ファイル: ${draft.settingsFilePath ? escapeHtml(draft.settingsFilePath) : "(不明)"}</span>
-          <button type="button" class="btn tiny" data-action="open-settings-file">開く</button>
+          <button type="button" class="btn tiny" data-action="open-settings-file">設定ファイルの場所を開く</button>
         </div>
         <div class="settings-info-row">
           <span class="settings-info-label">ログファイル: ${draft.logFolderPath ? escapeHtml(draft.logFolderPath) : "(不明)"}</span>
-          <button type="button" class="btn tiny" data-action="open-log-folder">フォルダを開く</button>
+          <button type="button" class="btn tiny" data-action="open-log-folder">ログフォルダを開く</button>
           <button type="button" class="btn tiny" data-action="open-today-log">今日のログを開く</button>
         </div>
         <div class="settings-info-row">
           <span class="settings-info-label">カスタムCSSフォルダ: ${draft.themeFolderPath ? escapeHtml(draft.themeFolderPath) : "(不明)"}</span>
-          <button type="button" class="btn tiny" data-action="open-theme-folder">開く</button>
+          <button type="button" class="btn tiny" data-action="open-theme-folder">カスタムCSSフォルダを開く</button>
         </div>
       </div>
       <div class="settings-group">

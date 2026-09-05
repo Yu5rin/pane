@@ -68,7 +68,7 @@ import { StreamLanguage } from "@codemirror/language";
 
 // カテゴリID→日本語表示名。設定画面の3階層チェックボックスの最上位に使う。
 export const CATEGORIES = {
-  markdown: "マークダウン",
+  markdown: "Markdown",
   text: "テキスト",
   programming: "プログラミング言語",
   script: "スクリプト・シェル",

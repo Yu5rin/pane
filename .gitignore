@@ -21,3 +21,6 @@ release/
 # 検証スイートが実行中だけ作る作業用フォルダ(.verify-autodetect.mjs)。
 # node_modules を見つけられる場所でないと動かないため、リポジトリ直下に作っている。
 .verify-tmp-*/
+
+# エージェントが作業中に作る走り書きの置き場(リポジトリには入れない)
+scratchpad/

@@ -207,9 +207,29 @@ async function openFile(page, fileName, text) {
   }), { fileName, text });
   await page.waitForTimeout(400);
 }
+// テーマを含む設定の適用。切替後に色を実測する節((T)(Z)節)があるため、
+// 単なる固定待ちにしない。
+//
+// 【実際に落ちたこと】以前はここが waitForTimeout(200) だった。だが src/index.html の
+// body には transition: background .2s, color .2s が掛かっており、待ち時間と遷移時間が
+// 同じ200msで並ぶ。理屈のうえで必ず完了前を捕まえうる書き方で、実際、手元では通るのに
+// 実行のたびに (Z)節が落ちたり通ったりした(63本中1本だけNG=1、次の実行ではNG=0)。
+// 同じ誤りを .verify-ui3.mjs(サイドバー幅、transition 160msを150msで読む)と
+// .verify-theme-ui.mjs(テーマ切替、200msを120msで読む)でも起こしている。
+// docs/調査記録/README.md の「繰り返し出てきた誤り」参照。
+//
+// 固定の待ち時間を延ばすのではなく、body の背景色が変化しなくなるまで待つ。
+// transition の長さが将来変わっても追従する。テーマを変えない apply-settings では
+// 色が最初から動かないので、1フレーム分の確認で即座に抜ける。
 async function applySettings(page, extra) {
   await page.evaluate((extra) => window.__reply({ type: "apply-settings", ...extra }), extra);
-  await page.waitForTimeout(200);
+  await page.waitForFunction(() => {
+    const now = getComputedStyle(document.body).backgroundColor;
+    const settled = window.__paneLastBg === now;
+    window.__paneLastBg = now;
+    return settled;
+  }, { timeout: 3000, polling: 100 }).catch(() => {});
+  await page.waitForTimeout(50); // 色以外(ガター幅など)の反映を待つ余裕
 }
 async function mode(page) { return page.textContent("#status-mode"); }
 // 不具合(今回の実装で発覚): マーカーが旧実装(別ガター)から本文(.cm-content)側のwidget

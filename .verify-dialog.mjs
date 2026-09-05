@@ -341,13 +341,13 @@ function dialogVisible(page) { return page.$(".pane-dialog-overlay"); }
   await page.waitForTimeout(150);
   ok("(H) 名前の変更をキャンセルするとrename-pathは送信されない", (await lastMsg(page, "rename-path")) === null);
 
-  // ---- 削除(ごみ箱へ): 確認ダイアログ(danger) ----
+  // ---- ごみ箱へ移動: 確認ダイアログ(danger) ----
   await clearSent(page);
   await page.locator(".file-item", { hasText: "note.md" }).first().click({ button: "right" });
   await page.waitForTimeout(200);
   menu = await lastMsg(page, "open-context-menu");
-  const deleteItem = findItem(menu?.items, "削除(ごみ箱へ)");
-  ok("(H) ファイル行: 「削除(ごみ箱へ)」がある", !!deleteItem);
+  const deleteItem = findItem(menu?.items, "ごみ箱へ移動");
+  ok("(H) ファイル行: 「ごみ箱へ移動」がある", !!deleteItem);
   await clearSent(page);
   await page.evaluate((id) => window.__reply({ type: "menu-command", id }), deleteItem.id);
   await page.waitForTimeout(200);
@@ -361,7 +361,7 @@ function dialogVisible(page) { return page.$(".pane-dialog-overlay"); }
   await page.locator(".file-item", { hasText: "note.md" }).first().click({ button: "right" });
   await page.waitForTimeout(200);
   menu = await lastMsg(page, "open-context-menu");
-  const deleteItem2 = findItem(menu?.items, "削除(ごみ箱へ)");
+  const deleteItem2 = findItem(menu?.items, "ごみ箱へ移動");
   await page.evaluate((id) => window.__reply({ type: "menu-command", id }), deleteItem2.id);
   await page.waitForTimeout(200);
   await page.keyboard.press("Enter");

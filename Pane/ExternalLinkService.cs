@@ -55,7 +55,7 @@ internal static class ExternalLinkService
 
         string uri = e.Uri ?? "";
         // URLのクエリ文字列にはトークンが入りうる社内URL等もあるため、既定ログでは
-        // スキームとホストだけにする(.review-security.md B対応。理由はPrivacyLogFormatter参照)。
+        // スキームとホストだけにする(docs/調査記録/点検-セキュリティ.md B対応。理由はPrivacyLogFormatter参照)。
         // 完全なURLは詳細ログ(Logger.Debug)にのみ残す。
         Logger.Write($"{logPrefix}new-window-requested: uri={PrivacyLogFormatter.ShortenUri(uri)}, isUserInitiated={e.IsUserInitiated}");
         Logger.Debug($"{logPrefix}new-window-requested(完全なURL): uri={uri}");

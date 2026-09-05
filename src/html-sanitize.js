@@ -145,6 +145,29 @@ function isRemoteMediaUrl(raw) {
   return n.startsWith("http://") || n.startsWith("https://") || n.startsWith("//");
 }
 
+// 外部リソースの自動読み込み既定OFF(docs/調査記録/修正-セキュリティ.md「外部リソースの自動読み込みを、
+// 既定でオフにしてください」/docs/調査記録/点検-セキュリティ.md C-5 参照)。文書中の生HTML(<img>/<iframe>等)の
+// "http(s)://"のsrc/srcsetも、Markdown記法の画像(editor.js ImageWidget)と同じ理由で
+// 既定では読み込まず、プレースホルダに差し替える。"//host/..."(プロトコル相対)は
+// isRemoteMediaUrlと同じ扱いで外部URLとみなす。
+function isRemoteHttpUrl(raw) {
+  const n = normalizeUrl(raw);
+  return n.startsWith("http://") || n.startsWith("https://") || n.startsWith("//");
+}
+
+// 「読み込んでいません。クリックして読み込む」プレースホルダ。実際にクリックされたときの
+// 同意登録(view.dispatch)はこのファイルの外(editor.js wireRemoteBlockedPlaceholders)が行う。
+// このファイル自身はCodeMirror/アプリ設定を一切知らない依存の無いモジュールのまま保つ
+// (isRemoteAllowedという純粋なコールバックだけを外から受け取る)。
+function makeRemoteBlockedPlaceholder(destDocument, tag, url) {
+  const span = destDocument.createElement("span");
+  span.className = "cm-remote-blocked-inline";
+  span.setAttribute("data-pane-remote-src", url);
+  const label = tag === "iframe" ? "外部の埋め込み" : "外部画像";
+  span.textContent = `${label}を読み込んでいません(クリックして読み込む): ${url}`;
+  return span;
+}
+
 // style属性値をプロパティ単位で検証し、安全なものだけを残す。
 // プロパティ名・値の両方をホワイトリストで検証すること(仕様書の指示)。
 function sanitizeStyle(styleValue) {
@@ -164,7 +187,10 @@ function sanitizeStyle(styleValue) {
 }
 
 // srcset="url1 1x, url2 2x" 形式。各エントリのURL部分だけを個別に安全性検証する。
-function sanitizeSrcset(value) {
+// isRemoteAllowed: 外部リソースの自動読み込み既定OFF(上記コメント参照)の判定。remote かつ
+// 未許可のエントリは(安全ではあっても)ここで黙って落とす。srcset全体をプレースホルダには
+// 差し替えない(srcは別にある/無いを問わずimg要素自体の可否はappendSanitized側が決める)。
+function sanitizeSrcset(value, isRemoteAllowed) {
   const kept = [];
   for (const part of value.split(",")) {
     const trimmed = part.trim();
@@ -172,7 +198,9 @@ function sanitizeSrcset(value) {
     const sp = trimmed.indexOf(" ");
     const url = sp < 0 ? trimmed : trimmed.slice(0, sp);
     const descriptor = sp < 0 ? "" : trimmed.slice(sp);
-    if (isSafeUrl(url, { allowDataImage: true })) kept.push(url + descriptor);
+    if (!isSafeUrl(url, { allowDataImage: true })) continue;
+    if (isRemoteHttpUrl(url) && !isRemoteAllowed(url)) continue;
+    kept.push(url + descriptor);
   }
   return kept.length ? kept.join(", ") : null;
 }
@@ -195,7 +223,12 @@ function applyIframeSandbox(el) {
 }
 
 // 属性のコピー(共通のホワイトリスト検証 + 属性ごとの追加検証)。
-function sanitizeAttributes(tag, srcEl, destEl) {
+// isRemoteAllowed: 外部リソースの自動読み込み既定OFF(isRemoteHttpUrl定義部のコメント参照)の
+// 判定コールバック。img/iframeのsrcは(要素ごとプレースホルダに差し替えるため)appendSanitized側で
+// 先に処理済みでここへは来ない。ここではposter(video/audioの静止画。要素自体は残すぶん、
+// ブロック時は属性ごと落とすに留める。M-30により動画のsrcが外部URLなら要素自体が既に
+// 除去されているため、posterだけが外部URLというケースの対策)とsrcsetを扱う。
+function sanitizeAttributes(tag, srcEl, destEl, isRemoteAllowed) {
   for (const attr of Array.from(srcEl.attributes)) {
     const name = attr.name.toLowerCase();
     // onclick等のイベントハンドラ属性は問答無用ですべて除去する(最優先のセキュリティ要件)。
@@ -207,8 +240,11 @@ function sanitizeAttributes(tag, srcEl, destEl) {
     if (name === "href" || name === "src" || name === "poster") {
       // data:image/ の例外はimg/posterに限らずhref/src全般に適用する(仕様書の記述どおり)。
       if (!isSafeUrl(value, { allowDataImage: true })) continue;
+      // hrefはクリックしない限り読み込みが起きないため対象外。posterは(動画のプレビュー画像)
+      // 外部URLなら黙って落とす(video要素自体は残す。M-30と同じ「ローカルのみ」の考え方)。
+      if (name === "poster" && isRemoteHttpUrl(value) && !isRemoteAllowed(value)) continue;
     } else if (name === "srcset") {
-      const cleaned = sanitizeSrcset(value);
+      const cleaned = sanitizeSrcset(value, isRemoteAllowed);
       if (cleaned == null) continue;
       value = cleaned;
     } else if (name === "style") {
@@ -236,7 +272,8 @@ function isDisallowedMediaSrc(rawSrc) {
 }
 
 // ノード1つを検証し、許可されていれば destParent の子として追加する(再帰)。
-function appendSanitized(node, destParent, destDocument, depth) {
+// isRemoteAllowed: 外部リソースの自動読み込み既定OFFの判定コールバック(sanitizeHtml参照)。
+function appendSanitized(node, destParent, destDocument, depth, isRemoteAllowed) {
   if (depth > MAX_DEPTH) return; // 異常なネストからの防御(§実装メモ参照)
   if (node.nodeType === Node.TEXT_NODE) {
     destParent.appendChild(destDocument.createTextNode(node.textContent));
@@ -250,7 +287,7 @@ function appendSanitized(node, destParent, destDocument, depth) {
 
   if (!ALLOWED_TAGS.has(tag)) {
     // ホワイトリスト外のタグ: タグを剥がしてテキスト(子ノード)だけ残す(M-31)
-    for (const child of Array.from(node.childNodes)) appendSanitized(child, destParent, destDocument, depth + 1);
+    for (const child of Array.from(node.childNodes)) appendSanitized(child, destParent, destDocument, depth + 1, isRemoteAllowed);
     return;
   }
 
@@ -262,16 +299,33 @@ function appendSanitized(node, destParent, destDocument, depth) {
     }
   }
 
+  // 外部リソースの自動読み込み既定OFF(isRemoteHttpUrl定義部のコメント参照)。img/iframeは
+  // 要素ごとプレースホルダに差し替える(子要素にも降りない。iframeの中身はそもそも無視される
+  // タグだが、imgのalt文字列等をテキストとして漏らさないためにも要素単位で止める)。
+  if (tag === "img" || tag === "iframe") {
+    // img: srcが無い/空でも(srcsetのみで配信するレスポンシブ画像)候補URLを見る。
+    const rawSrc = node.getAttribute("src") || (tag === "img" ? (node.getAttribute("srcset") || "").split(",")[0].trim().split(/\s+/)[0] : null);
+    if (rawSrc && isRemoteHttpUrl(rawSrc) && !isRemoteAllowed(rawSrc)) {
+      destParent.appendChild(makeRemoteBlockedPlaceholder(destDocument, tag, rawSrc));
+      return;
+    }
+  }
+
   const el = destDocument.createElement(tag);
-  sanitizeAttributes(tag, node, el);
-  for (const child of Array.from(node.childNodes)) appendSanitized(child, el, destDocument, depth + 1);
+  sanitizeAttributes(tag, node, el, isRemoteAllowed);
+  for (const child of Array.from(node.childNodes)) appendSanitized(child, el, destDocument, depth + 1, isRemoteAllowed);
   destParent.appendChild(el);
 }
 
 // 信頼できないHTML文字列を安全なDocumentFragmentに変換して返す。
 // options.doc: 生成先のDocument(既定はグローバルのdocument。テスト等での差し替え用)。
+// options.isRemoteAllowed(url): 外部リソースの自動読み込み既定OFF(isRemoteHttpUrl定義部の
+// コメント参照)の判定コールバック。省略時は常にtrueを返す関数として扱う(html-to-markdown.js
+// 貼り付け経路等、この判定が要らない呼び出し元との後方互換のため)。このファイル自身は
+// CodeMirror/アプリ設定を知らない(呼び出し側が既に決めた結果を関数として受け取るだけ)。
 export function sanitizeHtml(html, options = {}) {
   const destDocument = options.doc || document;
+  const isRemoteAllowed = options.isRemoteAllowed || (() => true);
   const raw = String(html ?? "");
   // DOMParser.parseFromString() 自体が深いネストに対してほぼ二次関数的なコストを持つため、
   // パースに入る前に危険性を見積もり、危険であればパースせずプレーンテキストとして扱う
@@ -288,7 +342,7 @@ export function sanitizeHtml(html, options = {}) {
   const parsed = new DOMParser().parseFromString(raw, "text/html");
   const frag = destDocument.createDocumentFragment();
   for (const child of Array.from(parsed.body.childNodes)) {
-    appendSanitized(child, frag, destDocument, 0);
+    appendSanitized(child, frag, destDocument, 0, isRemoteAllowed);
   }
   return frag;
 }

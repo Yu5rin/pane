@@ -4,7 +4,7 @@ namespace Pane;
 /// 例外を、利用者にそのまま見せてよい日本語の短い説明へ言い換える。
 ///
 /// 【なぜ独立したクラスにしたか】
-/// 総点検(.review-ui.md 指摘16)で、エラーダイアログ・サイドバー・設定画面などに
+/// 総点検(docs/調査記録/点検-見た目とUI.md 指摘16)で、エラーダイアログ・サイドバー・設定画面などに
 /// <c>ex.Message</c>(「Access to the path 'C:\Users\...' is denied.」のような英語の
 /// .NETの例外メッセージで、絶対パスやHTTPのステータスコードを含むことがある)や
 /// <c>ex.GetType().Name</c>(「HttpRequestException」のような型名そのもの)が
