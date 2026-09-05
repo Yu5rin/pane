@@ -370,7 +370,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
         }
 
         // [計測] 仕様書 第8.4節の数値目標のうち、これまで測る手立てが無かった2つを記録する。
-        //   ・2枚目以降のウィンドウ追加メモリ(目標60MB以内)
+        //   ・2枚目以降のウィンドウ追加メモリ(目標110MB以内)
         //   ・既存インスタンスへのファイル追加表示(目標300ms以内。パイプ経由の要求が対象)
         // 1枚目は「起動」であってこの目標の対象外なので、2枚目以降だけを見る。
         //
@@ -512,7 +512,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
                          "他のアプリのWebView2が動いていると多めに出る",
                 };
                 Logger.Write($"[計測] {_windows.Count}枚目のウィンドウ: 表示まで{elapsedMs}ms, " +
-                             $"メモリ増加{deltaMb}MB (目標: 表示300ms以内・メモリ60MB以内。{memoryNote}。" +
+                             $"メモリ増加{deltaMb}MB (目標: 表示300ms以内・メモリ110MB以内。{memoryNote}。" +
                              $"このメモリ計測自体に{measureMs}msかかっており、表示までの時間には含めていない)");
                 PerfWatch.Report($"{_windows.Count}枚目のウィンドウの表示", elapsedMs, 300);
             };
@@ -579,13 +579,12 @@ internal sealed class PaneApplicationContext : ApplicationContext
                 // この環境が持っているプロセスだけを数える。他のアプリのWebView2は別の環境なので
                 // ここには出てこない。
                 //
-                // 種別ごとの内訳も控える。仕様書8.4節は「2枚目以降のウィンドウ追加メモリ
-                // 60MB以内」を目標にしているが、実機では101〜110MB増える。8.1節が
-                // 「プロセスを分ければ1枚あたり100MB超」と書いているとおり、WebView2は
-                // 同じプロセス内で使ってもウィンドウごとにレンダラー(Renderer)を作り、
-                // 共有されるのはブラウザ本体・GPU・ユーティリティだけである。
-                // 目標値を見直すのか短縮できるのかを判断するには、増えたぶんが本当に
-                // レンダラーなのかが分からないと決められないため、内訳を残す。
+                // 種別ごとの内訳も残す。実機ログ(2026-09-06)でこの内訳を採ったところ、
+                // ウィンドウを1枚増やすと Renderer が1つ増えて84〜97MB、Browser(147→160MB)・
+                // Gpu(78→82MB)・Utility(59MB)はほぼ一定だった。つまり増えるぶんはすべて
+                // レンダラーで、同じプロセス内でも共有されない。これを根拠に仕様書8.4節の
+                // 目標を60MB以内から110MB以内へ改めている。
+                // 今後この数字が変わったとき(WebView2の更新など)に気づけるよう、内訳は残す。
                 var byKind = new Dictionary<string, (int Count, long Bytes)>();
                 foreach (Microsoft.Web.WebView2.Core.CoreWebView2ProcessInfo info in env.GetProcessInfos())
                 {
@@ -937,6 +936,16 @@ internal sealed class PaneApplicationContext : ApplicationContext
     {
         if (_settingsWindow is not null && _helpWindow is not null) return;
 
+        // 設定「設定と取扱説明書の画面をあらかじめ用意しておく」(仕様書 C-15、既定オン)。
+        // オフのときは何も先回りしない。開いたその場で作る従来の経路(OpenSettingsWindow /
+        // OpenHelpWindow)に落ちるだけで、初回の表示が遅くなる代わりに、まだ開いていない
+        // 画面ぶんのWebView2描画プロセス(実機で約160MB)を使わずに済む。
+        if (!IsPregenerationEnabled())
+        {
+            Logger.Debug("事前生成: 設定で無効になっているため行わない");
+            return;
+        }
+
         if (_settingsWindow is null)
         {
             _settingsPregenerateTimer.Stop();
@@ -950,6 +959,21 @@ internal sealed class PaneApplicationContext : ApplicationContext
             _helpPregenerateTimer.Start();
         }
         Logger.Debug("事前生成: 本体ウィンドウが使える状態になったので、ここから数え直す");
+    }
+
+    /// <summary>設定「設定と取扱説明書の画面をあらかじめ用意しておく」の現在値。
+    /// 設定が読めなければ既定(用意する)に倒す。</summary>
+    private static bool IsPregenerationEnabled()
+    {
+        try
+        {
+            return SettingsService.Load().PregenerateWindows;
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException("事前生成: 設定を読めなかったため既定(用意する)で続ける", ex);
+            return true;
+        }
     }
 
     private void PregenerateSettingsWindow()
