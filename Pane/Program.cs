@@ -24,7 +24,7 @@ internal static class Program
         // (書いた後だと集計範囲が自分自身になってしまう。StartupLogReview参照)。
         StartupLogReview.ReviewPreviousRun();
         // argsには関連付け起動・D&D起動時のファイルの絶対パスがそのまま入る
-        // (.review-security.md B対応。理由はPrivacyLogFormatter参照)。既定ログでは
+        // (docs/調査記録/点検-セキュリティ.md B対応。理由はPrivacyLogFormatter参照)。既定ログでは
         // ファイル名だけにし、完全なパスは詳細ログ(Logger.Debug)にのみ残す。
         Logger.Write($"=== Pane起動 args=[{string.Join(",", args.Select(PrivacyLogFormatter.ShortenPath))}] ===");
         Logger.Debug($"=== Pane起動(フルパス) args=[{string.Join(",", args)}] ===");
@@ -70,6 +70,15 @@ internal static class Program
                 initialPath = arg;
             }
         }
+
+        // 相対パスのまま保持すると、多重起動時(このあとのMutexチェックで既存プロセスが
+        // 見つかった場合)に名前付きパイプへ文字列としてそのまま渡り、既存プロセス側の
+        // カレントディレクトリを基準に解決されてしまう(docs/調査記録/点検-機能と動作.md「起動済みの
+        // ときに相対パスを渡すと、既存プロセスのCWDで解決される」)。今まさに起動した
+        // このプロセスのカレントディレクトリを基準に、ここで一度だけ絶対パス化しておく
+        // (StartupPathResolver参照)。単独起動(1プロセス目)ではこの処理が無くても
+        // 自分自身のカレントディレクトリのままなので偶然正しく動いており、気づかれにくかった。
+        initialPath = StartupPathResolver.ResolveToFullPath(initialPath);
 
         // 古い側が完全に終わるのを待つ。Mutexを取るより前・WebView2に触れるより前に
         // 行う必要がある(理由はUpdateService.WaitForPreviousProcessExitの説明を参照)。

@@ -188,12 +188,12 @@ internal sealed class PaneApplicationContext : ApplicationContext
         {
             if (!_settings.RecoverUnsavedDrafts)
             {
-                Logger.Write($"復元確認をスキップ(recoverUnsavedDrafts=false): スナップショットを破棄: {(snapshot.OriginalPath is null ? "無題のドキュメント" : PrivacyLogFormatter.ShortenPath(snapshot.OriginalPath))}");
+                Logger.Write($"復元確認をスキップ(recoverUnsavedDrafts=false): スナップショットを破棄: {(snapshot.OriginalPath is null ? "無題" : PrivacyLogFormatter.ShortenPath(snapshot.OriginalPath))}");
                 AutoSaveService.DeleteSnapshot(windowId);
                 continue;
             }
 
-            string label = snapshot.OriginalPath ?? "無題のドキュメント";
+            string label = snapshot.OriginalPath ?? "無題";
             // この時点ではまだ本体ウィンドウが1つも無い(起動直後)ため、オーナー無しで表示する
             // (PaneDialog.Show側は画面中央にフォールバックする)。
             DialogResult choice = PaneDialog.Show(
@@ -212,7 +212,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
                 // 復元ダイアログで「はい」を選んだ直後(このアプリがいちばん不安定な瞬間、
                 // WebView2の初期化に失敗して"ready"が来ない場合も含む)にもう一度落ちると、
                 // その空白の間は未保存内容がどこにも残っておらず完全に失われる
-                // (.review-behavior.md「復元「はい」直後に元スナップショットを消すため、
+                // (docs/調査記録/点検-機能と動作.md「復元「はい」直後に元スナップショットを消すため、
                 // データが失われうる」参照)。
                 //
                 // 対策: 新しいウィンドウのWindowIdをここで先に確定させ、その下へ復元内容の
@@ -319,6 +319,30 @@ internal sealed class PaneApplicationContext : ApplicationContext
             return;
         }
 
+        // 総点検(docs/調査記録/点検-機能と動作.md)「同じファイルを2ウィンドウで開けて後勝ち上書き」対策。
+        // 新しいウィンドウ・タブを作る前に、既にどこかのウィンドウ(タブ形式ならタブも含む)で
+        // 同じファイルを開いていないか確認する。見つかればそちらを前面に出すだけにして
+        // 新規には開かない(VS Code等と同じ「既存を前面化」方式。メモ帳のように無警告のまま
+        // 複数開かせて後勝ち上書きを許すよりも、上書き事故を未然に防げると判断した)。
+        // エクスプローラーで同じファイルを2回開く(2回目は多重起動のパイプ経由でここへ来る)・
+        // 「最近使ったファイル」やコマンドライン引数で同じファイルを重ねて指定する、といった
+        // 経路はいずれも_requestNewWindow(=OpenWindow)を経由するため、ここ1か所で防げる。
+        // 異常終了からの復元(recoverFrom)は復元先の内容がディスク上の現在の内容と異なる
+        // (それが復元の目的)ため対象外、ドロップ(droppedFile)はパス不定のことも多いため対象外。
+        if (path is not null && recoverFrom is null && droppedFile is null)
+        {
+            MainForm? existing = _windows.FirstOrDefault(w =>
+                !w.IsDisposed && w.GetOpenFilePaths().Any(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase)));
+            if (existing is not null)
+            {
+                Logger.Write($"OpenWindow: 既に開いているウィンドウ/タブへ切り替える: {PrivacyLogFormatter.ShortenPath(path)}");
+                Logger.Debug($"OpenWindow(フルパス): {path}");
+                existing.ActivateTabForPathIfPresent(path);
+                WindowChrome.ForceActivate(existing);
+                return;
+            }
+        }
+
         // タブ形式(仕様書 第2.10節 C-14、隠し設定): 既存のウィンドウがあれば新規ウィンドウを
         // 作らず、そちらへ新しいタブとして開くよう依頼する(ユーザー指示:
         // 「ファイルを開く要求は新しいウィンドウではなく既存ウィンドウの新しいタブへ送る」)。
@@ -408,8 +432,22 @@ internal sealed class PaneApplicationContext : ApplicationContext
             form.StartPosition = FormStartPosition.WindowsDefaultLocation;
         }
 
+        // 最大化状態の復元(docs/調査記録/点検-機能と動作.md「余裕があれば直すもの」)。カスケード配置
+        // (複数ウィンドウを少しずつずらして並べる、上のWindowX/WindowY分岐)とは相性が悪いため、
+        // このセッションで最初に開くウィンドウ(_windows.Count==0)だけに適用する。2枚目以降は
+        // 従来どおりNormalで並べる。
+        if (_windows.Count == 0 && _settings.WindowMaximized)
+        {
+            form.WindowState = FormWindowState.Maximized;
+        }
+
         form.FormClosing += (_, _) =>
         {
+            // docs/調査記録/点検-機能と動作.md「余裕があれば直すもの」: 最大化状態は従来保存していなかった
+            // ため、最大化して閉じても次回はNormal時代の位置・サイズで開いていた。
+            // 位置・サイズ自体はNormal時のものだけを引き続き記録する(最大化中のLocationは
+            // 意味が無いため)。
+            _settings.WindowMaximized = form.WindowState == FormWindowState.Maximized;
             if (form.WindowState == FormWindowState.Normal)
             {
                 _settings.WindowX = form.Location.X;
@@ -969,6 +1007,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
                 latest.WindowY = _settings.WindowY;
                 latest.WindowWidth = _settings.WindowWidth;
                 latest.WindowHeight = _settings.WindowHeight;
+                latest.WindowMaximized = _settings.WindowMaximized;
                 if (openFilePaths is not null) latest.OpenFilePaths = openFilePaths;
                 quitOnLastWindowClosed = latest.QuitOnLastWindowClosed;
             });

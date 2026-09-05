@@ -39,8 +39,15 @@ jobs:
       - name: タグからバージョンを取り出す
         id: version
         shell: pwsh
+        # github.ref_name(push されたタグ名そのもの)を式としてPowerShellの文字列リテラルへ
+        # 直接展開すると、タグ名に " や ` や $() のようなPowerShellのメタ文字が含まれていた
+        # 場合に、文字列の外へ抜け出して任意のコードとして解釈されてしまう(式インジェクション)。
+        # タグを push できるのはこのリポジトリへ書き込み権限を持つ人に限られるため実害は
+        # 想定しにくいが(docs/調査記録/点検-セキュリティ.md A参照)、env経由で値を渡すのが定石。
+        env:
+          TAG_NAME: ${{ github.ref_name }}
         run: |
-          $tag = "${{ github.ref_name }}"
+          $tag = $env:TAG_NAME
           $version = $tag -replace '^v', ''
           if ($version -notmatch '^\d+\.\d+\.\d+$') {
             throw "タグ '$tag' からバージョンを読み取れません(v1.2.3 の形で付けてください)"

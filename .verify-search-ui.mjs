@@ -356,6 +356,53 @@ const SAMPLE = ["test one", "line two", "test three", "line four", "test five"].
   await page.close();
 }
 
+// =========================================================================
+// (10) UI点検第2弾 指摘10: サイドバーを上限幅まで広げた状態で検索パネルが
+//      #cm-host(overflow:hidden)の外へはみ出さないこと。src/style.cssの
+//      .search-panel(max-width追加)・.search-row input[type="text"](flexで
+//      縮められるようにした)の修正確認。
+// =========================================================================
+{
+  const page = await browser.newPage();
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(String(e.stack || e)));
+  await page.addInitScript(() => {
+    const listeners = [];
+    window.__sent = [];
+    window.chrome = { webview: { postMessage: (m) => { window.__sent.push(m); }, addEventListener: (_t, fn) => listeners.push(fn) } };
+    window.__reply = (data) => listeners.forEach((fn) => fn({ data }));
+  });
+  for (const width of [960, 800]) {
+    await page.setViewportSize({ width, height: 700 });
+    await page.goto("http://localhost:8181/index.html");
+    await page.waitForTimeout(600);
+    await openFile(page, SAMPLE);
+
+    // サイドバーを開いて上限幅(min(600, innerWidth*0.5)、src/sidebar.js)まで広げる
+    // (debug ctx.actions.toggleSidebar()はブリッジ有りページでは公開されないため、
+    // 実際のトグルボタンをクリックする)。
+    await page.click("#status-sidebar");
+    await page.waitForTimeout(150);
+    const maxW = await page.evaluate(() => Math.min(600, Math.floor(window.innerWidth * 0.5)));
+    await page.evaluate((w) => document.getElementById("sidebar").style.setProperty("--sidebar-w", `${w}px`), maxW);
+    await page.waitForTimeout(150);
+
+    await openSearchPanel(page, true); // 置換行も表示(さらに幅が要る状態)
+    const rects = await page.evaluate(() => {
+      const cmHost = document.getElementById("cm-host").getBoundingClientRect();
+      const panel = document.getElementById("search-panel").getBoundingClientRect();
+      const query = document.getElementById("search-query").getBoundingClientRect();
+      return { cmHostLeft: cmHost.left, panelLeft: panel.left, queryWidth: query.width };
+    });
+    ok(`(10) 幅${width}px・サイドバー${maxW}px: 検索パネルが#cm-hostの左端より内側に収まる`,
+      rects.panelLeft >= rects.cmHostLeft - 0.5,
+      `(cmHostLeft=${rects.cmHostLeft.toFixed(1)} panelLeft=${rects.panelLeft.toFixed(1)} queryWidth=${rects.queryWidth.toFixed(1)})`);
+    ok(`(10) 幅${width}px: 入力欄が最小幅60px以上を保っている(操作可能)`, rects.queryWidth >= 59.5, `(実測${rects.queryWidth.toFixed(1)})`);
+  }
+  ok("(10) ページエラー0件", errors.length === 0, JSON.stringify(errors));
+  await page.close();
+}
+
 console.log(`--- 集計: OK=${okCount} NG=${ngCount}`);
 await browser.close();
 process.exit(ngCount === 0 ? 0 : 1);

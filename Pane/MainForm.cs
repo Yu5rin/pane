@@ -129,6 +129,16 @@ internal sealed class MainForm : Form
     private bool _suppressWatcher;
     private bool _externalChangePending;
 
+    /// <summary>開いているファイルが外部で削除・リネームされたか
+    /// (docs/調査記録/点検-機能と動作.md「外部での削除・リネームを検知しない」)。trueならOnFileChangedExternally
+    /// と同じデバウンス(<see cref="_externalChangeDebounceTimer"/>)を経て、通常の「変更されました」
+    /// より優先して1回だけ知らせる(削除・リネームの方が強い信号のため)。</summary>
+    private bool _externalRemovalPending;
+
+    /// <summary>削除ならnull、リネームなら変更後のフルパス。<see cref="_externalRemovalPending"/>と
+    /// 対で使う。</summary>
+    private string? _externalRenameNewFullPath;
+
     /// <summary>外部変更ダイアログで「いいえ」を選んだファイルのパス(このウィンドウが自分で
     /// 保存する、または別のファイルを開くまで、そのファイルについては再度ダイアログを
     /// 出さないための抑止)。<see cref="_suppressWatcher"/>とは役割が異なる別物なので混同しない
@@ -185,7 +195,7 @@ internal sealed class MainForm : Form
     private TaskCompletionSource<bool>? _saveCompletionSource;
 
     /// <summary>
-    /// 不具合修正(.review-behavior.md「タブ形式で、アクティブでないタブの未保存内容が
+    /// 不具合修正(docs/調査記録/点検-機能と動作.md「タブ形式で、アクティブでないタブの未保存内容が
     /// 確認されない」): タブ形式でConfirmDiscardDirtyAsyncが「保存する」を選んだ場合、
     /// JS側(saveAllDirtyTabsAndWait)はdirtyな各タブへ順に切り替えながら個別に
     /// "save"/"save-result"の往復を繰り返す。そのため_saveCompletionSourceを使うと、
@@ -238,7 +248,7 @@ internal sealed class MainForm : Form
     /// <see cref="HandleTabsChanged"/>参照)をそのまま返しており、タブ形式で
     /// 「タブ1を編集→タブ2(未編集)へ切替→ウィンドウを閉じる」とすると、非アクティブな
     /// タブ1の未保存の変更が一切確認されないまま閉じてしまっていた
-    /// (.review-behavior.md「タブ形式で、アクティブでないタブの未保存内容が確認されない」)。
+    /// (docs/調査記録/点検-機能と動作.md「タブ形式で、アクティブでないタブの未保存内容が確認されない」)。
     /// タブ形式(_tabInfos.Count > 0)では全タブのDirtyを見る。ウィンドウ形式では
     /// _tabInfosが空のまま(HandleTabsChangedが一度も呼ばれない)なので、従来どおり
     /// _isDirty(=このウィンドウの唯一の文書の状態)を返す。
@@ -259,6 +269,25 @@ internal sealed class MainForm : Form
         return _currentPath is not null ? new List<string> { _currentPath } : Array.Empty<string>();
     }
 
+    /// <summary>
+    /// <see cref="PaneApplicationContext.OpenWindow"/>の重複起動対策専用: このウィンドウが
+    /// 指定したパスを(タブ形式なら、いずれかのタブとして)既に開いている場合、そのタブを
+    /// アクティブにするようJS側へ依頼する。ウィンドウ自体の前面化は呼び出し元が行う
+    /// (<see cref="WindowChrome.ForceActivate"/>)。ウィンドウ形式(_tabInfos空)のときは
+    /// 呼び出し元が既にGetOpenFilePathsで一致を確認済みのため何もしなくてよい。
+    /// </summary>
+    internal void ActivateTabForPathIfPresent(string path)
+    {
+        foreach (TabInfo tab in _tabInfos)
+        {
+            if (tab.Path is not null && string.Equals(tab.Path, path, StringComparison.OrdinalIgnoreCase))
+            {
+                PostToWeb(new { type = "activate-tab", guid = tab.Guid });
+                return;
+            }
+        }
+    }
+
     public MainForm(
         string? initialPath,
         AutoSaveSnapshot? recoverFrom = null,
@@ -274,7 +303,7 @@ internal sealed class MainForm : Form
         Action? shutdownForUpdate = null,
         Guid? windowId = null)
     {
-        // 不具合修正: 復元「はい」直後の空白(.review-behavior.md参照)を無くすため、
+        // 不具合修正: 復元「はい」直後の空白(docs/調査記録/点検-機能と動作.md参照)を無くすため、
         // PaneApplicationContext.RunRecoveryAndInitialOpenが自動保存スナップショットを
         // 先に書いた先のWindowIdを、この新しいウィンドウ自身のWindowIdとして引き継げるように
         // している。通常の起動(windowId省略)では従来どおり新規採番する。
@@ -299,6 +328,12 @@ internal sealed class MainForm : Form
         Text = "Pane";
         Width = 960;
         Height = 720;
+        // UI点検第2弾 指摘11の修正: SettingsWindow/HelpWindow(いずれもMinimumSize=640x480)には
+        // 最小サイズがあるのに、本体(MainForm)だけ無く、WinForms既定の下限(約130px幅)まで
+        // 縮められた。#menubarの右側3ボタン・サイドバー最小幅180px(sidebar.js
+        // SIDEBAR_WIDTH_MIN)を開いた状態だと本文幅が0になり操作不能になっていた。
+        // 他の2ウィンドウと同じ640x480に揃える。
+        MinimumSize = new Size(640, 480);
         StartPosition = FormStartPosition.WindowsDefaultLocation;
         // アイコンはアセンブリへ埋め込んである(AppIcon参照)。読めなかった場合は
         // 代入せずWinFormsの既定アイコンのままにする。
@@ -755,6 +790,18 @@ internal sealed class MainForm : Form
         // ついての判断は、3ウィンドウ共通のExternalLinkServiceを参照。
         // 本体ウィンドウのログは元から接頭辞を持たないため、接頭辞には空文字を渡す。
         _webView.CoreWebView2.NewWindowRequested += (_, e) => ExternalLinkService.HandleNewWindowRequested(e, "");
+
+        // トップレベル遷移の保険(docs/調査記録/点検-セキュリティ.md C-4)。現状の実装では自分の
+        // virtual host(https://pane.local/…)以外へ同一タブで遷移する経路は見つかっていない
+        // (外部リンクは上のNewWindowRequestedへ集約済み)が、それは実装を読んだ結果に過ぎず、
+        // NavigationStarting自体を止める保険が無かった。将来の実装変更で穴が開いても
+        // ここで必ず止める。判定はWebView2の型に依存しないNavigationGuardへ切り出し済み。
+        _webView.CoreWebView2.NavigationStarting += (_, e) =>
+        {
+            if (NavigationGuard.IsAllowedTopLevelNavigation(e.Uri, VirtualHostName)) return;
+            e.Cancel = true;
+            Logger.Write($"NavigationStarting: 想定外の遷移先のため中止: {PrivacyLogFormatter.ShortenUri(e.Uri)}");
+        };
 
         // ローカル画像配信用の専用ホスト(不具合修正: 本文はhttps://pane.local/index.htmlとして
         // 表示されており、そこ(pane.local、下でdist/へマッピング)には編集中の.mdと同じフォルダの
@@ -1404,8 +1451,7 @@ internal sealed class MainForm : Form
                 RevealWebView(viaFallback: false);
                 break;
             case "open":
-                // 新規作成・開くは現在のウィンドウを置き換えず、常に新しいウィンドウで開く。
-                HandleOpenRequest();
+                _ = HandleOpenRequestAsync();
                 break;
             case "open-path":
                 if (TryGetString(root, "path", out string openPath))
@@ -1575,6 +1621,17 @@ internal sealed class MainForm : Form
                     SaveFontSize(fontSize);
                 }
                 break;
+            case "set-word-wrap":
+                // 折り返し表示の切替(表示メニュー view.wordWrap・ステータスバークリック)。
+                // set-font-size/set-sidebar-widthと同じく、トグルのたびに直接永続化する
+                // (総点検 指摘M2: 以前は永続化する受け口自体が無かった)。他ウィンドウへの
+                // 再配信はしない(折り返しは文書の見た目の好みであり、開いているウィンドウの
+                // 表示を勝手に変えるのは驚きが大きいため。次に開くウィンドウ以降へ反映される)。
+                if (TryGetBool(root, "value", out bool wordWrapValue))
+                {
+                    SettingsService.Update(settings => settings.WordWrapEnabled = wordWrapValue);
+                }
+                break;
             case "set-sidebar-width":
                 // サイドバー幅のドラッグリサイズ(ユーザー要望2)。ドラッグ終了時・既定幅への
                 // ダブルクリック復帰時にJS側(sidebar.js)から送られてくる。他ウィンドウへの
@@ -1714,7 +1771,8 @@ internal sealed class MainForm : Form
                 break;
             case "open-path-new-window":
                 // サイドバーの右クリックメニュー「新しいウィンドウで開く」(仕様書 4.2)。
-                // File > 開く(HandleOpenRequest)と同じ経路(_requestNewWindow)を使う。
+                // 明示的に「新しいウィンドウで」と選ばれた操作のため、HandleOpenRequestAsyncとは
+                // 違い空文書判定は行わず、常に_requestNewWindowで新しいウィンドウへ渡す。
                 // pathプロパティさえ存在すれば(型が違ってもnullとして)開く、という従来の挙動を保つ。
                 if (root.TryGetProperty("path", out _))
                 {
@@ -1965,22 +2023,73 @@ internal sealed class MainForm : Form
     }
 
     /// <summary>
-    /// File &gt; 開く。選ばれたファイルは現在のウィンドウを置き換えず、新しいウィンドウで開く
-    /// (仕様書外・ユーザー要望: 新規作成・開くは常に別ウィンドウ)。
+    /// File &gt; 開く。本文が空(新規文書等、失われる内容が無い)ならこのウィンドウで開き、
+    /// 何か書かれていれば新しいウィンドウで開く(src/main.jsのopenFolder()のisEmptyDocument判定・
+    /// <see cref="OpenDroppedPathAsync"/>の空文書判定と同じ基準に揃える)。
+    ///
+    /// 総点検 指摘M12: 以前は選んだ結果を無条件に<c>_requestNewWindow</c>へ渡しており、
+    /// 「新規作成・開くは常に別ウィンドウ」という以前の意図的な決定(Ctrl+N/Ctrl+Shift+Nの
+    /// 使い分けの経緯を参照)をそのまま踏襲してしまっていた。しかしその決定は
+    /// 「開いているウィンドウの内容を無警告で失わせない」ためのものであり、起動直後の
+    /// 空の無題ウィンドウのように失うものが無い場合にまで新しいウィンドウを作る理由には
+    /// ならない(フォルダを開く・D&amp;Dは元から「空なら現在のウィンドウ」で統一されており、
+    /// 「開く」ダイアログだけがこの基準から取り残されていた)。
+    ///
+    /// タブ形式(隠し設定)のときは<see cref="OpenDroppedPathAsync"/>と同じく新しいタブとして開く。
     /// </summary>
-    private void HandleOpenRequest()
+    private async Task HandleOpenRequestAsync()
     {
         using var dialog = new OpenFileDialog
         {
             Filter = OpenDialogFilterBuilder.Build(),
         };
-        if (dialog.ShowDialog(this) == DialogResult.OK)
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        string path = dialog.FileName;
+
+        if (SettingsService.Load().DisplayMode == "tab")
         {
-            _requestNewWindow?.Invoke(dialog.FileName);
+            OpenInNewTab(path);
+            return;
+        }
+
+        bool isEmpty = await RequestIsDocumentEmptyAsync();
+        if (!isEmpty)
+        {
+            // 現在のウィンドウには触れず、新しいウィンドウで開く。
+            _requestNewWindow?.Invoke(path);
+            return;
+        }
+        OpenFile(path);
+    }
+
+    /// <summary>Ctrl+S連打対策(docs/調査記録/点検-機能と動作.md「余裕があれば直すもの」)。
+    /// SaveFileDialog.ShowDialogはモーダルでもメッセージループを回すため、表示中に
+    /// もう一度"save"が届くと二重にダイアログが開いたり、先に返ってきた方の結果で
+    /// 上書きされたりする(実害は小さいが挙動が読めなくなる)。1回の保存(実体は
+    /// <see cref="HandleSaveRequestCore"/>)が終わるまで後続の要求は無視する。
+    /// 取りこぼしにはならない: 無視された側はdirtyのままなので、次にCtrl+Sすれば
+    /// 普通に保存できる。</summary>
+    private bool _saveRequestInProgress;
+
+    private void HandleSaveRequest(JsonElement message)
+    {
+        if (_saveRequestInProgress)
+        {
+            Logger.Write("HandleSaveRequest: 保存処理が進行中のため、この要求は無視する(連打対策)");
+            return;
+        }
+        _saveRequestInProgress = true;
+        try
+        {
+            HandleSaveRequestCore(message);
+        }
+        finally
+        {
+            _saveRequestInProgress = false;
         }
     }
 
-    private void HandleSaveRequest(JsonElement message)
+    private void HandleSaveRequestCore(JsonElement message)
     {
         TryGetString(message, "text", out string text);
         TryGetBool(message, "saveAs", out bool saveAs);
@@ -2024,6 +2133,29 @@ internal sealed class MainForm : Form
                 return;
             }
             targetPath = dialog.FileName;
+        }
+
+        // 選んでいる文字コード(通常はShift_JIS)で表現できない文字が含まれる場合、
+        // 黙って"?"に化けさせず先に確認する(docs/調査記録/点検-機能と動作.md「Shift_JISへ切り替えて
+        // 保存すると表現できない文字が黙って"?"になる」)。読み込み側は厳密に判定しているのに
+        // 書き込み側だけ非対称に緩かったための不具合で、メモ帳と違い警告が一切無かった。
+        if (EncodingLossGuard.HasUnsupportedCharacters(text, _currentEncoding))
+        {
+            DialogResult lossChoice = PaneDialog.Show(
+                this,
+                $"選んでいる文字コード({TextFileService.EncodingLabel(_currentEncoding)})では表現できない" +
+                "文字が含まれています。保存すると、該当する文字は「?」に置き換わり元には戻せません。" +
+                "\nこのまま保存しますか?",
+                "Pane",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning,
+                defaultToCancel: true);
+            if (lossChoice != DialogResult.Yes)
+            {
+                CompleteSave(ok: false);
+                PostToWeb(new { type = "save-result", ok = false, canceled = true });
+                return;
+            }
         }
 
         try
@@ -2241,6 +2373,18 @@ internal sealed class MainForm : Form
                         activeLineEnding = TextFileService.ParseLineEndingLabel(leProp.GetString() ?? "");
                     }
                 }
+            }
+        }
+
+        // 【不具合修正】タブを「閉じる」で破棄しても、そのタブの自動保存スナップショットが
+        // 残ったままだった(docs/調査記録/点検-機能と動作.md「タブを『閉じる』で破棄してもスナップショットが
+        // 残り、次回起動で『復元しますか』が誤って出る」)。判定の中身はTabSnapshotCleanup参照。
+        foreach (string closedGuid in TabSnapshotCleanup.FindClosedTabGuids(
+            _tabInfos.Select(t => t.Guid), tabInfos.Select(t => t.Guid)))
+        {
+            if (Guid.TryParse(closedGuid, out Guid closedTabId))
+            {
+                AutoSaveService.DeleteSnapshot(closedTabId);
             }
         }
 
@@ -2481,7 +2625,7 @@ internal sealed class MainForm : Form
         previousSearchCts?.Dispose();
         string rootPath = _loadedFolderRootPath;
         var query = new SearchQuery(queryText, caseSensitive, regexp, wholeWord);
-        // 検索語そのものはログへ書かない(.review-security.md B「検索語がログに残る」対応)。
+        // 検索語そのものはログへ書かない(docs/調査記録/点検-セキュリティ.md B「検索語がログに残る」対応)。
         // ログは%LOCALAPPDATA%\Pane\に残り、利用者が開発者へ送る運用があるため、
         // 人名・パスワード等が入りうる検索語を平文で残さない。再現に要る情報は文字数と
         // フラグ類だけで足りるため、それだけを記録する。
@@ -2717,7 +2861,7 @@ internal sealed class MainForm : Form
         });
         SetDirty(true);
 
-        // 不具合修正(.review-behavior.md「復元「はい」直後に元スナップショットを消すため、
+        // 不具合修正(docs/調査記録/点検-機能と動作.md「復元「はい」直後に元スナップショットを消すため、
         // データが失われうる」)の二重目の安全策。本命の修正はPaneApplicationContext.
         // RunRecoveryAndInitialOpen側(「はい」を選んだ直後、旧スナップショットを消す前に
         // 新WindowIdへコピーを書く。"ready"がそもそも届かない=WebView2の初期化に失敗する
@@ -3238,9 +3382,15 @@ internal sealed class MainForm : Form
 
             _watcher = new FileSystemWatcher(dir, Path.GetFileName(path))
             {
-                NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.Attributes,
+                // FileNameを足しているのは、削除・リネームの検知(下のDeleted/Renamed)を
+                // 確実に受け取るため(docs/調査記録/点検-機能と動作.md「外部での削除・リネームを検知しない」)。
+                // 従来はLastWrite/Size/Attributesだけで、ファイル名自体の変化を監視対象に
+                // 含めていなかった。
+                NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.Attributes | NotifyFilters.FileName,
             };
             _watcher.Changed += OnFileChangedExternally;
+            _watcher.Deleted += OnFileDeletedExternally;
+            _watcher.Renamed += OnFileRenamedExternally;
             _watcher.EnableRaisingEvents = true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
@@ -3309,10 +3459,66 @@ internal sealed class MainForm : Form
         }));
     }
 
+    /// <summary>開いているファイルが外部で削除された(docs/調査記録/点検-機能と動作.md「外部での削除・
+    /// リネームを検知しない」)。OnFileChangedExternallyと同じデバウンスへ載せ、削除の方が
+    /// 強い信号なので優先して扱う(OnExternalChangeDebounceElapsed参照)。</summary>
+    private void OnFileDeletedExternally(object sender, FileSystemEventArgs e)
+    {
+        if (_suppressWatcher) return;
+        if (IsDisposed || !IsHandleCreated) return;
+        BeginInvoke(new MethodInvoker(() =>
+        {
+            _externalRemovalPending = true;
+            _externalRenameNewFullPath = null;
+            _externalChangeDebounceTimer.Stop();
+            _externalChangeDebounceTimer.Start();
+        }));
+    }
+
+    /// <summary>開いているファイルが外部でリネームされた(同上)。SaveAtomicは一時ファイルから
+    /// 元の名前へFile.Move(overwrite:true)するため、自分自身の保存でもこのイベントの対象に
+    /// なりうる(移動先の名前がFilterと一致するため)。SuppressWatcherDuringが保存中は
+    /// EnableRaisingEvents自体をfalseにして全種類のイベントを止めているため、自分の保存を
+    /// 誤って「外部でリネームされた」と検知することは無い。</summary>
+    private void OnFileRenamedExternally(object sender, RenamedEventArgs e)
+    {
+        if (_suppressWatcher) return;
+        if (IsDisposed || !IsHandleCreated) return;
+        string newFullPath = e.FullPath;
+        BeginInvoke(new MethodInvoker(() =>
+        {
+            _externalRemovalPending = true;
+            _externalRenameNewFullPath = newFullPath;
+            _externalChangeDebounceTimer.Stop();
+            _externalChangeDebounceTimer.Start();
+        }));
+    }
+
     private void OnExternalChangeDebounceElapsed(object? sender, EventArgs e)
     {
         if (IsDisposed) return; // Form破棄後にTickが走った場合の保険(FormClosedで基本は止めているが念のため)
         _externalChangeDebounceTimer.Stop();
+
+        // 削除・リネームは「内容が変わった」より強い信号なので優先して扱い、同じ debounce
+        // 窓で内容変更も検知していた場合はそちらを出さずに済ませる(削除・リネームの通知一つで
+        // 状況は十分伝わるため)。保存確認は変わらずCtrl+S側(SaveAtomic)に任せ、ここでは
+        // 気づけるようにするだけに留める(自動での追従・復旧は行わない)。
+        if (_externalRemovalPending)
+        {
+            _externalRemovalPending = false;
+            _externalChangePending = false;
+            string? newPath = _externalRenameNewFullPath;
+            _externalRenameNewFullPath = null;
+            if (_currentPath is null) return;
+
+            string message = newPath is null
+                ? "このファイルは外部で削除されました。\nこのまま保存すると、同じ名前で新しく作成されます。"
+                : $"このファイルは外部で「{Path.GetFileName(newPath)}」に名前を変更されました。" +
+                  "\nこのまま保存すると、元の名前で別のファイルとして新しく作成されます。";
+            Logger.Write($"OnExternalChangeDebounceElapsed: 削除/リネームを検知 ({_currentPath} → {newPath ?? "(削除)"})");
+            PaneDialog.Show(this, message, "Pane", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
         if (!_externalChangePending || _currentPath is null) return;
         _externalChangePending = false;
 
@@ -3590,6 +3796,7 @@ internal sealed class MainForm : Form
             editorPaddingLeft = settings.GetEffectiveEditorPaddingLeft(),
             editorPaddingRight = settings.GetEffectiveEditorPaddingRight(),
             showWordCount = settings.ShowWordCount,
+            wordWrap = settings.WordWrapEnabled,
 
             // ---- キーボード ----
             keyBindings = settings.KeyBindings,

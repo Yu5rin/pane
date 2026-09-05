@@ -3,12 +3,15 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<!-- 文書中の`https://`画像・iframeは表示のためその場でURLへ読み込みリクエストが発生する
-     (仕様上の割り切り。docs/仕様書.md「オンライン画像のローカル保存」非対応の項、
-     docs/取扱説明書.md「外部通信について」参照)。既定のままだとRefererヘッダーに
-     このアプリのオリジン(https://pane.local/)が付き、参照先へ「Paneで開かれたこと」が
-     伝わってしまう(.review-security.md C-5)。Refererを一切送らないことで、その分だけでも
-     参照先が得られる情報を減らす。 -->
+<!-- 文書中の`https://`画像・iframeを表示すると、その場でURLへ読み込みリクエストが発生する
+     (.review-security.md C-5)。既定では読み込まずプレースホルダに差し替えるため通信自体が
+     起きない(.fix-security.md「外部リソースの自動読み込みを、既定でオフに」・
+     src/editor.js ImageWidget・src/html-sanitize.js参照)が、設定でONにした場合・
+     プレースホルダをクリックして明示的に読み込んだ場合は実際に通信する。その際も
+     Refererヘッダーにこのアプリのオリジン(https://pane.local/)が付いて参照先へ
+     「Paneで開かれたこと」が伝わらないよう、ここでReferer自体を一切送らない設定にしておく
+     (最後の保険。docs/仕様書.md「オンライン画像のローカル保存」非対応の項、
+     docs/取扱説明書.md「外部通信について」も参照)。 -->
 <meta name="referrer" content="no-referrer">
 <title>Pane</title>
 <link rel="icon" type="image/svg+xml" href="icon.svg">
@@ -48,7 +51,11 @@
      という別の設計方針の色(src/style.css :rootブロックのコメント参照)のため、5テーマ
      (既定ライト/sepia/solarized-light/solarized-dark/night)でAA(4.5:1)未満だった。
      バー専用の文字色var(--chrome-fg)(src/style.css・src/themes.css)に差し替える。 */
-  #statusbar { display: flex; gap: 16px; padding: 0 10px; height: 24px; align-items: center; border-top: 1px solid var(--rule); font-size: 11px; color: var(--chrome-fg); flex: none; font-family: var(--font-mono); overflow: hidden; background: var(--chrome-bg); }
+  /* UI点検第2弾 指摘14の修正: 従来var(--font-mono)(JetBrains Mono→和文はBIZ UDゴシック)を
+     バー全体に使っていたが、仕様書10.3節では等幅フォントの用途は「コード」限定であり、
+     ステータスバーの中身(「行1, 列1」「未保存」「Markdown」等)はコードではなく通常の
+     UI文言のため、メニューバー等と同じvar(--font-body)(Inter/Noto Sans JP)に揃える。 */
+  #statusbar { display: flex; gap: 16px; padding: 0 10px; height: 24px; align-items: center; border-top: 1px solid var(--rule); font-size: 11px; color: var(--chrome-fg); flex: none; font-family: var(--font-body); overflow: hidden; background: var(--chrome-bg); }
   /* 実機不具合の修正: 幅を狭めたとき各項目が縮んでテキストが1〜2文字ずつ折り返し、
      height:24pxを超えて縦に伸び、本文エリアに被っていた。原因はflex-shrinkが既定値の
      ままで、white-space:nowrapも無かったこと。nowrap+flex:noneで「そもそも縮んで
@@ -75,7 +82,7 @@
     <button id="btn-menu-settings" class="menu-theme-btn" type="button" title="設定 (Ctrl+,)" aria-label="設定">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 13a7.5 7.5 0 0 0 0-2l1.9-1.4-2-3.4-2.2.6a7.6 7.6 0 0 0-1.7-1L14.9 3.5h-4l-.5 2.3a7.6 7.6 0 0 0-1.7 1l-2.2-.6-2 3.4L6.4 11a7.5 7.5 0 0 0 0 2l-1.9 1.4 2 3.4 2.2-.6a7.6 7.6 0 0 0 1.7 1l.5 2.3h4l.5-2.3a7.6 7.6 0 0 0 1.7-1l2.2.6 2-3.4z"/></svg>
     </button>
-    <button id="btn-menu-help" class="menu-theme-btn" type="button" title="ヘルプ" aria-label="ヘルプ">
+    <button id="btn-menu-help" class="menu-theme-btn" type="button" title="取扱説明書" aria-label="取扱説明書">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.3 9.2a2.7 2.7 0 1 1 4.4 2.1c-.9.7-1.7 1.2-1.7 2.4"/><circle cx="12" cy="17" r="1" fill="currentColor" stroke="none"/></svg>
     </button>
   </div>
@@ -122,6 +129,11 @@
          完了(export-done)まで表示し続ける。グローバル検索の「検索中…」(global-search.js)と
          同じ「動詞+中…」の語彙・見た目(装飾なしのテキストのみ)に揃える。 -->
     <span id="status-export" hidden>エクスポートしています…</span>
+    <!-- 外部リソースの自動読み込み既定OFF(.fix-security.md参照)。可視範囲に「読み込んで
+         いません」のプレースホルダが1件でもあれば表示し、押すとこの文書のぶんをまとめて
+         読み込む(1件ずつはプレースホルダ自身のクリックで読み込める)。既存の#status-export等
+         と同じ「hidden切替のボタン」の作法に揃える。 -->
+    <button id="status-remote-blocked" type="button" hidden title="この文書には読み込んでいない外部の画像・埋め込みがあります">外部リソースを読み込む</button>
     <span style="flex:1"></span>
     <!-- 未保存の変更があることを文字で示す(タイトルバーの"(未保存)"と対になる表示)。 -->
     <span id="status-dirty" hidden>未保存</span>

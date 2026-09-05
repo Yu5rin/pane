@@ -1,7 +1,7 @@
 namespace Pane.Tests;
 
 /// <summary>
-/// Pandocをパス無しの"pandoc"で起動していた不具合(.review-security.md C-7、
+/// Pandocをパス無しの"pandoc"で起動していた不具合(docs/調査記録/点検-セキュリティ.md C-7、
 /// SettingsBridge.DetectPandocAvailable / MainForm.ExportViaPandocAsync)の修正
 /// (<see cref="ExternalToolLocator"/>)を固定するテスト。
 ///

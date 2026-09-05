@@ -107,7 +107,7 @@ internal sealed class SettingsWindow : Form
         _hasUnsavedDocuments = hasUnsavedDocuments;
         _shutdown = shutdown;
 
-        Text = "Pane の設定";
+        Text = "Pane - 設定"; // ダイアログタイトルの区切り記法を統一(総点検)。他は"Pane - 復元の確認"(PaneApplicationContext.cs)
         MinimumSize = new Size(640, 480);
         Size = ComputeInitialSize(owner);
         StartPosition = FormStartPosition.Manual;
@@ -421,6 +421,15 @@ internal sealed class SettingsWindow : Form
         // ような JS を経由しない経路でも、Pane内にポップアップが開かないようにしておく。
         _webView.CoreWebView2.NewWindowRequested += (_, e) =>
             ExternalLinkService.HandleNewWindowRequested(e, "[設定ウィンドウ] ");
+
+        // トップレベル遷移の保険(docs/調査記録/点検-セキュリティ.md C-4)。詳しい理由はMainForm側の同じ
+        // 購読のコメントを参照(3ウィンドウ共通の判定はNavigationGuardへ集約済み)。
+        _webView.CoreWebView2.NavigationStarting += (_, e) =>
+        {
+            if (NavigationGuard.IsAllowedTopLevelNavigation(e.Uri, VirtualHostName)) return;
+            e.Cancel = true;
+            Logger.Write($"[設定ウィンドウ] NavigationStarting: 想定外の遷移先のため中止: {PrivacyLogFormatter.ShortenUri(e.Uri)}");
+        };
 
         // 起動時の白フラッシュ対策の3層目(MainForm.OnLoadAsyncと同じ、多層防御のうちの1つ)。
         // WebView2が非表示の間は表に出ない対策なので必須ではないが、表示に切り替わった

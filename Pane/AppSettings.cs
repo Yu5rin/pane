@@ -75,6 +75,11 @@ internal sealed class AppSettings
         set => _windowHeight = value is int v ? Math.Clamp(v, MinWindowHeight, MaxWindowCoordinate) : null;
     }
 
+    /// <summary>直前に閉じたウィンドウが最大化されていたか(docs/調査記録/点検-機能と動作.md「余裕があれば
+    /// 直すもの」: 従来はWindowState==Normalのときしか位置・サイズを記録しておらず、最大化して
+    /// 閉じると次回もNormalだった頃の位置・サイズで開いていた)。boolなので検証不要。</summary>
+    public bool WindowMaximized { get; set; }
+
     // ================= 一般 (general) =================
 
     private string _displayMode = "window";
@@ -570,6 +575,16 @@ internal sealed class AppSettings
     /// <summary>画像パスのURLエスケープを自動で行うか。既定true。</summary>
     public bool ImageAutoEscapeUrl { get; set; } = true;
 
+    /// <summary>文書中の外部画像・埋め込み("http(s)://"のimg/iframe)を自動で読み込むか。既定false。
+    /// docs/調査記録/修正-セキュリティ.md「外部リソースの自動読み込みを、既定でオフにしてください」参照:
+    /// 文書を開いただけでその参照先へ通信が発生し(トラッキングピクセルに悪用できる)、
+    /// README/取扱説明書が謳う「自分から外部へ問い合わせに行くのは更新の確認だけ」を
+    /// 裏切る経路になっていたため、既定をオフに変えた。オフの間はプレースホルダを表示し、
+    /// クリック(1件)またはステータスバーの「外部リソースを読み込む」(文書ごと)で
+    /// 明示的に読み込む(実装はsrc/editor.js ImageWidget・src/html-sanitize.js)。
+    /// ローカルの画像(相対パス・pane-file.local)はこの設定に関わらず常に読み込む。</summary>
+    public bool LoadRemoteResources { get; set; }
+
     // ================= エクスポート・印刷 (export) =================
 
     private string _exportPaperSize = "a4";
@@ -814,6 +829,12 @@ internal sealed class AppSettings
 
     /// <summary>文字数カウントの常時表示(仕様書 C-09)。既定ON。</summary>
     public bool ShowWordCount { get; set; } = true;
+
+    /// <summary>本文の折り返し表示(表示メニュー view.wordWrap・ステータスバー右クリック相当)。既定ON。
+    /// 総点検 指摘M2: 以前はJS側(main.js)のメモリ上の変数だけで持っており、ウィンドウを開き直す
+    /// たびに既定のONへ戻っていた(SidebarWidthPx/EditorFontSizeと同じ「トグルのたびに
+    /// SettingsService.Updateへ直接保存する」経路が無かったため)。</summary>
+    public bool WordWrapEnabled { get; set; } = true;
 
     // ================= キーボード (keyboard) =================
 

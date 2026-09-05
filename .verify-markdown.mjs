@@ -52,18 +52,21 @@ const clearDoc = async () => {
   await page.keyboard.press("Control+End");
   await page.waitForTimeout(300);
 
-  // (d) 読み込めない画像(このサンドボックスでは外部接続の失敗確定にやや時間がかかるため長めに待つ)
+  // (d) 外部リソースの自動読み込み既定OFF(docs/調査記録/修正-セキュリティ.md参照)。以前はここで
+  //     https://example.com/none.png への実際の読み込み失敗(404/接続不可)を長時間
+  //     待っていたが、既定変更により「試みて失敗する」ではなく「そもそも試みない」に
+  //     変わったため、外部への実通信も待ち時間も無くなった(詳しい検証は.verify-extres.mjs)。
   await clearDoc();
   await page.keyboard.insertText("![x](https://example.com/none.png)\n\n(末尾)");
   await page.keyboard.press("Control+Home");
   await page.waitForTimeout(300);
   await page.keyboard.press("Control+End");
-  await page.waitForTimeout(15000);
-  const errState = await page.evaluate(() => {
+  await page.waitForTimeout(300);
+  const blockedState = await page.evaluate(() => {
     const w = document.querySelector(".cm-image-widget");
-    return w ? { hasError: w.classList.contains("cm-image-error"), text: w.textContent, hasImg: !!w.querySelector("img"), rect: w.getBoundingClientRect() } : null;
+    return w ? { isBlocked: w.classList.contains("cm-image-blocked"), text: w.textContent, hasImg: !!w.querySelector("img"), rect: w.getBoundingClientRect() } : null;
   });
-  ok(`(d) 読み込めない画像が代替表示になる ${JSON.stringify(errState)}`, errState && errState.hasError && !errState.hasImg && /読み込めません/.test(errState.text) && errState.rect.width < 600 && errState.rect.height < 100);
+  ok(`(d) 既定OFFの外部画像は通信を試みずプレースホルダになる ${JSON.stringify(blockedState)}`, blockedState && blockedState.isBlocked && !blockedState.hasImg && /読み込んでいません/.test(blockedState.text) && blockedState.rect.width < 600 && blockedState.rect.height < 100);
 }
 
 // ---- (e) typora-root-url ----
@@ -190,6 +193,35 @@ ok(`(e) typora-root-url指定で解決先が変わる before="${before}" after="
     };
   });
   for (const [k, v] of Object.entries(checks)) ok(`(l) 既存記法 ${k}`, v);
+}
+
+// ---- (n) UI点検第2弾 指摘19: 脚注ポップアップが文書先頭付近で上に切れない ----
+{
+  await clearDoc();
+  // 1行目(スクロール領域の上端)に脚注参照を置く。上方向に出す余白がほぼ無い状態を作る。
+  const lines = ["先頭の行に脚注[^1]があります", ""];
+  for (let i = 0; i < 40; i++) lines.push(`本文${i}`);
+  lines.push("", "[^1]: 脚注の内容テキスト");
+  await page.keyboard.insertText(lines.join("\n"));
+  await page.keyboard.press("Control+Home");
+  await page.waitForTimeout(400);
+
+  const ref = await page.$(".cm-footnote-ref");
+  await ref.hover();
+  await page.waitForTimeout(200);
+  const info = await page.evaluate(() => {
+    const el = document.querySelector(".cm-footnote-ref");
+    const pop = el.querySelector(".cm-footnote-popup");
+    const scroller = el.closest(".cm-scroller");
+    const popRect = pop.getBoundingClientRect();
+    const scrollerRect = scroller.getBoundingClientRect();
+    return { below: pop.classList.contains("cm-footnote-popup-below"), popTop: popRect.top, scrollerTop: scrollerRect.top, visibility: getComputedStyle(pop).visibility };
+  });
+  ok(`(n) 文書先頭付近の脚注ホバーで下方向へ出すクラスが付く(below=${info.below})`, info.below === true);
+  ok(`(n) ホバー中はポップアップが実際に見える(visibility=visible)`, info.visibility === "visible");
+  ok(`(n) ポップアップがスクロール領域(.cm-scroller)の上端より内側に収まる(popTop=${info.popTop.toFixed(1)} scrollerTop=${info.scrollerTop.toFixed(1)})`, info.popTop >= info.scrollerTop - 0.5);
+  await page.keyboard.press("Control+End");
+  await page.waitForTimeout(200);
 }
 
 // ---- (m) エラー0件 ----

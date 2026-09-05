@@ -498,6 +498,54 @@ async function newBridgedPage(viewport) {
 }
 
 // ============================================================
+// (13) 折り返し表示(view.wordWrap)の切替がC#へ永続化されること + 起動時にapply-settingsの
+//      wordWrapが反映されること(総点検 指摘M2: 以前はメモリ上の変数だけで、ウィンドウを
+//      開き直すたびに既定のONへ戻っていた)
+// ============================================================
+{
+  const page = await newBridgedPage({ width: 1200, height: 800 });
+
+  // (13-a) 初期状態(既定ON)から view.wordWrap を1回実行するとOFFへ切り替わり、
+  //        C#へ { type: "set-word-wrap", value: false } が送られる。
+  // menu-command実行前に一度メニューを開く必要がある(id→実行関数の対応表が
+  // 開くたびに作り直されるため。.verify-nativemenu.mjs (e)と同じ作法)。
+  await page.click("#menubar .menu-top:text('表示')");
+  await page.waitForTimeout(200);
+  const wrapTextBefore = await page.textContent("#status-wrap");
+  await page.evaluate(() => window.__reply({ type: "menu-command", id: "view.wordWrap" }));
+  await page.waitForTimeout(150);
+  const wrapTextAfterFirst = await page.textContent("#status-wrap");
+  ok(`(13-a) 1回目のトグルで折り返し表示が切り替わる "${wrapTextBefore}" -> "${wrapTextAfterFirst}"`,
+    wrapTextBefore !== wrapTextAfterFirst);
+  let sentWrap = await page.evaluate(() => window.__sent.filter((m) => m.type === "set-word-wrap"));
+  ok(`(13-a) 1回目のトグルでset-word-wrapが1件送られる (${JSON.stringify(sentWrap)})`, sentWrap.length === 1);
+
+  // (13-a) もう1回トグルすると元に戻り、逆のvalueで送られる。
+  await page.click("#menubar .menu-top:text('表示')");
+  await page.waitForTimeout(200);
+  await page.evaluate(() => window.__reply({ type: "menu-command", id: "view.wordWrap" }));
+  await page.waitForTimeout(150);
+  sentWrap = await page.evaluate(() => window.__sent.filter((m) => m.type === "set-word-wrap"));
+  ok(`(13-a) 2回目のトグルでset-word-wrapが2件送られ、値が反転する (${JSON.stringify(sentWrap)})`,
+    sentWrap.length === 2 && sentWrap[0].value === !sentWrap[1].value);
+
+  // (13-b) 新しいウィンドウ(開き直し相当)でapply-settingsのwordWrap:falseを受け取ると、
+  //        起動時からOFFで反映される(修正前はmsg.wordWrap自体が存在せず、常に既定のONのままだった)。
+  const page2 = await newBridgedPage({ width: 1200, height: 800 });
+  await page2.evaluate(() => window.__reply({ type: "apply-settings", wordWrap: false }));
+  await page2.waitForTimeout(200);
+  const wrapTextAfterApply = await page2.textContent("#status-wrap");
+  ok(`(13-b) apply-settingsのwordWrap:falseがステータスバー表示に反映される (実際="${wrapTextAfterApply}")`,
+    wrapTextAfterApply.includes("なし"));
+  const wrapClassAfterApply = await page2.$eval(".cm-content", (e) => e.classList.contains("cm-lineWrapping"));
+  ok(`(13-b) 本文側もCodeMirrorの折り返しが実際にOFFになる (cm-lineWrapping=${wrapClassAfterApply})`,
+    wrapClassAfterApply === false);
+
+  await page.close();
+  await page2.close();
+}
+
+// ============================================================
 // ページエラー・コンソールエラー0件
 // ============================================================
 ok(`ページエラー・コンソールエラー0件 (${allErrors.length + allConsoleErrors.length}件) ${JSON.stringify([...allErrors, ...allConsoleErrors]).slice(0, 3000)}`,

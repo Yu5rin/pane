@@ -5,7 +5,7 @@ namespace Pane;
 /// 自動無効化し、プレーンモードで開く」)。
 ///
 /// 【なぜ独立したクラスにしたか】
-/// 総点検(.review-behavior.md)で、この判定自体がTextFileService.Load・MainForm.OpenFile・
+/// 総点検(docs/調査記録/点検-機能と動作.md)で、この判定自体がTextFileService.Load・MainForm.OpenFile・
 /// src/main.jsのどこにも存在しないことが分かった。docs/取扱説明書.md L390には
 /// 「実装済み」として書かれていたため、利用者は数十MBのファイルを開いても安全だと
 /// 誤解していたが、実際には本文全体がライブプレビュー付きのままJSONでWebView2へ渡り、

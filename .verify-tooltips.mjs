@@ -72,7 +72,7 @@ async function titleOf(page, sel) {
   const stdFiles = await titleOf(page, '[data-tip="sidebar-tab-files"]');
   const stdFallback = await titleOf(page, "#test-fallback-el");
   ok(`(1) standard: テーマ切替 "${stdTheme}"`, stdTheme === "ライトテーマとダークテーマを切り替えます");
-  ok(`(1) standard: ヘルプ "${stdHelp}"`, stdHelp === "ヘルプメニューを開きます");
+  ok(`(1) standard: ヘルプ "${stdHelp}"`, stdHelp === "取扱説明書を開きます");
   ok(`(1) standard: サイドバー(アウトライン)にショートカット付記 "${stdOutline}"`,
     stdOutline === "見出しの一覧(アウトライン)を表示します (Ctrl+Shift+1)");
   // 指摘2: サイドバー「ファイル」タブは、実装上は読み込んだフォルダ内のファイルの平坦な一覧であり
@@ -89,6 +89,10 @@ async function titleOf(page, sel) {
   const detFallback = await titleOf(page, "#test-fallback-el");
   ok(`(1) detailedでstandardと異なる文言になる ("${detTheme}")`, detTheme.length > stdTheme.length && detTheme !== stdTheme);
   ok(`(1) detailed: ヘルプの説明が詳しくなる "${detHelp}"`, detHelp.includes("バージョン情報"));
+  // 総点検M13: 実在しない「ヘルプメニュー」を指す文言に戻っていないことを固定する
+  // (修正前はここが失敗する状態だったのを確認済み)。実際の動作は取扱説明書ウィンドウを開くこと。
+  ok(`(1) ヘルプボタンの説明が「ヘルプメニュー」を含まない "${detHelp}"`, !detHelp.includes("ヘルプメニュー") && !stdHelp.includes("ヘルプメニュー"));
+  ok(`(1) ヘルプボタンの説明が「取扱説明書」に触れている "${detHelp}"`, detHelp.includes("取扱説明書"));
   ok(`(5) detailed: テーブルに無い要素も元のtitleのまま "${detFallback}"`, detFallback === "もともとの説明文です");
 
   // ---- minimal(状態を示す情報が中心。アイコンのみボタンは名前のみ) ----

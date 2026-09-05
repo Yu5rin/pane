@@ -4,7 +4,7 @@ namespace Pane;
 /// 外部コマンド(Pandoc等)の実行ファイルを、PATH環境変数に列挙されたフォルダの中からだけ探す。
 ///
 /// 【なぜこのクラスが要るか】
-/// 総点検(.review-security.md C-7)で、DetectPandocAvailable(SettingsBridge.cs)と
+/// 総点検(docs/調査記録/点検-セキュリティ.md C-7)で、DetectPandocAvailable(SettingsBridge.cs)と
 /// ExportViaPandocAsync(MainForm.cs)が <c>Process.Start(new ProcessStartInfo("pandoc", ...))</c>
 /// のように拡張子・パス無しのファイル名だけでプロセスを起動していたことが分かった。
 /// UseShellExecute=false でも、Win32の CreateProcess は拡張子の無いファイル名に自動で

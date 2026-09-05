@@ -28,14 +28,14 @@
 //       優先度の低い項目から順に隠れる、幅を戻すと再表示される、常に残す項目は残る
 //   (E) 設定画面のフォーカストラップ(Tab10回で外へ出ない・閉じたら元の要素へ戻る)
 //   (F) コマンドパレットのフォーカストラップ(同様)
-//   (G) UI点検(.review-ui.md 指摘1・2・3・6・17)の修正確認: var(--accent)を文字色や
+//   (G) UI点検(docs/調査記録/点検-見た目とUI.md 指摘1・2・3・6・17)の修正確認: var(--accent)を文字色や
 //       (明るい文字を乗せる)背景色として使っていた箇所のコントラスト不足、および
 //       ステータスバー(var(--ink-mute) on var(--chrome-bg))のコントラスト不足。
 //       9テーマすべてで、新設した--accent-ink/--chrome-fgがWCAG AA(4.5:1、いずれも
 //       18.66px未満の小さい文字のため通常文字の基準を適用)を満たすことを、
 //       (a)CSS変数の実測値そのもの、(b)実際にレンダリングされたDOM要素の
 //       computed style、の両方で確認する。
-//       .fix-contrast.mdに、修正前に実際にNGになることを確認した記録がある。
+//       docs/調査記録/修正-配色のコントラスト.mdに、修正前に実際にNGになることを確認した記録がある。
 import pw from "playwright";
 const { chromium } = pw;
 
@@ -509,6 +509,323 @@ const AA_NORMAL = 4.5; // 対象はいずれも18.66px未満の小さい文字�
     await page.keyboard.press("Escape");
     await page.waitForTimeout(150);
   }
+  await page.close();
+}
+
+// ============================================================
+// (H) UI点検第2弾(docs/調査記録/点検-見た目とUI.md 指摘4・5・7、および自主点検での追加発見)の修正確認:
+//     --ink-mute/--ink-subを10.5〜12.5pxの小さな文字に使っている箇所(アウトラインの
+//     h4-h6・タブ・行番号・ダイアログ本文・h4見出し等)と、危険操作ボタンの文字色
+//     (--surface on --danger)のコントラスト不足。
+//     対象の背景は--paper(本文・タブ)・--sidebar-bg(サイドバー各種)・--code-bg
+//     (フェンスコード行番号・外部リンクURL欄)・--accent-soft(アウトラインh4-h6の
+//     ホバー・アーカイブ帯)の4種類。docs/調査記録/修正-配色のコントラスト.mdと同じ「9テーマ実測+余裕を
+//     持たせる」方針で、--ink-mute/--ink-sub自体(9テーマ中6テーマ)・
+//     --code-linenum-fg/--danger-inkという2つの派生トークンを新設、および
+//     .outline-item[data-level=4-6]:hover・.extlink-url・
+//     .layout.readonly .editor::beforeの3箇所はcolor-mix()を直接使う「1つの式で
+//     9テーマに自動追従させる」方式(--panel-bg/--active-line-bgと同じ考え方)で対応した。
+//     詳細な経緯・実測はsrc/style.css・src/themes.cssの該当コメント参照。
+// ============================================================
+const AA_H = 4.5;
+// ---- (H-1) CSS変数自体の実測値(--ink-mute/--ink-subが実際に使われる4種の背景との組み合わせ) ----
+{
+  const page = await newPlainPage();
+  for (const th of GTHEMES) {
+    await setPreset(page, th);
+    const inkMute = await resolveVarColor(page, "--ink-mute");
+    const inkSub = await resolveVarColor(page, "--ink-sub");
+    const sidebarBg = await resolveVarColor(page, "--sidebar-bg");
+    const codeBg = await resolveVarColor(page, "--code-bg");
+    const paper = await resolveVarColor(page, "--paper");
+    const accentSoft = await resolveVarColor(page, "--accent-soft");
+    const surface = await resolveVarColor(page, "--surface");
+    const dangerInk = await resolveVarColor(page, "--danger-ink");
+    const danger = await resolveVarColor(page, "--danger");
+    const codeLinenumFg = await resolveVarColor(page, "--code-linenum-fg");
+    const checks = [
+      ["--ink-mute vs --sidebar-bg", inkMute, sidebarBg],
+      ["--ink-mute vs --paper", inkMute, paper],
+      ["--ink-sub vs --surface", inkSub, surface],
+      ["--ink-sub vs --paper", inkSub, paper],
+      ["--code-linenum-fg vs --code-bg", codeLinenumFg, codeBg],
+      ["--danger-ink vs --danger", dangerInk, danger],
+    ];
+    // --ink-mute vs --code-bg、--ink-mute/--ink-sub vs --accent-soft
+    // (フェンスコード行番号・アウトラインh4-h6ホバー・アーカイブ帯)は、既定ライトだけ
+    // トークン自体は補正していない(仕様書10.2節の直値のため。実際の該当セレクタ側で
+    // --code-linenum-fgまたはcolor-mix()により個別補正した。詳細はsrc/style.css該当
+    // コメント参照)ので、既定ライト以外の8テーマだけこの組み合わせ自体を検証する。
+    if (th.label !== "default-light") {
+      checks.push(["--ink-mute vs --code-bg", inkMute, codeBg]);
+      checks.push(["--ink-mute vs --accent-soft", inkMute, accentSoft]);
+      checks.push(["--ink-sub vs --accent-soft", inkSub, accentSoft]);
+    }
+    for (const [label, a, b] of checks) {
+      const r = contrastRatio(a, b);
+      ok(`(H-1) ${th.label}: ${label} >= 4.5 (実測${r?.toFixed(2)})`, r >= AA_H);
+    }
+  }
+  await page.close();
+}
+
+// ---- (H-2) 実際にレンダリングされたDOM要素での確認 ----
+{
+  const page = await newPlainPage();
+  await page.evaluate(() => {
+    window.__paneDebugEditor.setValue("# H1\n\n#### 見出し4\n\n##### 見出し5\n\n###### 見出し6\n\n```js\nconst a = 1;\nconst b = 2;\n```\n");
+  });
+  await page.waitForTimeout(200);
+  await page.evaluate(() => {
+    window.__paneDebugCtx.actions.toggleSidebar();
+    window.__paneDebugCtx.actions.showSidebarPanel("outline");
+  });
+  await page.waitForTimeout(200);
+
+  for (const th of GTHEMES) {
+    await setPreset(page, th);
+    await page.waitForTimeout(350);
+
+    // フェンスコードブロックの行番号(.cm-code-linenum)
+    const cln = await page.evaluate(() => {
+      const el = document.querySelector(".cm-code-linenum");
+      const line = el ? el.closest(".cm-codeblock-line") : null;
+      return el && line ? { color: getComputedStyle(el).color, bg: getComputedStyle(line).backgroundColor } : null;
+    });
+    ok(`(H-2) ${th.label}: .cm-code-linenum が見つかる`, !!cln);
+    if (cln) ok(`(H-2) ${th.label}: .cm-code-linenum の文字色が実背景に対し4.5以上(実測${contrastRatio(cln.color, cln.bg)?.toFixed(2)})`, contrastRatio(cln.color, cln.bg) >= AA_H);
+
+    // アウトラインのh4項目をホバーしたときの文字色(.outline-item:hoverが特異度で
+    // 打ち消せず、既定ライトでAA未満だった実バグ。詳細はsrc/style.css該当コメント参照)
+    await page.locator('.outline-item[data-level="4"]').hover();
+    await page.waitForTimeout(60);
+    const outline = await page.evaluate(() => {
+      const el = document.querySelector('.outline-item[data-level="4"]');
+      const cs = getComputedStyle(el);
+      return { color: cs.color, bg: cs.backgroundColor };
+    });
+    ok(`(H-2) ${th.label}: .outline-item[data-level=4]:hover の文字色が背景に対し4.5以上(実測${contrastRatio(outline.color, outline.bg)?.toFixed(2)})`, contrastRatio(outline.color, outline.bg) >= AA_H);
+  }
+  await page.close();
+}
+
+// ============================================================
+// (I) UI点検第2弾 指摘8: 一覧行ホバーが既定ライト等で見えなかった不具合の確認
+//     (#palette-list li:hover・.settings-nav-item:hover等が、地の色(--surface/
+//     --paper)を入れ替えるだけの指定だったため、既定ライト/github/sepiaでは両者が
+//     近くほぼ見えなかった。var(--accent-soft)に揃えたことを、実際にホバーして
+//     背景色が変わること・文字色が背景に対しAAを満たすことの両方で確認する)。
+// ============================================================
+{
+  const page = await newPlainPage();
+  for (const th of GTHEMES) {
+    await setPreset(page, th);
+    await page.waitForTimeout(80);
+
+    // コマンドパレット(#palette-list li:hover)
+    await page.keyboard.press("Control+Shift+P");
+    await page.waitForTimeout(150);
+    const beforeBg = await page.evaluate(() => getComputedStyle(document.querySelector(".palette")).backgroundColor);
+    const accentSoftNow = await resolveVarColor(page, "--accent-soft");
+    const li = page.locator("#palette-list li").first();
+    await li.hover();
+    await page.waitForTimeout(60);
+    const hoverInfo = await page.evaluate(() => {
+      const el = document.querySelector("#palette-list li");
+      const cs = getComputedStyle(el);
+      return { color: cs.color, bg: cs.backgroundColor };
+    });
+    // 単純な「地の色と値が違う」判定だと、修正前の実装(var(--paper)⇔var(--surface)の
+    // 入れ替え)のように理論上は異なる値でも既定ライトで比率1.04:1(ほぼ同色)という
+    // 「見た目には変わって見えない」ケースを見逃してしまう。かといってWCAGの
+    // コントラスト比(輝度だけの指標)で「3:1以上離れているか」を測ると、
+    // var(--accent-soft)自体がメニュー・サイドバー等の全ホバー行で既に使われている
+    // 「色相はずらすが輝度はほぼ変えない、控えめな色付け」という設計(このアプリの
+    // ホバー表現の基本方針)を「見えない」と誤判定してしまう(実測でも1.05〜1.4程度
+    // にしかならない)。そのため「地の色と単純に違う値か」ではなく「実際に
+    // var(--accent-soft)の実効値そのものに置き換わっているか」を確認する
+    // (地の色と入れ替えるのではなく、他のホバー行と同じ専用の色に統一した、という
+    // 修正の本質を直接検証できる)。
+    ok(`(I) ${th.label}: #palette-list li:hover の背景がvar(--accent-soft)の実効値と一致する(他のホバー行と統一)`, hoverInfo.bg === accentSoftNow, `(hover=${hoverInfo.bg} accent-soft=${accentSoftNow} base=${beforeBg})`);
+    ok(`(I) ${th.label}: #palette-list li:hover の文字色が背景に対し4.5以上(実測${contrastRatio(hoverInfo.color, hoverInfo.bg)?.toFixed(2)})`, contrastRatio(hoverInfo.color, hoverInfo.bg) >= AA_NORMAL);
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(100);
+  }
+
+  // 設定画面(.settings-nav-item:hover)は、フォールバックのHTML製モーダル
+  // (settings.js)自体がopen()のたびに保存済み設定からdata-theme等を上書きし直すため
+  // (settings.js:643-645)、上のようにsetPreset()でテーマを切り替えてから開いても
+  // 反映されない(既定ライトへ戻ってしまう)。そのため既定ライト1テーマのみ、
+  // 実際にopenSettings()した状態で確認する(既定ライトは指摘8の実測1.04:1の
+  // 実例そのもの)。他のテーマの安全性は(G-1)の--menu-hover-fg実測で担保する。
+  await setPreset(page, GTHEMES[0]);
+  await page.waitForTimeout(80);
+  await page.evaluate(() => window.__paneDebugCtx.actions.openSettings());
+  await page.waitForTimeout(200);
+  const navBaseBg = await page.evaluate(() => getComputedStyle(document.querySelector(".settings-nav")).backgroundColor);
+  const navAccentSoft = await resolveVarColor(page, "--accent-soft");
+  const navItem = page.locator(".settings-nav-item").first();
+  await navItem.hover();
+  await page.waitForTimeout(60);
+  const navHover = await page.evaluate(() => {
+    const el = document.querySelector(".settings-nav-item");
+    const cs = getComputedStyle(el);
+    return { color: cs.color, bg: cs.backgroundColor };
+  });
+  // 判定の考え方は#palette-list li:hoverと同じ(上のコメント参照)。
+  ok("(I) default-light: .settings-nav-item:hover の背景がvar(--accent-soft)の実効値と一致する(他のホバー行と統一)", navHover.bg === navAccentSoft, `(hover=${navHover.bg} accent-soft=${navAccentSoft} base=${navBaseBg})`);
+  ok(`(I) default-light: .settings-nav-item:hover の文字色が背景に対し4.5以上(実測${contrastRatio(navHover.color, navHover.bg)?.toFixed(2)})`, contrastRatio(navHover.color, navHover.bg) >= AA_NORMAL);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  await page.close();
+}
+
+// ============================================================
+// (K) UI点検第2弾 指摘9: クイックオープン/コマンドパレットの絞り込み0件表示
+//     (src/quick-open.js・src/commands.js の render() に0件分岐が無く、一致しない
+//     文字列を打つと入力欄の下が空白のリストになっていた)
+// ============================================================
+{
+  const page = await newBridgedPage();
+  await page.evaluate(() => window.__reply({
+    type: "folder-loaded", rootPath: "C:\\work", rootName: "work", truncated: false,
+    entries: [
+      { path: "C:\\work\\alpha.md", name: "alpha.md", relativePath: "alpha.md", isDirectory: false },
+      { path: "C:\\work\\beta.md", name: "beta.md", relativePath: "beta.md", isDirectory: false },
+    ],
+  }));
+  await page.waitForTimeout(300);
+
+  // ---- クイックオープン(Ctrl+P) ----
+  await page.keyboard.press("Control+p");
+  await page.waitForTimeout(150);
+  ok("(K) クイックオープン: 開いた直後は一致しない文字列を打つ前なので0件表示が出ていない", (await page.$("#palette-list li.palette-empty")) === null);
+  await page.keyboard.type("該当しない文字列zzzzz");
+  await page.waitForTimeout(120);
+  const qoEmpty = await page.evaluate(() => {
+    const lis = [...document.querySelectorAll("#palette-list li")];
+    return { count: lis.length, text: lis[0]?.textContent, cls: lis[0]?.className };
+  });
+  ok("(K) クイックオープン: 0件のとき.palette-empty行が1つだけ表示される", qoEmpty.count === 1 && qoEmpty.cls === "palette-empty", JSON.stringify(qoEmpty));
+  ok("(K) クイックオープン: 0件表示の文言が「一致するファイルがありません」", qoEmpty.text === "一致するファイルがありません", qoEmpty.text);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+
+  // ---- コマンドパレット(Ctrl+Shift+P) ----
+  await page.keyboard.press("Control+Shift+P");
+  await page.waitForTimeout(150);
+  ok("(K) コマンドパレット: 開いた直後は0件表示が出ていない", (await page.$("#palette-list li.palette-empty")) === null);
+  await page.keyboard.type("該当しないコマンドzzzzz");
+  await page.waitForTimeout(120);
+  const cmdEmpty = await page.evaluate(() => {
+    const lis = [...document.querySelectorAll("#palette-list li")];
+    return { count: lis.length, text: lis[0]?.textContent, cls: lis[0]?.className };
+  });
+  ok("(K) コマンドパレット: 0件のとき.palette-empty行が1つだけ表示される", cmdEmpty.count === 1 && cmdEmpty.cls === "palette-empty", JSON.stringify(cmdEmpty));
+  ok("(K) コマンドパレット: 0件表示の文言が「一致するコマンドがありません」", cmdEmpty.text === "一致するコマンドがありません", cmdEmpty.text);
+  // 0件の状態でEnter/↓↑を押してもエラーにならない(filtered配列が空でもクラッシュしない)ことの確認
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(80);
+  ok("(K) コマンドパレット: 0件の状態でEnter/矢印キーを押してもエラーにならない", allErrors.length === 0, JSON.stringify(allErrors));
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+
+  // ---- 入力を消せば通常の一覧表示に戻る(0件表示のまま固まらない) ----
+  await page.keyboard.press("Control+p");
+  await page.waitForTimeout(150);
+  await page.keyboard.type("zzzzz");
+  await page.waitForTimeout(120);
+  for (let i = 0; i < 5; i++) await page.keyboard.press("Backspace");
+  await page.waitForTimeout(120);
+  const qoRestored = await page.evaluate(() => [...document.querySelectorAll("#palette-list li")].map((li) => li.className));
+  ok("(K) クイックオープン: 入力を消すと0件表示が消えて一覧に戻る", qoRestored.length === 2 && !qoRestored.includes("palette-empty"), JSON.stringify(qoRestored));
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+
+  await page.close();
+}
+
+// ============================================================
+// (L) UI点検第2弾 指摘12: 角丸を仕様書10.1節(コントロール6px・ウィンドウ枠8px)に
+//     揃えたことの確認。実際に要素を描画すると多くのダイアログ・画面を開く必要が
+//     あり検証コストが高いため、スタイルシート上の各ルールのborder-radius値
+//     そのもの(document.styleSheetsを走査)を確認する((J)節と同じ手法)。
+// ============================================================
+{
+  const page = await newPlainPage();
+  const WINDOW_FRAME_8PX = [
+    ".palette", ".search-panel", ".settings", ".ctx-menu", ".settings-modal",
+    ".ad-banner", ".extlink-box", ".pane-dialog-box", ".color-picker-panel",
+  ];
+  const CONTROL_6PX = [
+    ".sidebar-open-folder-btn", ".settings-nav-item",
+    ".settings-select-row select, .settings-text-row input",
+    ".settings-search-row", ".ft-blocked-warn", ".adv-confirm", ".help-toc-item",
+  ];
+  const radiusOf = (page, selectorText) => page.evaluate((sel) => {
+    for (const sheet of document.styleSheets) {
+      let rules;
+      try { rules = sheet.cssRules; } catch { continue; }
+      for (const r of rules) {
+        if (r.selectorText === sel) return r.style.borderRadius;
+      }
+    }
+    return null;
+  }, selectorText);
+  for (const sel of WINDOW_FRAME_8PX) {
+    const v = await radiusOf(page, sel);
+    ok(`(L) ${sel} の角丸が8px(ウィンドウ枠)`, v === "8px", `(実際=${v})`);
+  }
+  for (const sel of CONTROL_6PX) {
+    const v = await radiusOf(page, sel);
+    ok(`(L) ${sel} の角丸が6px(コントロール)`, v === "6px", `(実際=${v})`);
+  }
+  const radiusVar = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--radius").trim());
+  ok("(L) --radius(.btnが参照)が6px", radiusVar === "6px", `(実際=${radiusVar})`);
+  await page.close();
+}
+
+// ============================================================
+// (M) UI点検第2弾 指摘14: ステータスバーが等幅フォントのままになっていないこと
+//     (仕様書10.3節「等幅フォントの用途はコード限定」)。
+// ============================================================
+{
+  const page = await newPlainPage();
+  const fonts = await page.evaluate(() => ({
+    statusbar: getComputedStyle(document.getElementById("statusbar")).fontFamily,
+    menubar: getComputedStyle(document.getElementById("menubar")).fontFamily,
+  }));
+  ok("(M) #statusbarのfont-familyにJetBrains Monoが含まれない", !/JetBrains Mono/i.test(fonts.statusbar), fonts.statusbar);
+  ok("(M) #statusbarのfont-familyがメニューバーと同じ(本文用フォントに統一)", fonts.statusbar === fonts.menubar, `(statusbar=${fonts.statusbar} menubar=${fonts.menubar})`);
+  await page.close();
+}
+
+// ============================================================
+// (N) UI点検第2弾 指摘13: 7プリセットが--input-bg/--danger-softを上書きしていること
+//     (以前はstyle.css既定の値のまま素通りしていたため、sepiaのダイアログ入力欄が
+//     紙色と噛み合わない青白さになる・nordの入力欄がsurfaceより極端に暗い穴に
+//     見える、という不具合があった)。
+// ============================================================
+{
+  const page = await newPlainPage();
+  const PRESETS_ONLY = GTHEMES.filter((t) => t.label !== "default-light" && t.label !== "default-dark");
+  const seenDangerSoft = new Set();
+  for (const th of PRESETS_ONLY) {
+    await setPreset(page, th);
+    const inputBg = await resolveVarColor(page, "--input-bg");
+    const paper = await resolveVarColor(page, "--paper");
+    const dangerSoft = await resolveVarColor(page, "--danger-soft");
+    ok(`(N) ${th.label}: --input-bgが--paperと一致する(紙面に馴染む)`, inputBg === paper, `(input-bg=${inputBg} paper=${paper})`);
+    // 既定ライト/ダークの素通し値(#FAFBFB/#171C20/#F9ECEA/#3A2320)のどれとも
+    // 一致しない(=このテーマ自身のvar(--paper)から算出された値になっている)ことを
+    // 確認する。
+    const isDefaultLeftover = ["rgb(250, 251, 251)", "rgb(23, 28, 32)", "rgb(249, 236, 234)", "rgb(58, 35, 32)"].includes(dangerSoft);
+    ok(`(N) ${th.label}: --danger-softが既定の素通し値のまま残っていない`, !isDefaultLeftover, dangerSoft);
+    seenDangerSoft.add(dangerSoft);
+  }
+  ok("(N) 7プリセットの--danger-softがそれぞれ異なる値になっている(このテーマ自身のvar(--paper)に追従)", seenDangerSoft.size === PRESETS_ONLY.length, JSON.stringify([...seenDangerSoft]));
   await page.close();
 }
 

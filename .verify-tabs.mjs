@@ -11,6 +11,12 @@
 //   (F) 中クリックで閉じる
 //   (G) タブの右クリックでopen-context-menuが送られ、期待する項目が入っている
 //   (H) 設定画面(settings-window.html)にdisplayModeの切替UIが存在しない
+//   (J) UI点検第2弾 指摘15: タブが溢れたときの横スクロールバーが.tabbar-listだけ
+//       細く指定されていること(実機のWindows/WebView2ではclassic scrollbarが
+//       レイアウト上の場所を専有するため、太いままだと32pxしかない#tabbarの中で
+//       タブの実効高さが潰れる。このLinux headless Chromium環境ではオーバーレイ
+//       スクロールバーになりレイアウトへの影響を再現できないため、実際のレイアウトの
+//       高さではなく、スタイルシート上のルールの値そのものを確認する)
 //   (I) ページエラー・コンソールエラーが0件
 import pw from "playwright";
 const { chromium } = pw;
@@ -317,7 +323,7 @@ await applySettings(page, { displayMode: "tab" });
 
 // ============================================================
 // (G2) 不具合修正: "request-save-all-tabs"で、アクティブでないタブの未保存内容も
-//      保存できる(.review-behavior.md「タブ形式で、アクティブでないタブの未保存内容が
+//      保存できる(docs/調査記録/点検-機能と動作.md「タブ形式で、アクティブでないタブの未保存内容が
 //      確認されない」の直接の原因だった処理。C#側MainForm.ConfirmDiscardDirtyAsyncは
 //      タブ形式のときこちらを送り、非アクティブタブだけを保存し損ねたまま閉じる/更新する
 //      ことがないようにする。src/main.js saveAllDirtyTabsAndWait参照)
@@ -456,6 +462,34 @@ await page.close();
   ok("(H'-tab) タブ形式でもfile.newWindowはタブを増やさない", (await tabCount(page)) === tabsAfterNewDoc);
   ok("(H'-tab) タブ形式でもfile.newWindowはbridgeへtype:new-windowを送る", !!(await lastMsg(page, "new-window")));
 
+  await page.close();
+}
+
+// ============================================================
+// (J) UI点検第2弾 指摘15: .tabbar-listの横スクロールバーが専用に細いこと
+// ============================================================
+{
+  const page = await newBridgedPage();
+  const rule = await page.evaluate(() => {
+    for (const sheet of document.styleSheets) {
+      let rules;
+      try { rules = sheet.cssRules; } catch { continue; }
+      for (const r of rules) {
+        if (r.selectorText === ".tabbar-list::-webkit-scrollbar") {
+          return { height: r.style.height, width: r.style.width };
+        }
+      }
+    }
+    return null;
+  });
+  ok("(J) .tabbar-list::-webkit-scrollbar 専用ルールが存在する", !!rule, JSON.stringify(rule));
+  if (rule) {
+    const px = parseFloat(rule.height);
+    // 全体共通の*::-webkit-scrollbar{height:17px}より明確に細く、かつ
+    // #tabbarの高さ32pxを圧迫しない(タブの文字12.5px・閉じるボタンが収まる)
+    // 目安として、17pxの半分未満であることを確認する。
+    ok(`(J) 高さが全体共通(17px)より明確に細い(実測${px}px)`, px > 0 && px < 8.5);
+  }
   await page.close();
 }
 

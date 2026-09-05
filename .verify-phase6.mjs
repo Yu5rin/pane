@@ -77,7 +77,7 @@ await page.keyboard.press("Control+Shift+Digit0");
 await page.waitForTimeout(200);
 const fs2 = await page.evaluate(() => getComputedStyle(document.querySelector(".cm-editor")).fontSize);
 ok(`拡大 ${fs0}->${fs1}`, fs0 !== fs1);
-ok(`実際のサイズで戻る ${fs1}->${fs2}`, fs2 === fs0);
+ok(`文字サイズを既定に戻すで戻る ${fs1}->${fs2}`, fs2 === fs0);
 const menubarFs = await page.evaluate(() => getComputedStyle(document.getElementById("menubar")).fontSize);
 ok(`メニューバーは拡大の影響を受けない (${menubarFs})`, menubarFs === "12.5px");
 

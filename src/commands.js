@@ -106,7 +106,7 @@ export function buildCommands(ctx) {
     { id: "edit.copy", menu: "Edit", label: "コピー", keyHint: `${MOD}+C`, enabled: () => ctx.getState().hasSelection, run: () => document.execCommand("copy") },
     { id: "edit.paste", menu: "Edit", label: "貼り付け", keyHint: `${MOD}+V`, run: app((c) => c.actions.pasteRich()) },
     { id: "edit.selectAll", menu: "Edit", label: "すべて選択", keyHint: `${MOD}+A`, run: () => editor().applyAction("selectAll"), separatorAfter: true },
-    { id: "edit.copyMarkdown", menu: "Edit", label: "マークダウンとしてコピー", shortcut: `${MOD}+Shift+C`, run: app((c) => c.actions.copyAsMarkdown()) },
+    { id: "edit.copyMarkdown", menu: "Edit", label: "Markdownとしてコピー", shortcut: `${MOD}+Shift+C`, run: app((c) => c.actions.copyAsMarkdown()) },
     { id: "edit.copyHtml", menu: "Edit", label: "HTMLとしてコピー", run: app((c) => c.actions.copyAsHtml()) },
     { id: "edit.pastePlain", menu: "Edit", label: "プレーンテキストとして貼り付け", shortcut: `${MOD}+Shift+V`, run: app((c) => c.actions.pasteAsPlainText()), separatorAfter: true },
     { id: "edit.selectLine", menu: "Edit", label: "行/文を選択", shortcut: `${MOD}+L`, run: () => editor().applyAction("selectLine") },
@@ -153,7 +153,7 @@ export function buildCommands(ctx) {
     // 右クリックの「段落」サブメニューにあったものをこちらもメニューバーへ出す(H3/M5)。
     { id: "para.taskList", menu: "Paragraph", label: "タスクリスト", run: () => editor().applyAction("check") },
     { id: "para.indent", menu: "Paragraph", label: "インデント", shortcut: `${MOD}+[`, run: () => editor().applyAction("indent") },
-    { id: "para.outdent", menu: "Paragraph", label: "アウトデント", shortcut: `${MOD}+]`, run: () => editor().applyAction("outdent"), separatorAfter: true },
+    { id: "para.outdent", menu: "Paragraph", label: "インデント解除", shortcut: `${MOD}+]`, run: () => editor().applyAction("outdent"), separatorAfter: true },
     { id: "para.listBullet", menu: "Paragraph", label: "箇条書きに変換", contextOnly: true, run: () => editor().applyAction("listBullet") },
     { id: "para.listOrdered", menu: "Paragraph", label: "番号付きリストに変換", contextOnly: true, run: () => editor().applyAction("listOrdered") },
     { id: "para.listCheck", menu: "Paragraph", label: "タスクリストに変換", contextOnly: true, run: () => editor().applyAction("listCheck"), separatorAfter: true },
@@ -164,11 +164,11 @@ export function buildCommands(ctx) {
     { id: "format.italic", menu: "Format", label: "斜体", shortcut: `${MOD}+I`, run: () => editor().applyAction("italic") },
     { id: "format.underline", menu: "Format", label: "下線", shortcut: `${MOD}+U`, run: () => editor().applyAction("underline") },
     { id: "format.code", menu: "Format", label: "インラインコード", shortcut: "Ctrl+Shift+`", run: () => editor().applyAction("code") },
-    { id: "format.strike", menu: "Format", label: "打消し線", shortcut: "Alt+Shift+5", run: () => editor().applyAction("strike") },
+    { id: "format.strike", menu: "Format", label: "取り消し線", shortcut: "Alt+Shift+5", run: () => editor().applyAction("strike") },
     { id: "format.highlight", menu: "Format", label: "ハイライト", run: () => editor().applyAction("highlight") },
     { id: "format.superscript", menu: "Format", label: "上付き文字", run: () => editor().applyAction("superscript") },
     { id: "format.subscript", menu: "Format", label: "下付き文字", run: () => editor().applyAction("subscript"), separatorAfter: true },
-    { id: "format.link", menu: "Format", label: "ハイパーリンク", shortcut: `${MOD}+K`, run: () => editor().applyAction("link") },
+    { id: "format.link", menu: "Format", label: "リンク", shortcut: `${MOD}+K`, run: () => editor().applyAction("link") },
     { id: "format.image", menu: "Format", label: "画像", shortcut: `${MOD}+Shift+I`, run: app((c) => c.actions.insertImageFlow()), separatorAfter: true },
     { id: "format.eraseFormat", menu: "Format", label: "書式を消去", shortcut: `${MOD}+\\`, run: () => editor().applyAction("eraseFormat") },
 
@@ -182,10 +182,10 @@ export function buildCommands(ctx) {
     { id: "view.modeMarkdown", menu: "View", label: "Markdownモード", run: app((c) => c.actions.setMode("markdown")), checked: () => ctx.getState().mode === "markdown" },
     { id: "view.modePlain", menu: "View", label: "プレーンテキストモード", run: app((c) => c.actions.setMode("plain")), checked: () => ctx.getState().mode === "plain" },
     { id: "view.modeCode", menu: "View", label: "コードモード", run: app((c) => c.actions.setMode("code")), checked: () => ctx.getState().mode === "code", separatorAfter: true },
-    { id: "view.sourceMode", menu: "View", label: "ソースコードモード", shortcut: `${MOD}+/`, run: app((c) => c.actions.toggleSourceMode()), checked: () => ctx.getState().sourceMode },
+    { id: "view.sourceMode", menu: "View", label: "記法を隠さない表示", shortcut: `${MOD}+/`, run: app((c) => c.actions.toggleSourceMode()), checked: () => ctx.getState().sourceMode },
     { id: "view.focusMode", menu: "View", label: "フォーカスモード", shortcut: "F8", run: app((c) => c.actions.toggleFocusMode()), checked: () => ctx.getState().focusMode },
     { id: "view.typewriterMode", menu: "View", label: "タイプライターモード", shortcut: "F9", run: app((c) => c.actions.toggleTypewriterMode()), checked: () => ctx.getState().typewriterMode, separatorAfter: true },
-    { id: "view.wordWrap", menu: "View", label: "折り返し表示", run: app((c) => c.actions.toggleWordWrap()), checked: () => ctx.getState().wordWrap, separatorAfter: true },
+    { id: "view.wordWrap", menu: "View", label: "折り返し表示", shortcut: "Alt+Z", run: app((c) => c.actions.toggleWordWrap()), checked: () => ctx.getState().wordWrap, separatorAfter: true },
     // ---- 折りたたみ(依頼④、VS Codeのコマンドを参考に追加。コードモード限定) ----
     // enabled: コードモードかつコードモードの折りたたみ機能自体がON(editor().isCodeFolding())
     // のときだけ有効にする。他のモードでは畳める範囲という概念自体が無く、折りたたみが
@@ -230,7 +230,7 @@ export function buildCommands(ctx) {
     { id: "view.foldAllBlockComments", menu: "View", label: "すべてのコメントブロックを折りたたむ", run: () => editor().foldAllBlockComments(), enabled: () => ctx.getState().mode === "code" && editor().isCodeFolding(), separatorAfter: true },
     { id: "view.gotoLine", menu: "View", label: "指定行へジャンプ", shortcut: `${MOD}+G`, run: app((c) => c.actions.gotoLineFlow()), separatorAfter: true },
     { id: "view.fullscreen", menu: "View", label: "全画面表示", shortcut: "F11", run: app((c) => c.actions.toggleFullscreen()), checked: () => ctx.getState().fullscreen },
-    { id: "view.zoomReset", menu: "View", label: "実際のサイズ", shortcut: `${MOD}+Shift+0`, run: app((c) => c.actions.zoomReset()) },
+    { id: "view.zoomReset", menu: "View", label: "文字サイズを既定に戻す", shortcut: `${MOD}+Shift+0`, run: app((c) => c.actions.zoomReset()) },
     { id: "view.zoomIn", menu: "View", label: "拡大", shortcut: `${MOD}+Shift+=`, run: app((c) => c.actions.zoomIn()) },
     { id: "view.zoomOut", menu: "View", label: "縮小", shortcut: `${MOD}+Shift+-`, run: app((c) => c.actions.zoomOut()), separatorAfter: true },
     { id: "view.switchDocument", menu: "View", label: "開いている文書を切り替え", shortcut: `${MOD}+Tab`, run: app((c) => c.actions.switchDocument()) },
@@ -718,8 +718,19 @@ export function initCommandPalette(root, commands, ctx) {
     const list = overlay.querySelector("#palette-list");
     let sel = 0;
     let filtered = available;
+    // UI点検第2弾 指摘9の修正: 絞り込み結果が0件のとき、以前は入力欄の下が
+    // 空白のリストになり、「一致なし」なのか読み込み中なのか区別が付かなかった
+    // (quick-open.jsの.palette-empty(フォルダ未読み込み時の案内)と同じクラス・
+    // 見た目に揃える)。
     function render() {
       list.innerHTML = "";
+      if (filtered.length === 0) {
+        const li = document.createElement("li");
+        li.className = "palette-empty";
+        li.textContent = "一致するコマンドがありません";
+        list.appendChild(li);
+        return;
+      }
       filtered.forEach((cmd, i) => {
         const li = document.createElement("li");
         li.className = i === sel ? "sel" : "";
@@ -978,7 +989,7 @@ function parseShortcut(s) {
 }
 // 記号キーはShift併用時にe.keyが別の文字になる(例: Shift+` → "~")ため、
 // 物理キー(e.code)で判定する。それ以外は論理キー(e.key)で判定する。
-// "0"はShift併用時にe.keyが")"になる(Ctrl+Shift+0、実際のサイズ)ため、他の記号キーと
+// "0"はShift併用時にe.keyが")"になる(Ctrl+Shift+0、文字サイズを既定に戻す)ため、他の記号キーと
 // 同様に物理キー(e.code)で判定する対象へ加える。
 const SYMBOL_CODE_MAP = { "`": "Backquote", "[": "BracketLeft", "]": "BracketRight", "\\": "Backslash", "-": "Minus", "=": "Equal", "0": "Digit0" };
 function matchesShortcut(e, combo) {

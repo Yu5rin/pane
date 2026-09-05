@@ -25,7 +25,20 @@
   --status-ok: #8FDAD2;
   --status-off: #AFC4C0;
   --status-pend: #F2C368;
-  --radius: 10px;
+  /* UI点検第2弾 指摘12の修正: 仕様書10.1節「角丸は控えめに。コントロールは6px、
+     ウィンドウ枠は8px、本文領域は角丸なし」に沿って揃える。以前は10px(.btn)・
+     14px(.palette/.settings-modal/.settings)・12px(.pane-dialog-box/.extlink-box)・
+     10px(.search-panel/.ctx-menu/.ad-banner/.color-picker-panel)・9px
+     (.settings-search-row/.ft-blocked-warn/.adv-confirm)・8px(.settings-nav-item/
+     .help-toc-item/.sidebar-open-folder-btn/select)が混在していた。この--radius
+     (コントロール用)は10px→6pxへ変更し、上記の「浮かぶパネル/ダイアログ」
+     (ウィンドウ枠扱い)は8pxへ、上記の「ボタン・入力欄・一覧項目」(コントロール扱い)は
+     6pxへそれぞれ個別に揃える(変更箇所は各セレクタ側のコメント参照)。
+     .cm-toc/.help-article pre/.kb-table等の「本文領域」内の角丸(8px)は今回は
+     対象外とした(指摘12が具体的に挙げた箇所ではなく、仕様上は「角丸なし」に
+     なるはずだが、それを適用するとコードブロック等の見た目が大きく変わるため、
+     指摘に無い箇所まで広げるのは今回は見送った)。 */
+  --radius: 6px;
   --shadow-card: 0 1px 2px rgba(16,24,32,.05), 0 10px 30px rgba(16,24,32,.08);
   --shadow-pop: 0 6px 24px rgba(16,24,32,.14);
   --font-body: "IBM Plex Sans JP", system-ui, sans-serif;
@@ -127,7 +140,13 @@ html[data-theme="dark"] {
   --titlebar-bg: #EFF1F0;
   --titlebar-fg: var(--ink);
   /* 実バグ3の修正: メニューのホバー/選択時の文字色(背景はvar(--accent-soft))。
-     実測コントラスト比4.94:1でvar(--accent)のまま問題ない。 */
+     実測コントラスト比4.94:1でvar(--accent)のまま問題ない。
+     【UI点検第2弾で用途を拡張】名前は「メニュー」用のままだが、実際の保証内容は
+     「var(--accent-soft)を背景にしたときに安全な文字色」であり用途を限定しない
+     ため、指摘8の修正(#palette-list li:hover等の一覧行ホバー)・自主点検で見つけた
+     var(--ink)とvar(--accent-soft)の組み合わせ(.tab-item:hover等、solarized-darkで
+     実測3.59とAA未満)にもそのまま再利用している。新しい色・トークンを増やさない
+     ため、名前の変更(全参照箇所の洗い替えが必要になる)はせずこの1つを使い回す。 */
   --menu-hover-fg: var(--accent);
 
   /* UI点検(.review-ui.md 指摘1・2・6・17)の修正で追加: var(--accent)を「文字」として
@@ -165,6 +184,26 @@ html[data-theme="dark"] {
      AAを割り込みうるため、12%寄せた#626A6Eを採用する(実測4.86、色味はほぼ
      ink-muteのまま)。既定ダークは実測6.02で問題ないためvar(--ink-mute)のまま。 */
   --chrome-fg: #626A6E;
+
+  /* UI点検第2弾(.review-ui.md 指摘4)の修正で追加: フェンスコードブロックの行番号
+     (.cm-code-linenum)の文字色。従来はvar(--ink-mute)をそのまま使っていたが、
+     --ink-muteは主に本文(--paper)上での可読性を基準に選ばれた値で、コードブロック
+     背景(--code-bg、本文よりわずかに沈んだ色)に対しては別途保証されていなかった
+     (--chrome-fgを導入したときと同じ問題—ある用途向けの色を別の背景に流用すると
+     コントラストが保証されない)。既定ライトは実測4.26(AA未満)だったため、
+     var(--ink)へ15%だけcolor-mix()で寄せた値に補正する(実測5.06、色味はほぼ
+     ink-muteのまま)。既定ダークは実測6.15で問題ないためvar(--ink-mute)のまま
+     (下のhtml[data-theme="dark"]ブロック参照)。 */
+  --code-linenum-fg: color-mix(in srgb, var(--ink) 15%, var(--ink-mute) 85%);
+
+  /* UI点検第2弾 指摘7の修正で追加: 危険操作ボタン(.pane-dialog-btn-danger)の文字色。
+     従来はvar(--surface)決め打ちだったが、--danger/--danger-soft はテーマプリセット
+     (themes.css)側で上書きされていない(指摘13、後述)ため、--surfaceが--danger
+     (ダーク既定#E07B6E固定)に対して暗さ不足のテーマ(nord/dracula/solarized-dark)で
+     コントラストが割り込む。--menu-hover-fg等と同じ考え方で専用トークンを新設する。
+     既定ライトは実測6.02、既定ダークは実測5.53でどちらもAA基準を満たすため
+     var(--surface)のまま(既定ダークは下のhtml[data-theme="dark"]ブロック参照)。 */
+  --danger-ink: var(--surface);
 
   --font-heading: "Source Serif 4", "Noto Serif JP", serif;
   --font-body: "Inter", "Noto Sans JP", system-ui, sans-serif;
@@ -205,6 +244,12 @@ html[data-theme="dark"] {
   /* UI点検 指摘3の修正で追加。既定ダークのvar(--ink-mute)とvar(--chrome-bg)の
      実測コントラスト比は6.02でAA基準を満たすため、var(--ink-mute)のまま問題ない。 */
   --chrome-fg: var(--ink-mute);
+  /* UI点検第2弾 指摘4の修正で追加。既定ダークのvar(--ink-mute)とvar(--code-bg)の
+     実測コントラスト比は6.15でAA基準を満たすため、var(--ink-mute)のまま問題ない。 */
+  --code-linenum-fg: var(--ink-mute);
+  /* UI点検第2弾 指摘7の修正で追加。既定ダークのvar(--surface)とvar(--danger)の
+     実測コントラスト比は5.53でAA基準を満たすため、var(--surface)のまま問題ない。 */
+  --danger-ink: var(--surface);
 }
 
 /* ===== コードのハイライト配色(仕様書 第5章・第10.2節) =====
@@ -430,7 +475,8 @@ html[data-theme="dark"] #theme-moon { display: none; }
 /* コマンドパレット(仕様書 第10.1節: Ctrl+Shift+P) */
 /* ウィンドウが低いときにパレットが下へはみ出さないよう、上余白を縮めて高さも画面内に収める。 */
 .palette-overlay { position: fixed; inset: 0; z-index: 60; background: rgba(10,14,16,.4); display: flex; justify-content: center; align-items: flex-start; padding: min(14dvh, 40px) 16px 16px; }
-.palette { width: min(560px, calc(100% - 32px)); max-height: 100%; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow-pop); overflow: hidden; }
+/* UI点検第2弾 指摘12の修正: 角丸14px→8px(仕様書10.1節「ウィンドウ枠は8px」)。 */
+.palette { width: min(560px, calc(100% - 32px)); max-height: 100%; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow-pop); overflow: hidden; }
 #palette-input { width: 100%; border: none; border-bottom: 1px solid var(--line); background: transparent; padding: 14px 16px; font-size: 15px; box-sizing: border-box; }
 #palette-input:focus { outline: none; }
 #palette-list { list-style: none; margin: 0; padding: 6px; max-height: 46dvh; overflow-y: auto; }
@@ -473,20 +519,44 @@ html[data-theme="dark"] #theme-moon { display: none; }
 .menu-item-shortcut { color: var(--ink-sub); font-family: var(--font-mono); font-size: 10.5px; flex: none; }
 .menu-separator { height: 1px; background: var(--rule); margin: 4px 6px; }
 .menu-theme-btn { border: none; background: transparent; color: var(--ink-mute); font: inherit; cursor: pointer; padding: 4px 8px; border-radius: 6px; display: inline-flex; align-items: center; }
-.menu-theme-btn:hover { color: var(--ink); background: var(--accent-soft); }
+/* UI点検第2弾(自主点検で追加発見。指摘8と同根): var(--ink)をvar(--accent-soft)背景の
+   上の文字色に使うと、solarized-darkで実測3.59とAA未満になる(--menu-hover-fg導入時と
+   同じ問題)。--menu-hover-fgに差し替える。 */
+.menu-theme-btn:hover { color: var(--menu-hover-fg, var(--accent)); background: var(--accent-soft); }
 
 /* ===== タブバー(仕様書 第2.10節 C-14、隠し設定) =====
    settings.jsonを直接編集してdisplayMode:"tab"にしたときだけmain.jsがhiddenを外して表示する
    (設定画面には切替UIを置かない。main.js側のapplyDisplayMode参照)。
-   横に並ぶタブ一覧(#tabbar-list)は項目数が多いときoverflow-xでスクロールさせるが、
-   スクロールバーの太さ・色は上方の*{scrollbar-*}/*::-webkit-scrollbar-*が全体に
-   効いているため専用の指定は不要(以前あったscrollbar-width:thinの個別指定は、
-   全体を1.5倍幅にする際にここだけ取り残さないよう削除した)。 */
+   横に並ぶタブ一覧(#tabbar-list)は項目数が多いときoverflow-xでスクロールさせる。
+   【UI点検第2弾 指摘15の修正、以前の判断を再検討した経緯】以前は「スクロールバーの
+   太さ・色は上方の*{scrollbar-*}/*::-webkit-scrollbar-*が全体に効いているため
+   専用の指定は不要」として、以前あったscrollbar-width:thinの個別指定を「全体を
+   1.5倍幅(17px)にする際にここだけ取り残さないよう」あえて削除していた。
+   しかしタブバー自体の高さは32px(#tabbar参照)しかなく、.tabbar-list(align-items:
+   stretchでタブの高さをこの32pxいっぱいに広げる)に横スクロールバーが出ると、
+   classic scrollbar(Windows/WebView2の既定。macOS等のオーバーレイ型と違い
+   レイアウト上の場所を専有する)では17px分だけ.tabbar-listの実効高さが
+   32-17=15pxまで潰れ、.tab-itemの文字(12.5px)や閉じるボタン(padding 3px+16px
+   SVG)が上下で切れてしまう(実機・Windows版WebView2で発生。この開発コンテナは
+   Linux headless Chromiumで、スクロールバーがオーバーレイ表示になりレイアウトに
+   影響しないため、この不具合はこの環境のPlaywright検証では再現できない—
+   .verify-tabs.mjsに追加した回帰確認はCSSルール自体(スタイルシートの実際の値)を
+   確認する形にしている)。
+   「他の場所と揃える」という以前の判断自体は妥当だが、32pxという固定の狭い高さを
+   持つこの一箇所だけは17pxの太さと両立できない。従って、ここだけ横スクロールバーの
+   太さを専用に細くする(色・ホバー時の見た目は*::-webkit-scrollbar-thumb等の
+   共通ルールをそのまま使うため、太さ以外は他と統一されたまま)。 */
 #tabbar { display: flex; align-items: stretch; height: 32px; border-bottom: 1px solid var(--rule); flex: none; font-size: 12.5px; }
 #tabbar[hidden] { display: none; }
 .tabbar-list { flex: 1; min-width: 0; display: flex; align-items: stretch; overflow-x: auto; overflow-y: hidden; }
+.tabbar-list::-webkit-scrollbar { height: 4px; }
 .tab-item { display: flex; align-items: center; gap: 6px; min-width: 120px; max-width: 220px; padding: 0 6px 0 12px; border-right: 1px solid var(--rule); background: transparent; color: var(--ink-mute); cursor: pointer; flex: none; user-select: none; }
-.tab-item:hover { background: var(--accent-soft); color: var(--ink); }
+/* UI点検第2弾(自主点検で追加発見。指摘8と同根): var(--ink)をvar(--accent-soft)背景の
+   上の文字色に使うと、solarized-darkで実測3.59とAA未満になる。--menu-hover-fgに
+   差し替える(.active(下)は特異度が同じで後勝ちのためbackgroundはvar(--paper)の
+   ままだが、colorは元々どちらもvar(--ink)相当で揃っていたため、非activeタブの
+   ホバー時のみこの色になる)。 */
+.tab-item:hover { background: var(--accent-soft); color: var(--menu-hover-fg, var(--accent)); }
 .tab-item.active { background: var(--paper); color: var(--ink); box-shadow: inset 0 -2px 0 var(--accent); }
 .tab-item.drag-over-before { box-shadow: inset 2px 0 0 var(--accent); }
 .tab-item.drag-over-after { box-shadow: inset -2px 0 0 var(--accent); }
@@ -557,12 +627,25 @@ html[data-theme="dark"] #theme-moon { display: none; }
 .outline-item[data-level="4"] { padding-left: 50px; color: var(--ink-mute); }
 .outline-item[data-level="5"] { padding-left: 62px; color: var(--ink-mute); }
 .outline-item[data-level="6"] { padding-left: 74px; color: var(--ink-mute); }
+/* UI点検第2弾(自主点検で追加発見。指摘4と同根): h4〜h6は上でcolor: var(--ink-mute)を
+   指定しているが、.outline-item:hover(78行上)は同じ特異度でこのルールより前に
+   書かれているため打ち消せず、hover中の背景(--accent-soft)の上にink-muteの文字が
+   乗ったまま(既定ライトで実測4.09、AA未満)になっていた。hover時だけさらに
+   var(--ink)へ15%だけcolor-mix()で寄せた値に差し替える(実測4.86。他テーマは
+   元々ink-mute自体がaccent-soft上でAAを満たすよう補正済みのため、この上乗せは
+   実害なくさらに余裕が増すだけ)。 */
+.outline-item[data-level="4"]:hover:not(.current),
+.outline-item[data-level="5"]:hover:not(.current),
+.outline-item[data-level="6"]:hover:not(.current) {
+  color: color-mix(in srgb, var(--ink) 15%, var(--ink-mute) 85%);
+}
 
 /* 空状態(見出しなし・フォルダ未読み込み等) */
 .sidebar-empty { color: var(--ink-sub); font-size: 12.5px; text-align: center; padding: 24px 16px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
 /* フォルダ未読み込み時の空状態に置く「フォルダを開く」ボタン(単なる文言だけで終わらせず、
    フォルダ機能への入口をここからも辿れるようにする)。 */
-.sidebar-open-folder-btn { border: 1px solid var(--line); background: var(--surface); color: var(--ink); font: inherit; font-size: 12px; padding: 6px 14px; border-radius: 8px; cursor: pointer; }
+/* UI点検第2弾 指摘12の修正: 角丸8px→6px(仕様書10.1節「コントロールは6px」)。 */
+.sidebar-open-folder-btn { border: 1px solid var(--line); background: var(--surface); color: var(--ink); font: inherit; font-size: 12px; padding: 6px 14px; border-radius: 6px; cursor: pointer; }
 .sidebar-open-folder-btn:hover { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-soft); }
 /* prefers-reduced-motion時のtransition無効化は下方の共通ルール(* { transition: none !important })で
    全要素まとめて処理されるため、ここでは個別に定義しない。 */
@@ -647,15 +730,30 @@ body.export-layout .cm-scroller { overflow: visible !important; }
   .cm-scroller { overflow: visible !important; }
 }
 
-/* ===== 検索・置換パネル(仕様書 E-17〜E-19) ===== */
-.search-panel { position: absolute; top: 8px; right: 16px; z-index: 30; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow-pop); padding: 6px; display: flex; flex-direction: column; gap: 4px; }
-.search-row { display: flex; align-items: center; gap: 4px; }
-.search-row input[type="text"] { border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font: inherit; font-size: 12.5px; background: var(--paper); color: var(--ink); width: 190px; }
+/* ===== 検索・置換パネル(仕様書 E-17〜E-19) =====
+   UI点検第2弾 指摘10の修正: パネルは#cm-host(overflow:hidden)の右上に絶対配置で
+   幅は内容依存(shrink-to-fit)・right:16pxのみ指定(leftは無指定)だった。サイドバーを
+   上限(幅の50%、sidebar.js)まで広げると#cm-hostの実効幅が検索行の必要幅
+   (190px入力+件数+↑↓+Aa/単語/.*+置換+✕、実測480〜520px前後)を下回り、右端基準の
+   まま左側が#cm-hostの左端より外へはみ出してoverflow:hiddenで切れていた(特に
+   入力欄側)。
+   対策は2段構え: (1)パネル自体にmax-widthを付け、#cm-hostより外へはみ出さないよう
+   上限を設ける。(2)入力欄(元は固定width:190px)だけをflexで縮められるようにし、
+   ボタン・トグル類(アイコン・短い文言で中身の最小幅がほぼ変わらない)は
+   flex:noneで現状の大きさを保つ。こうすることで、幅が足りないときは主に
+   入力欄側が縮む(最小60px)ことで全体を#cm-host内に収め、それでも足りない
+   極端な幅では#cm-host自体のoverflow:hiddenにより従来どおり切れる(このパネルの
+   最小合計幅そのものを190pxよりさらに切り詰めるのは、置換行を含む全操作を
+   維持したまま入力欄が実用にならないほど狭くなるためここでは行わない)。 */
+/* UI点検第2弾 指摘12の修正: 角丸10px→8px(仕様書10.1節「ウィンドウ枠は8px」)。 */
+.search-panel { position: absolute; top: 8px; right: 16px; max-width: calc(100% - 32px); z-index: 30; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow-pop); padding: 6px; display: flex; flex-direction: column; gap: 4px; }
+.search-row { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.search-row input[type="text"] { border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font: inherit; font-size: 12.5px; background: var(--paper); color: var(--ink); width: 190px; flex: 1 1 60px; min-width: 60px; }
 .search-row input[type="text"]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-.search-count { font-size: 11px; color: var(--ink-sub); min-width: 52px; text-align: center; font-family: var(--font-mono); }
-.search-row button { border: none; background: transparent; color: var(--ink-sub); font: inherit; font-size: 12px; cursor: pointer; padding: 4px 8px; border-radius: 6px; }
+.search-count { font-size: 11px; color: var(--ink-sub); min-width: 52px; text-align: center; font-family: var(--font-mono); flex: none; }
+.search-row button { border: none; background: transparent; color: var(--ink-sub); font: inherit; font-size: 12px; cursor: pointer; padding: 4px 8px; border-radius: 6px; flex: none; }
 .search-row button:hover { background: var(--accent-soft); color: var(--accent-ink); }
-.search-toggle { display: inline-flex; align-items: center; gap: 2px; font-size: 11px; color: var(--ink-sub); cursor: pointer; padding: 2px 4px; border-radius: 6px; }
+.search-toggle { display: inline-flex; align-items: center; gap: 2px; font-size: 11px; color: var(--ink-sub); cursor: pointer; padding: 2px 4px; border-radius: 6px; flex: none; }
 .search-toggle:has(input:checked) { background: var(--accent-soft); color: var(--accent-ink); }
 #search-panel[hidden] { display: none; }
 
@@ -717,7 +815,8 @@ html[data-theme="dark"] mark { background: #8A7A2E; }
 
 /* オプションモーダル */
 .settings-overlay { position: fixed; inset: 0; z-index: 70; background: rgba(10,14,16,.4); display: flex; justify-content: center; align-items: flex-start; padding-top: 10dvh; }
-.settings { width: min(600px, calc(100% - 32px)); max-height: 78dvh; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow-pop); overflow: hidden; }
+/* UI点検第2弾 指摘12の修正: 角丸14px→8px(仕様書10.1節「ウィンドウ枠は8px」)。 */
+.settings { width: min(600px, calc(100% - 32px)); max-height: 78dvh; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow-pop); overflow: hidden; }
 .settings-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px 10px; font-weight: 600; }
 .settings-close { background: none; border: none; font-size: 18px; color: var(--ink-sub); padding: 2px 8px; border-radius: 6px; }
 .settings-tabs { display: flex; gap: 4px; padding: 0 18px; border-bottom: 1px solid var(--line); }
@@ -735,7 +834,8 @@ html[data-theme="dark"] mark { background: #8A7A2E; }
 .help-text p { font-size: 13px; margin: 0; color: var(--ink); }
 
 /* 右クリックメニュー */
-.ctx-menu { position: fixed; z-index: 50; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow-pop); padding: 4px; min-width: 170px; }
+/* UI点検第2弾 指摘12の修正: 角丸10px→8px(仕様書10.1節「ウィンドウ枠は8px」)。 */
+.ctx-menu { position: fixed; z-index: 50; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow-pop); padding: 4px; min-width: 170px; }
 .ctx-menu button { display: block; width: 100%; text-align: left; background: none; border: none; padding: 8px 12px; border-radius: 6px; font-size: 13px; color: var(--ink); }
 
 .only-mobile { display: none; }
@@ -837,7 +937,9 @@ html[data-theme="dark"] .cm-line.cm-codeblock-line { background: var(--code-bg);
 /* コードブロックの行番号(仕様 codeBlockLineNumbers)。ウィジェットとして行頭に差し込む
    (CodeLineNumberWidget)ため、行側は番号ぶんの左余白だけ確保する。 */
 .cm-line.cm-cb-numbered { padding-left: 12px !important; }
-.cm-code-linenum { display: inline-block; min-width: 2em; margin-right: .9em; padding-right: .6em; border-right: 1px solid var(--rule); text-align: right; color: var(--ink-mute); font-family: var(--font-mono); font-size: .85em; user-select: none; }
+/* UI点検第2弾 指摘4の修正: 文字色はvar(--ink-mute)決め打ちではなくvar(--code-linenum-fg)を
+   使う(定義・根拠は:rootブロックの--code-linenum-fg定義部コメント参照)。 */
+.cm-code-linenum { display: inline-block; min-width: 2em; margin-right: .9em; padding-right: .6em; border-right: 1px solid var(--rule); text-align: right; color: var(--code-linenum-fg); font-family: var(--font-mono); font-size: .85em; user-select: none; }
 /* フォーカスモード(仕様書 V-06): カーソルのある段落以外の行を減光する。
    prefers-reduced-motion時のtransition無効化は下方の共通ルール(* { transition: none !important })
    が既に効くため、ここでは指定しない。 */
@@ -875,13 +977,24 @@ html[data-theme="dark"] .tok-mark { background: #8A7A2E; color: #F2EFDF; }
 /* 脚注(M-09) */
 .cm-footnote-ref { position: relative; display: inline-block; }
 .cm-footnote-num { color: var(--accent-ink); font-size: .78em; font-weight: 700; padding: 0 2px; cursor: default; border-bottom: 1px dotted var(--accent); }
+/* UI点検第2弾 指摘19の修正: 以前はdisplay:noneで隠していたため、JS側(editor.js
+   FootnoteRefWidget)がホバー前にoffsetHeightを測れず(display:noneの要素は常に0)、
+   「文書の先頭付近では上に出すと#cm-host .cm-scroller(overflow-y:auto)の外へ
+   はみ出して切れる」ケースを検出できなかった。visibility:hidden(+
+   pointer-events:none、隠れている間に当たり判定を持たないようにする)に変更し、
+   非表示中もレイアウト上の高さを測れるようにする(position:absoluteのため、
+   非表示中でも周囲の本文の流れには影響しない)。 */
 .cm-footnote-popup {
-  display: none; position: absolute; bottom: 125%; left: 50%; transform: translateX(-50%);
+  visibility: hidden; opacity: 0; pointer-events: none;
+  position: absolute; bottom: 125%; left: 50%; transform: translateX(-50%);
   min-width: 160px; max-width: 320px; padding: 8px 10px; border-radius: 6px;
   background: var(--ink); color: var(--paper); font-size: 12px; line-height: 1.5;
   white-space: normal; z-index: 20; box-shadow: var(--shadow-pop);
 }
-.cm-footnote-ref:hover .cm-footnote-popup { display: block; }
+.cm-footnote-ref:hover .cm-footnote-popup { visibility: visible; opacity: 1; pointer-events: auto; }
+/* 文書の先頭付近(上方向の余白が足りない)ときは、editor.js側のmouseenterハンドラが
+   このクラスを付け、下方向へ出す。 */
+.cm-footnote-popup.cm-footnote-popup-below { bottom: auto; top: 125%; }
 .cm-line.cm-footnote-def { background: var(--code-bg); font-size: .92em; padding-left: 10px !important; }
 .cm-line.cm-footnote-def-first { border-radius: 6px 6px 0 0; }
 .cm-footnote-def-label { color: var(--accent-ink); font-weight: 700; font-size: .85em; margin-right: 4px; }
@@ -920,7 +1033,15 @@ html[data-theme="dark"] .tok-mark { background: #8A7A2E; color: #F2EFDF; }
 .btn.danger:hover { background: var(--danger-soft); border-color: var(--danger-soft); }
 .topbar .btn:hover { background: rgba(255,255,255,.14); border-color: rgba(255,255,255,.4); color: #fff; }
 .md-toolbar button:hover { background: var(--accent-soft); color: var(--accent-ink); }
-#palette-list li:hover { background: var(--paper); }
+/* UI点検第2弾 指摘8の修正: 背景をvar(--surface)からvar(--paper)への「入れ替え」に
+   していたが、両者が近い既定ライト(#FFFFFF vs #FBFBFA、実測コントラスト比1.04)・
+   github(#FFFFFF vs #F6F8FA、1.06)・sepia(#FBF3E3 vs #F4ECD8、1.07)では
+   ホバーしても背景がほぼ変わらず見えなかった(.paletteの地はvar(--surface))。
+   他の一覧行(メニュー・サイドバー・設定タブ等)と同じvar(--accent-soft)に揃える。
+   文字色は元々未指定(継承のvar(--ink)のまま)だったが、var(--accent-soft)は
+   solarized-darkでvar(--ink)に対し実測3.59とAA未満のため、--menu-hover-fgと
+   同じ理由でvar(--menu-hover-fg, var(--accent))を明示する。 */
+#palette-list li:hover { background: var(--accent-soft); color: var(--menu-hover-fg, var(--accent)); }
 .settings-close:hover { background: var(--paper); color: var(--ink); }
 .ctx-menu button:hover { background: var(--accent-soft); color: var(--accent-ink); }
 .ctx-menu button.danger:hover { background: var(--danger-soft); color: var(--danger); }
@@ -1122,7 +1243,11 @@ html[data-theme="dark"] .cm-search-ruler-mark.is-active {
 /* アーカイブ閲覧モード: 編集UIを隠して読み取り専用を明示 */
 .layout.readonly .memo-title { pointer-events: none; }
 .layout.readonly #btn-delete, .layout.readonly #btn-save-template, .layout.readonly .mobile-bar { display: none !important; }
-.layout.readonly .editor::before { content: "アーカイブ（閲覧のみ）"; display: block; font-size: 12px; color: var(--ink-sub); background: var(--accent-soft); border-radius: 6px; padding: 4px 10px; margin-bottom: 10px; align-self: flex-start; }
+/* UI点検第2弾(自主点検で追加発見。指摘5と同根): 文字色はvar(--ink-sub)決め打ちでは
+   なく、var(--ink)を15%だけcolor-mix()で混ぜた値を使う(.extlink-urlと同じ考え方)。
+   --ink-subは本文(--paper)向けに調整された値で、この帯の背景(--accent-soft)に対しては
+   既定ライトのみ実測4.27とAA(4.5)をわずかに割り込んでいた。 */
+.layout.readonly .editor::before { content: "アーカイブ（閲覧のみ）"; display: block; font-size: 12px; color: color-mix(in srgb, var(--ink) 15%, var(--ink-sub) 85%); background: var(--accent-soft); border-radius: 6px; padding: 4px 10px; margin-bottom: 10px; align-self: flex-start; }
 
 /* ===== 設定画面(仕様書 第2.10節 C-01〜C-14、src/settings.js) =====
    製品相当のサイドバー形式(左: カテゴリ一覧、右: 設定項目)のモーダル。
@@ -1132,7 +1257,8 @@ html[data-theme="dark"] .cm-search-ruler-mark.is-active {
 /* 余白は画面サイズに応じて縮める。ウィンドウが小さいと24px固定では本体の表示領域が
    潰れてしまい、設定画面が使えなくなるため。 */
 .settings-modal-overlay { position: fixed; inset: 0; z-index: 80; background: rgba(10,14,16,.4); display: flex; justify-content: center; align-items: center; padding: min(24px, 2vh) min(24px, 2vw); }
-.settings-modal { width: min(900px, 100%); height: min(80vh, 720px); max-height: 100%; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow-pop); overflow: hidden; }
+/* UI点検第2弾 指摘12の修正: 角丸14px→8px(仕様書10.1節「ウィンドウ枠は8px」)。 */
+.settings-modal { width: min(900px, 100%); height: min(80vh, 720px); max-height: 100%; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow-pop); overflow: hidden; }
 
 /* pageモード(設定専用ウィンドウ、settings-entry.js): 本体ウィンドウのオーバーレイモーダルと
    同じDOM・スタイルを流用しつつ、黒背景・余白・角丸・影だけを外してウィンドウ全体に広げる。 */
@@ -1146,7 +1272,8 @@ html[data-theme="dark"] .cm-search-ruler-mark.is-active {
 
 /* 左: カテゴリ一覧 */
 .settings-nav { width: 200px; flex: none; border-right: 1px solid var(--rule); background: var(--paper); padding: 10px; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; }
-.settings-nav-item { display: flex; align-items: center; gap: 10px; border: none; background: transparent; color: var(--ink-sub); font: inherit; font-size: 13px; text-align: left; padding: 9px 10px; border-radius: 8px; cursor: pointer; }
+/* UI点検第2弾 指摘12の修正: 角丸8px→6px(仕様書10.1節「コントロールは6px」)。 */
+.settings-nav-item { display: flex; align-items: center; gap: 10px; border: none; background: transparent; color: var(--ink-sub); font: inherit; font-size: 13px; text-align: left; padding: 9px 10px; border-radius: 6px; cursor: pointer; }
 .settings-nav-item svg { flex: none; }
 .settings-nav-item.active { background: var(--accent-soft); color: var(--accent-ink); font-weight: 600; }
 
@@ -1165,7 +1292,8 @@ html[data-theme="dark"] .cm-search-ruler-mark.is-active {
 .settings-field-desc { display: block; font-size: 11.5px; color: var(--ink-sub); font-weight: 400; margin-top: 2px; }
 .settings-field-desc code { font-family: var(--font-mono); background: var(--paper); border-radius: 4px; padding: 0 4px; }
 .settings-select-row, .settings-text-row { display: flex; flex-direction: column; gap: 4px; font-size: 13px; font-weight: 600; max-width: 380px; }
-.settings-select-row select, .settings-text-row input { font: inherit; font-size: 13px; font-weight: 400; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; background: var(--paper); color: var(--ink); }
+/* UI点検第2弾 指摘12の修正: 角丸8px→6px(仕様書10.1節「コントロールは6px」)。 */
+.settings-select-row select, .settings-text-row input { font: inherit; font-size: 13px; font-weight: 400; border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; background: var(--paper); color: var(--ink); }
 .settings-text-row input[type="number"] { max-width: 110px; }
 
 /* 下部: 保存・キャンセル */
@@ -1204,8 +1332,15 @@ html[data-theme="dark"] .cm-search-ruler-mark.is-active {
 
 /* ホバー装飾はホバー可能なデバイス限定(既存の方針、上のホバー専用ブロックを参照) */
 @media (hover: hover) {
-.settings-modal-close:hover { background: var(--paper); color: var(--ink); }
-.settings-nav-item:hover { background: var(--surface); color: var(--ink); }
+/* UI点検第2弾 指摘8の修正: .settings-modalの地はvar(--surface)なので、ホバー背景を
+   var(--paper)へ入れ替える指定では既定ライト等で両者が近くほぼ見えなかった
+   (#palette-list li:hoverの修正コメント参照)。他の一覧行と同じvar(--accent-soft)に
+   揃え、文字色もsolarized-dark対策のためvar(--menu-hover-fg, var(--accent))にする。 */
+.settings-modal-close:hover { background: var(--accent-soft); color: var(--menu-hover-fg, var(--accent)); }
+/* UI点検第2弾 指摘8の修正: .settings-navの地はvar(--paper)なので、ホバー背景を
+   var(--surface)へ入れ替える指定では既定ライト等で両者が近くほぼ見えなかった。
+   同上の理由でvar(--accent-soft)/var(--menu-hover-fg, var(--accent))に揃える。 */
+.settings-nav-item:hover { background: var(--accent-soft); color: var(--menu-hover-fg, var(--accent)); }
 .kb-row:hover { background: var(--accent-soft); }
 }
 
@@ -1227,7 +1362,8 @@ html[data-theme="dark"] .cm-search-ruler-mark.is-active {
    ステータスバー付近に浮かべる非モーダルな通知バナー。既存の.palette-overlay等とは違い
    全画面を覆わない(入力の邪魔をしないための仕様上の要件)。接頭辞は"ad-"(auto-detect)に
    統一し、色は既存のCSSカスタムプロパティのみを使う。 */
-.ad-banner { position: fixed; right: 14px; bottom: 34px; z-index: 55; display: flex; align-items: center; gap: 10px; max-width: min(440px, calc(100% - 28px)); background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; box-shadow: var(--shadow-pop); font-size: 12.5px; color: var(--ink); }
+/* UI点検第2弾 指摘12の修正: 角丸10px→8px(仕様書10.1節「ウィンドウ枠は8px」)。 */
+.ad-banner { position: fixed; right: 14px; bottom: 34px; z-index: 55; display: flex; align-items: center; gap: 10px; max-width: min(440px, calc(100% - 28px)); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; box-shadow: var(--shadow-pop); font-size: 12.5px; color: var(--ink); }
 .ad-banner[hidden] { display: none; }
 #ad-banner-text { flex: 1; min-width: 0; }
 .ad-banner-btn { flex: none; border: none; font: inherit; font-size: 11.5px; cursor: pointer; padding: 5px 10px; border-radius: 6px; white-space: nowrap; }
@@ -1235,7 +1371,11 @@ html[data-theme="dark"] .cm-search-ruler-mark.is-active {
 .ad-banner-close { background: transparent; color: var(--ink-mute); }
 @media (hover: hover) {
 .ad-banner-action:hover { background: var(--accent-ink); color: var(--surface); }
-.ad-banner-close:hover { background: var(--paper); color: var(--ink); }
+/* UI点検第2弾 指摘8の修正: .ad-bannerの地はvar(--surface)なので、ホバー背景を
+   var(--paper)へ入れ替える指定では既定ライト等で両者が近くほぼ見えなかった
+   (#palette-list li:hoverの修正コメント参照)。同上の理由でvar(--accent-soft)/
+   var(--menu-hover-fg, var(--accent))に揃える。 */
+.ad-banner-close:hover { background: var(--accent-soft); color: var(--menu-hover-fg, var(--accent)); }
 }
 
 /* コードモードの言語ピッカー(#status-mode クリック)。既存のコマンドパレット/
@@ -1246,7 +1386,8 @@ html[data-theme="dark"] .cm-search-ruler-mark.is-active {
    検索欄・パス選択(参照…)ボタン・関連付けの警告バナー・詳細カテゴリの操作ボタン群。
    既存の設定画面用クラス(.settings-*)の接頭辞をそのまま使い、フォームの外観は
    settings-select-row/settings-text-rowと揃える。 */
-.settings-search-row { flex: none; display: flex; align-items: center; gap: 8px; margin: 10px 20px 0; padding: 7px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); color: var(--ink-sub); }
+/* UI点検第2弾 指摘12の修正: 角丸9px→6px(仕様書10.1節「コントロールは6px」。検索入力欄)。 */
+.settings-search-row { flex: none; display: flex; align-items: center; gap: 8px; margin: 10px 20px 0; padding: 7px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); color: var(--ink-sub); }
 .settings-search-row svg { flex: none; }
 .settings-search-input { flex: 1; min-width: 0; border: none; background: transparent; color: var(--ink); font: inherit; font-size: 13px; outline: none; }
 .settings-search-input::placeholder { color: var(--ink-mute); }
@@ -1263,13 +1404,17 @@ html[data-theme="dark"] .cm-search-ruler-mark.is-active {
 .settings-path-browse-btn:disabled { opacity: .5; cursor: default; }
 
 /* ファイルの関連付け: Windowsの既定のアプリで奪われている拡張子の警告バナー */
-.ft-blocked-warn { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--danger); border-radius: 9px; background: var(--danger-soft); }
+/* UI点検第2弾 指摘12の修正: 角丸9px→6px(仕様書10.1節「コントロールは6px」)。
+   すぐ下の.adv-confirm(同種の警告バナー)も同じ9pxだったため揃えて修正する
+   (指摘12が具体的に挙げたのはこちらの.ft-blocked-warnのみだが、同じ形の
+   兄弟セレクタを片方だけ直すと新たな不揃いを生むため)。 */
+.ft-blocked-warn { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--danger); border-radius: 6px; background: var(--danger-soft); }
 .ft-blocked-warn p { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--ink); }
 
 /* 詳細カテゴリ: 値ではなくアクションのボタン群。破壊的な操作は adv-confirm を挟む */
 .adv-actions { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 .adv-action-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.adv-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--danger); border-radius: 9px; background: var(--danger-soft); }
+.adv-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--danger); border-radius: 6px; background: var(--danger-soft); }
 .adv-confirm-text { font-size: 12px; color: var(--ink); flex-basis: 100%; }
 .adv-action-msg { font-size: 12px; color: var(--accent-ink); min-height: 1.4em; }
 
@@ -1293,9 +1438,16 @@ html[data-theme="dark"] .cm-search-ruler-mark.is-active {
    誤クリックで既定のブラウザが勝手に開くのを防ぐ。見た目は既存のパレット/設定画面と
    揃える(--surface背景・--line枠・--shadow-pop)。色は既存のCSS変数のみを使う。 */
 .extlink-overlay { position: fixed; inset: 0; z-index: 90; background: rgba(10,14,16,.4); display: flex; justify-content: center; align-items: center; padding: min(24px, 3vh) 16px; }
-.extlink-box { width: min(460px, 100%); max-height: 100%; overflow-y: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow-pop); padding: 18px 20px 14px; }
+/* UI点検第2弾 指摘12の修正: 角丸12px→8px(仕様書10.1節「ウィンドウ枠は8px」)。 */
+.extlink-box { width: min(460px, 100%); max-height: 100%; overflow-y: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow-pop); padding: 18px 20px 14px; }
 .extlink-title { font-size: 13.5px; font-weight: 700; color: var(--ink); margin-bottom: 10px; }
-.extlink-url { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-sub); background: var(--code-bg); border: 1px solid var(--rule); border-radius: 6px; padding: 8px 10px; word-break: break-all; margin-bottom: 14px; }
+/* UI点検第2弾(指摘4・5と同根、自主点検で追加発見): 文字色はvar(--ink-sub)決め打ちでは
+   なく、var(--ink)を15%だけcolor-mix()で混ぜた値を使う。--ink-subは本文(--paper)向けに
+   調整された値で、このURL表示欄の背景(--code-bg)に対しては既定ライトのみ実測4.45と
+   AA(4.5)をわずかに割り込んでいた(--panel-bg/--active-line-bgと同じ「1つの式で
+   9テーマ全部に自動追従させる」方式。既定ライト以外は元々AAを満たすテーマでも
+   実測5.3〜11.8とさらに余裕が増すだけで問題ない)。 */
+.extlink-url { font-family: var(--font-mono); font-size: 11.5px; color: color-mix(in srgb, var(--ink) 15%, var(--ink-sub) 85%); background: var(--code-bg); border: 1px solid var(--rule); border-radius: 6px; padding: 8px 10px; word-break: break-all; margin-bottom: 14px; }
 .extlink-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .extlink-btn { border: 1px solid var(--line); background: var(--surface); color: var(--ink); font: inherit; font-size: 12px; padding: 6px 14px; border-radius: 6px; cursor: pointer; }
 .extlink-btn-primary { background: var(--accent-ink); border-color: var(--accent-ink); color: var(--surface); font-weight: 700; }
@@ -1309,7 +1461,8 @@ html[data-theme="dark"] .cm-search-ruler-mark.is-active {
    (--surface背景・--line枠・--shadow-pop)。設定ウィンドウ(settings-window.html)からも
    読み込まれるため、.settings-modal-overlay(z-index:80)より上に出す。 */
 .pane-dialog-overlay { position: fixed; inset: 0; z-index: 95; background: rgba(10,14,16,.4); display: flex; justify-content: center; align-items: center; padding: min(24px, 3vh) 16px; }
-.pane-dialog-box { width: min(420px, 100%); max-height: 100%; overflow-y: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow-pop); padding: 18px 20px 14px; }
+/* UI点検第2弾 指摘12の修正: 角丸12px→8px(仕様書10.1節「ウィンドウ枠は8px」)。 */
+.pane-dialog-box { width: min(420px, 100%); max-height: 100%; overflow-y: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow-pop); padding: 18px 20px 14px; }
 .pane-dialog-title { font-size: 13.5px; font-weight: 700; color: var(--ink); margin-bottom: 8px; }
 .pane-dialog-message { font-size: 12.5px; color: var(--ink-sub); line-height: 1.6; margin-bottom: 14px; white-space: pre-wrap; }
 .pane-dialog-input { display: block; width: 100%; font: inherit; font-size: 13px; color: var(--ink); background: var(--input-bg); border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; margin-bottom: 6px; }
@@ -1319,11 +1472,13 @@ html[data-theme="dark"] .cm-search-ruler-mark.is-active {
 .pane-dialog-btn { border: 1px solid var(--line); background: var(--surface); color: var(--ink); font: inherit; font-size: 12px; padding: 6px 14px; border-radius: 6px; cursor: pointer; }
 .pane-dialog-btn:disabled { opacity: .5; cursor: default; }
 .pane-dialog-btn-primary { background: var(--accent-ink); border-color: var(--accent-ink); color: var(--surface); font-weight: 700; }
-.pane-dialog-btn-danger { background: var(--danger); border-color: var(--danger); color: var(--surface); font-weight: 700; }
+/* UI点検第2弾 指摘7の修正: 文字色はvar(--surface)決め打ちではなくvar(--danger-ink)を
+   使う(定義・根拠は:rootブロックの--danger-ink定義部コメント参照)。 */
+.pane-dialog-btn-danger { background: var(--danger); border-color: var(--danger); color: var(--danger-ink); font-weight: 700; }
 @media (hover: hover) {
 .pane-dialog-btn:hover:not(:disabled) { background: var(--accent-soft); color: var(--accent-ink); border-color: var(--accent); }
 .pane-dialog-btn-primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--surface); }
-.pane-dialog-btn-danger:hover:not(:disabled) { background: var(--danger); border-color: var(--danger); filter: brightness(1.1); color: var(--surface); }
+.pane-dialog-btn-danger:hover:not(:disabled) { background: var(--danger); border-color: var(--danger); filter: brightness(1.1); color: var(--danger-ink); }
 }
 
 /* ===== 拡張子の関連付けツリーの三状態表示 =====
@@ -1474,7 +1629,8 @@ html[data-theme="dark"] .cm-search-ruler-mark.is-active {
   box-sizing: border-box;
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 10px;
+  /* UI点検第2弾 指摘12の修正: 角丸10px→8px(仕様書10.1節「ウィンドウ枠は8px」)。 */
+  border-radius: 8px;
   box-shadow: var(--shadow-pop);
   padding: 12px;
   display: flex;
@@ -1678,8 +1834,13 @@ html[data-theme="dark"] .cm-search-ruler-mark.is-active {
 
 /* サイドバーの目次。.settings-nav(設定ウィンドウのカテゴリ一覧)と全く同じ値に揃える。 */
 .help-sidebar { width: 220px; flex: none; border-right: 1px solid var(--rule); background: var(--paper); padding: 10px; display: flex; flex-direction: column; gap: 1px; overflow-y: auto; }
-.help-toc-item { display: block; width: 100%; border: none; background: transparent; color: var(--ink-sub); font: inherit; font-size: 12.5px; line-height: 1.5; text-align: left; padding: 6px 10px; border-radius: 8px; cursor: pointer; }
-.help-toc-item:hover { background: var(--surface); color: var(--ink); }
+/* UI点検第2弾 指摘12の修正: 角丸8px→6px(仕様書10.1節「コントロールは6px」)。 */
+.help-toc-item { display: block; width: 100%; border: none; background: transparent; color: var(--ink-sub); font: inherit; font-size: 12.5px; line-height: 1.5; text-align: left; padding: 6px 10px; border-radius: 6px; cursor: pointer; }
+/* UI点検第2弾 指摘8の修正: .help-sidebarの地はvar(--paper)なので、ホバー背景を
+   var(--surface)へ入れ替える指定では既定ライト等で両者が近くほぼ見えなかった
+   (#palette-list li:hoverの修正コメント参照)。同上の理由でvar(--accent-soft)/
+   var(--menu-hover-fg, var(--accent))に揃える。 */
+.help-toc-item:hover { background: var(--accent-soft); color: var(--menu-hover-fg, var(--accent)); }
 .help-toc-item.active { background: var(--accent-soft); color: var(--accent-ink); font-weight: 600; }
 .help-toc-l2 { padding-left: 20px; }
 .help-toc-l3 { padding-left: 30px; font-size: 12px; }
@@ -1723,7 +1884,10 @@ html[data-theme="dark"] .cm-search-ruler-mark.is-active {
 .help-article th, .help-article td { border: 1px solid var(--line); padding: 5px 12px; }
 .help-article th { background: var(--surface); font-weight: 700; }
 .help-article img { max-width: 100%; }
-.help-article mark { background: var(--accent-soft); color: var(--ink); border-radius: 2px; }
+/* UI点検第2弾(自主点検で追加発見。指摘8と同根): var(--ink)をvar(--accent-soft)背景の
+   上の文字色に使うと、solarized-darkで実測3.59とAA未満になる。--menu-hover-fgに
+   差し替える。 */
+.help-article mark { background: var(--accent-soft); color: var(--menu-hover-fg, var(--accent)); border-radius: 2px; }
 
 /* Ctrl+F検索バー。既存の.search-panel(本体エディタのCtrl+F)と同じ見た目の作法に揃える。
    本文の上に常設で被さるのではなく、開いている間だけ右上に浮かせる。 */
@@ -1733,5 +1897,7 @@ html[data-theme="dark"] .cm-search-ruler-mark.is-active {
 .help-search-count { font-size: 11px; color: var(--ink-sub); min-width: 42px; text-align: center; font-family: var(--font-mono); }
 .help-search-nav-btn { border: none; background: transparent; color: var(--ink-sub); font-size: 11px; cursor: pointer; padding: 4px 6px; border-radius: 6px; line-height: 1; }
 .help-search-nav-btn:hover { background: var(--accent-soft); color: var(--accent-ink); }
-mark.help-search-hit { background: var(--accent-soft); color: var(--ink); border-radius: 2px; }
+/* UI点検第2弾(自主点検で追加発見。指摘8と同根): 同上の理由でvar(--menu-hover-fg,
+   var(--accent))に差し替える。 */
+mark.help-search-hit { background: var(--accent-soft); color: var(--menu-hover-fg, var(--accent)); border-radius: 2px; }
 mark.help-search-hit.current { background: var(--accent-ink); color: var(--paper); }

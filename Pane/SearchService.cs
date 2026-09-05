@@ -59,7 +59,7 @@ internal static class SearchService
         {
             // 不正な正規表現・空クエリはヒット0件として静かに終える
             // (ユーザーが入力途中の正規表現を送ってくるため、例外にはしない)。
-            // 検索語そのものはログへ書かない(.review-security.md B対応。理由はMainForm.HandleGlobalSearchRequest参照)。
+            // 検索語そのものはログへ書かない(docs/調査記録/点検-セキュリティ.md B対応。理由はMainForm.HandleGlobalSearchRequest参照)。
             Logger.Write($"SearchService.SearchAsync: 検索条件が不正なため中断: textLength={query.Text.Length}, regexp={query.Regexp}");
             return;
         }

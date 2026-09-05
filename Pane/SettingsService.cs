@@ -48,7 +48,7 @@ internal static class SettingsService
             // と確定してよい。
             //
             // 以前はここで無言(バックアップも警告ログも無し)に既定値を返すだけで終わっていた
-            // (.review-behavior.md「settings.jsonが壊れていると、最初の設定書き込みで
+            // (docs/調査記録/点検-機能と動作.md「settings.jsonが壊れていると、最初の設定書き込みで
             // 全設定が既定値で上書きされる」)。System.Text.Jsonは1項目でも型が合わないと
             // ファイル全体をJsonExceptionにするため、例えば手で"editorFontSize"を
             // 文字列にしただけでも同じ経路に入る。Load()自体はこの場で既定値を返して起動を

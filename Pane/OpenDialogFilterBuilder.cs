@@ -4,7 +4,7 @@ namespace Pane;
 /// 「開く」ダイアログ(OpenFileDialog.Filter)の文字列組み立て。
 ///
 /// 【なぜ独立したクラスにしたか】
-/// 総点検(.review-usability.md 指摘H1)で、「開く」ダイアログのフィルタが
+/// 総点検(docs/調査記録/点検-使い勝手.md 指摘H1)で、「開く」ダイアログのフィルタが
 /// 「Markdown / テキスト」と「すべてのファイル」の2つしか無いことが分かった。Paneは
 /// 約60種の言語のシンタックスハイライトに対応したコードエディタでもある(FileTypes.
 /// OpenableExtensions、npm run buildでsrc/file-types.jsから自動生成)のに、.js や .py を

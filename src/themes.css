@@ -7,6 +7,26 @@
    既定(それぞれ--paper/--surface、および「タイトルバーは本文の実描画色を送る」動作)へ
    自動的に倒れるため、各プリセットは「他と違う色にしたい部位だけ」を書けばよい。
 
+   【UI点検第2弾 指摘13の修正】上記に加え、--input-bg(ダイアログの入力欄・数値入力欄)・
+   --danger-soft(危険操作の警告バナー背景・危険ボタンのホバー背景)も、9テーマ全部に
+   明示的に上書きする対象へ加える。従来はstyle.css既定の値(ライト#FAFBFB/ダーク
+   #171C20、#F9ECEA/#3A2320)のまま7プリセットへ素通ししていたため、sepiaでは
+   紙色(暖色)と噛み合わない青白い入力欄に、nordではsurfaceより極端に暗い穴のような
+   入力欄になっていた。--input-bgは各テーマのvar(--paper)へ揃える(既定ライト
+   #FAFBFB/既定ダーク#171C20も、元々それぞれのvar(--paper)(#FBFBFA/#14171A)と
+   ほぼ同色で「紙面に馴染む」設計だったため、これに倣う)。--danger-softは
+   var(--danger)(このテーマ独自の値を持たない場合は既定ライト/ダーク値のまま)を
+   各テーマのvar(--paper)へ薄く混ぜたcolor-mix()にする(ライト系8%・ダーク系15%。
+   既定ライト/ダークの実測値から近似した混合率)。
+   --pre-bg/--pre-ink(フェンスコードブロックの背景・文字色)も指摘13の対象だが、
+   実際にはstyle.css側のどのセレクタからも参照されていない(現在の実装は
+   var(--code-bg)を使っており、--pre-bg/--pre-inkは使われないまま残っている
+   死んだトークンだった。ユーザー向けのサンプルカスタムCSS
+   (Pane/ThemeFolderService.cs)にだけ「フェンスコードブロックの背景色」として
+   案内されている)。実害(見た目への影響)は無いが、ユーザーがこの変数名を見て
+   カスタムCSSに使った場合に備え、実際に効いているvar(--code-bg)/var(--ink)へ
+   一致させておく。
+
    適用の仕組み: main.jsがapply-settings受信時にdocument.documentElement(=html)へ
    data-light-theme="<id>" / data-dark-theme="<id>" を付与する(既定値は"default")。
    style.css側の配色は
@@ -50,8 +70,18 @@ html[data-theme="light"][data-light-theme="sepia"] {
   --paper: #F4ECD8;
   --surface: #FBF3E3;
   --ink: #3B2F22;
-  --ink-sub: #7A6A55;
-  --ink-mute: #7A6A55;
+  /* UI点検第2弾(.review-ui.md 指摘4・5)の修正: 元の#7A6A55は「本文(--paper)上での
+     可読性」を基準に選ばれた値だが、サイドバー(--surface #FBF3E3)・コードブロック
+     (--code-bg #ECE0C4)・本文(--paper #F4ECD8)いずれに対しても実測3.99〜4.44で
+     AA(4.5)未満だった(アウトラインh4-h6・タブ・行番号・ダイアログ本文・h4見出し等、
+     10.5〜12.5pxの小さい文字で使われるため緩い基準(3:1)ではなく4.5:1が必要—この
+     取り違えが過去の不具合の原因になっている)。--accent-ink等と同じ考え方で
+     var(--ink)へcolor-mix()で寄せて補正する。境界ぎりぎりの混合率は実ブラウザの
+     丸め誤差でAAを割り込みうるため(.fix-contrast.md参照)余裕を持たせ、20%
+     (#665741相当)を採用する(補正後の実測: vs sidebar-bg 5.66 / vs code-bg 4.76 /
+     vs paper 5.30、ink-subも同値のため同じ補正)。 */
+  --ink-sub: color-mix(in srgb, var(--ink) 20%, #7A6A55 80%);
+  --ink-mute: color-mix(in srgb, var(--ink) 20%, #7A6A55 80%);
   --line: #E3D5B8;
   --rule: #E3D5B8;
   --accent: #A9762C;
@@ -110,6 +140,18 @@ html[data-theme="light"][data-light-theme="sepia"] {
      線形補間)とブラウザ実装のcolor-mix()とで丸め方が完全には一致しないため、
      境界値ぎりぎりの混合率は避け余裕を持たせる)。25%寄せる(実測4.71)。 */
   --chrome-fg: color-mix(in srgb, var(--ink-mute) 75%, var(--ink) 25%);
+  /* UI点検第2弾 指摘4の修正で追加。上でvar(--ink-mute)自体を補正済みのため、
+     var(--code-bg)に対しても実測4.76でAA基準を満たす。var(--ink-mute)のまま問題ない。 */
+  --code-linenum-fg: var(--ink-mute);
+  /* UI点検第2弾 指摘7の修正で追加。var(--surface)(#FBF3E3)とvar(--danger)(このテーマは
+     --dangerを上書きしていないため既定ライト値#B03A2Eのまま)の実測コントラスト比は
+     5.45でAA基準を満たすため、var(--surface)のまま問題ない。 */
+  --danger-ink: var(--surface);
+  /* UI点検第2弾 指摘13の修正で追加(根拠はファイル冒頭のコメント参照)。 */
+  --input-bg: var(--paper);
+  --danger-soft: color-mix(in srgb, var(--danger) 8%, var(--paper));
+  --pre-bg: var(--code-bg);
+  --pre-ink: var(--ink);
 }
 
 /* github: GitHub風。白背景+青系アクセント。
@@ -176,6 +218,18 @@ html[data-theme="light"][data-light-theme="github"] {
   /* UI点検 指摘3の修正で追加。var(--ink-mute)とvar(--chrome-bg)の実測コントラスト比は
      5.24でAA基準を満たすため、var(--ink-mute)のまま問題ない。 */
   --chrome-fg: var(--ink-mute);
+  /* UI点検第2弾 指摘4の修正で追加。var(--ink-mute)とvar(--code-bg)の実測コントラスト比は
+     5.74でAA基準を満たすため、var(--ink-mute)のまま問題ない。 */
+  --code-linenum-fg: var(--ink-mute);
+  /* UI点検第2弾 指摘7の修正で追加。var(--surface)(#F6F8FA)とvar(--danger)(このテーマは
+     --dangerを上書きしていないため既定ライト値#B03A2Eのまま)の実測コントラスト比は
+     5.65でAA基準を満たすため、var(--surface)のまま問題ない。 */
+  --danger-ink: var(--surface);
+  /* UI点検第2弾 指摘13の修正で追加(根拠はファイル冒頭のコメント参照)。 */
+  --input-bg: var(--paper);
+  --danger-soft: color-mix(in srgb, var(--danger) 8%, var(--paper));
+  --pre-bg: var(--code-bg);
+  --pre-ink: var(--ink);
 }
 
 /* solarized-light: Solarized(Ethan Schoonover配色)のライト側。
@@ -207,8 +261,15 @@ html[data-theme="light"][data-light-theme="solarized-light"] {
   --paper: #FDF6E3;
   --surface: #EEE8D5;
   --ink: #073642;
-  --ink-sub: #657B83;
-  --ink-mute: #657B83;
+  /* UI点検第2弾(.review-ui.md 指摘4・5)の修正: 元の#657B83(Solarizedのbase00)は
+     サイドバー(--surface #EEE8D5)・コードブロック(--code-bg、同じくbase2)・本文
+     (--paper #FDF6E3)いずれに対しても実測3.64〜4.13でAA(4.5)未満だった(9テーマ中
+     もっとも低い部類。--accent-inkの根拠と同根)。var(--ink)へ30%だけcolor-mix()で
+     寄せて補正する(補正後の実測: vs sidebar-bg 5.00 / vs code-bg 5.00 / vs paper
+     5.68。境界ぎりぎりの混合率は丸め誤差でAAを割り込みうるため.fix-contrast.mdと
+     同じ方針で余裕を持たせた)。ink-subも同値のため同じ補正。 */
+  --ink-sub: color-mix(in srgb, var(--ink) 30%, #657B83 70%);
+  --ink-mute: color-mix(in srgb, var(--ink) 30%, #657B83 70%);
   --line: #D3CBB7;
   --rule: #D3CBB7;
   --accent: #268BD2;
@@ -253,6 +314,18 @@ html[data-theme="light"][data-light-theme="solarized-light"] {
      実測コントラスト比は2.77で9テーマ中もっとも低い。var(--ink)へ52%だけ寄せた
      #345761に補正する(実測4.87、丸め誤差への余裕は上の--accent-inkと同じ理由)。 */
   --chrome-fg: color-mix(in srgb, var(--ink-mute) 48%, var(--ink) 52%);
+  /* UI点検第2弾 指摘4の修正で追加。上でvar(--ink-mute)自体を補正済みのため、
+     var(--code-bg)に対しても実測5.00でAA基準を満たす。var(--ink-mute)のまま問題ない。 */
+  --code-linenum-fg: var(--ink-mute);
+  /* UI点検第2弾 指摘7の修正で追加。var(--surface)(#EEE8D5)とvar(--danger)(このテーマは
+     --dangerを上書きしていないため既定ライト値#B03A2Eのまま)の実測コントラスト比は
+     4.91でAA基準を満たすため、var(--surface)のまま問題ない。 */
+  --danger-ink: var(--surface);
+  /* UI点検第2弾 指摘13の修正で追加(根拠はファイル冒頭のコメント参照)。 */
+  --input-bg: var(--paper);
+  --danger-soft: color-mix(in srgb, var(--danger) 8%, var(--paper));
+  --pre-bg: var(--code-bg);
+  --pre-ink: var(--ink);
 }
 
 /* ---- ダーク用プリセット ---- */
@@ -281,7 +354,15 @@ html[data-theme="dark"][data-dark-theme="nord"] {
   --surface: #3B4252;
   --ink: #ECEFF4;
   --ink-sub: #D8DEE9;
-  --ink-mute: #9AA5B1;
+  /* UI点検第2弾(.review-ui.md 指摘4)の修正: 元の#9AA5B1(nord4を暗めに調整した値)は
+     サイドバー(--surface #3B4252)に対し実測4.02、--accent-soft(#3B4A52、
+     アウトラインのh4-h6見出しにマウスを乗せたときの帯色)に対しても実測4.36で
+     AA(4.5)未満だった(本文--paper・コードブロック--code-bgに対しては元々AAを
+     満たす)。var(--ink)へ30%だけcolor-mix()で寄せて補正する(補正後の実測:
+     vs sidebar-bg 5.19 / vs accent-soft 4.74。境界ぎりぎりの混合率は丸め誤差で
+     AAを割り込みうるため.fix-contrast.mdと同じ方針で余裕を持たせた)。--ink-subは
+     元々どちらもAAを満たすため変更しない。 */
+  --ink-mute: color-mix(in srgb, var(--ink) 30%, #9AA5B1 70%);
   --line: #434C5E;
   --rule: #434C5E;
   --accent: #88C0D0;
@@ -320,6 +401,19 @@ html[data-theme="dark"][data-dark-theme="nord"] {
   /* UI点検 指摘3の修正で追加。var(--ink-mute)とvar(--chrome-bg)の実測コントラスト比は
      5.83でAA基準を満たすため、var(--ink-mute)のまま問題ない。 */
   --chrome-fg: var(--ink-mute);
+  /* UI点検第2弾 指摘4の修正で追加。上でvar(--ink-mute)自体を補正済みのため、
+     var(--code-bg)に対しても実測7.38でAA基準を満たす。var(--ink-mute)のまま問題ない。 */
+  --code-linenum-fg: var(--ink-mute);
+  /* UI点検第2弾 指摘7の修正で追加。var(--surface)(#3B4252)とvar(--danger)(このテーマは
+     --dangerを上書きしていないため既定ダーク値#E07B6Eのまま)の実測コントラスト比は
+     3.46でAA未満(9テーマ中もっとも低い)。--surfaceを黒へ30%だけcolor-mix()で
+     寄せて補正する(実測4.67。丸め誤差への余裕は--accent-ink等と同じ方針)。 */
+  --danger-ink: color-mix(in srgb, black 30%, var(--surface) 70%);
+  /* UI点検第2弾 指摘13の修正で追加(根拠はファイル冒頭のコメント参照)。 */
+  --input-bg: var(--paper);
+  --danger-soft: color-mix(in srgb, var(--danger) 15%, var(--paper));
+  --pre-bg: var(--code-bg);
+  --pre-ink: var(--ink);
 }
 
 /* dracula: Dracula配色。
@@ -349,7 +443,12 @@ html[data-theme="dark"][data-dark-theme="dracula"] {
   --surface: #343746;
   --ink: #F8F8F2;
   --ink-sub: #B4B9D6;
-  --ink-mute: #8892B0;
+  /* UI点検第2弾(自主点検で追加発見。指摘4と同根): 元の#8892B0は本文・サイドバー・
+     コードブロックに対しては元々AAを満たすが、--accent-soft(#3B3D52、アウトラインの
+     h4-h6見出しにマウスを乗せたときの帯色)に対しては実測3.44でAA(4.5)未満だった。
+     var(--ink)へ30%だけcolor-mix()で寄せて補正する(補正後の実測: vs accent-soft
+     4.94。他の背景に対する余裕もさらに増すだけで問題ない)。 */
+  --ink-mute: color-mix(in srgb, var(--ink) 30%, #8892B0 70%);
   --line: #44475A;
   --rule: #44475A;
   --accent: #BD93F9;
@@ -394,6 +493,19 @@ html[data-theme="dark"][data-dark-theme="dracula"] {
   /* UI点検 指摘3の修正で追加。var(--ink-mute)とvar(--chrome-bg)の実測コントラスト比は
      5.48でAA基準を満たすため、var(--ink-mute)のまま問題ない。 */
   --chrome-fg: var(--ink-mute);
+  /* UI点検第2弾 指摘4の修正で追加。var(--ink-mute)とvar(--code-bg)の実測コントラスト比は
+     5.24でAA基準を満たすため、var(--ink-mute)のまま問題ない。 */
+  --code-linenum-fg: var(--ink-mute);
+  /* UI点検第2弾 指摘7の修正で追加。var(--surface)(#343746)とvar(--danger)(このテーマは
+     --dangerを上書きしていないため既定ダーク値#E07B6Eのまま)の実測コントラスト比は
+     4.06でAA未満。--surfaceを黒へ20%だけcolor-mix()で寄せて補正する(実測4.77。
+     丸め誤差への余裕は--accent-ink等と同じ方針)。 */
+  --danger-ink: color-mix(in srgb, black 20%, var(--surface) 80%);
+  /* UI点検第2弾 指摘13の修正で追加(根拠はファイル冒頭のコメント参照)。 */
+  --input-bg: var(--paper);
+  --danger-soft: color-mix(in srgb, var(--danger) 15%, var(--paper));
+  --pre-bg: var(--code-bg);
+  --pre-ink: var(--ink);
 }
 
 /* solarized-dark: Solarizedのダーク側。
@@ -423,8 +535,21 @@ html[data-theme="dark"][data-dark-theme="solarized-dark"] {
   --paper: #002B36;
   --surface: #073642;
   --ink: #93A1A1;
-  --ink-sub: #839496;
-  --ink-mute: #586E75;
+  /* UI点検第2弾(.review-ui.md 指摘5、自主点検でaccent-soft分も追加発見)の修正:
+     元の#839496(Solarizedのbase0)は--surface(#073642)に対し実測4.11、
+     --accent-soft(#0E4B5E、アウトラインh4-h6見出しホバー等の帯色)に対し実測3.73で
+     AA(4.5)未満だった(--paperに対しては4.75でぎりぎり満たす)。このテーマの
+     --ink(#93A1A1)は中間トーンで十分な明るさが無いため(--accent-ink/--chrome-fgの
+     補正時と同じ判断)、白へ35%だけcolor-mix()で寄せて補正する(補正後の実測:
+     vs surface 6.50 / vs paper 7.51 / vs accent-soft 4.80)。 */
+  --ink-sub: color-mix(in srgb, white 35%, #839496 65%);
+  /* UI点検第2弾(.review-ui.md 指摘4、自主点検でaccent-soft分も追加発見)の修正:
+     元の#586E75(Solarizedのbase01)はサイドバー(--surface #073642)・コードブロック
+     (--code-bg #001F2A)・本文(--paper #002B36)・--accent-soft(#0E4B5E)いずれに
+     対しても実測2.79〜3.59でAA(4.5)未満だった(9テーマ中もっとも低い部類)。同じ
+     理由で白へ55%だけcolor-mix()で寄せて補正する(補正後の実測: vs sidebar-bg
+     6.84 / vs code-bg 8.99 / vs paper 7.90 / vs accent-soft 5.05)。 */
+  --ink-mute: color-mix(in srgb, white 55%, #586E75 45%);
   --line: #0A3C4A;
   --rule: #0A3C4A;
   --accent: #268BD2;
@@ -474,6 +599,19 @@ html[data-theme="dark"][data-dark-theme="solarized-dark"] {
      実測コントラスト比は2.99で9テーマ中もっとも低い部類。白へ25%だけ寄せた#829298に
      補正する(実測5.00、丸め誤差への余裕は上の--accent-inkと同じ理由)。 */
   --chrome-fg: color-mix(in srgb, var(--ink-mute) 75%, white 25%);
+  /* UI点検第2弾 指摘4の修正で追加。上でvar(--ink-mute)自体を補正済みのため、
+     var(--code-bg)に対しても実測6.39でAA基準を満たす。var(--ink-mute)のまま問題ない。 */
+  --code-linenum-fg: var(--ink-mute);
+  /* UI点検第2弾 指摘7の修正で追加。var(--surface)(#073642)とvar(--danger)(このテーマは
+     --dangerを上書きしていないため既定ダーク値#E07B6Eのまま)の実測コントラスト比は
+     4.47でAA未満(僅かに届かない)。--surfaceを黒へ10%だけcolor-mix()で寄せて補正する
+     (実測4.80。丸め誤差への余裕は--accent-ink等と同じ方針)。 */
+  --danger-ink: color-mix(in srgb, black 10%, var(--surface) 90%);
+  /* UI点検第2弾 指摘13の修正で追加(根拠はファイル冒頭のコメント参照)。 */
+  --input-bg: var(--paper);
+  --danger-soft: color-mix(in srgb, var(--danger) 15%, var(--paper));
+  --pre-bg: var(--code-bg);
+  --pre-ink: var(--ink);
 }
 
 /* night: Typoraの「Night」テーマ移植(ユーザー要望、id/ラベルは実機フィードバックで
@@ -614,8 +752,21 @@ html[data-theme="dark"][data-dark-theme="night"] {
      まま送られていた)。根拠・機序の詳細はstyle.css :rootブロックのコメント参照。
      --inkをそのまま使う(実測コントラスト比7.96:1)。 */
   --titlebar-fg: var(--ink);
-  --ink-sub: #838A92;
-  --ink-mute: #6A7280;
+  /* UI点検第2弾(.review-ui.md 指摘5、自主点検でaccent-soft分も追加発見)の修正:
+     元の#838A92(Typora Nightのmeta-content-color)は--paper(#363B40)に対し実測
+     3.24、--surfaceに対し実測3.79、--accent-soft(#3C4851、アウトラインh4-h6見出し
+     ホバー等の帯色)に対し実測4.16でいずれもAA(4.5)未満だった。このテーマの
+     --ink(#b8bfc6)も中間トーンで十分な明るさが無いため(--accent-ink等の補正時と
+     同じ判断)、白へ40%だけcolor-mix()で寄せて補正する(補正後の実測: vs surface
+     6.69 / vs paper 5.72 / vs accent-soft 4.74)。 */
+  --ink-sub: color-mix(in srgb, white 40%, #838A92 60%);
+  /* UI点検第2弾(.review-ui.md 指摘4、自主点検でaccent-soft分も追加発見)の修正:
+     元の#6A7280(Typora Nightのmd-char-color)はサイドバー(--surface #2E3033)・
+     本文(--paper #363B40)・--accent-soft(#3C4851)いずれに対しても実測2.33〜4.04で
+     AA(4.5)未満だった(9テーマ中もっとも低い)。同じ理由で白へ50%だけcolor-mix()で
+     寄せて補正する(補正後の実測: vs sidebar-bg 6.68 / vs code-bg 7.08 / vs paper
+     5.71 / vs accent-soft 4.74)。 */
+  --ink-mute: color-mix(in srgb, white 50%, #6A7280 50%);
   --line: #555555;
   --rule: #555555;
   --accent: #6dc1e7;
@@ -655,4 +806,16 @@ html[data-theme="dark"][data-dark-theme="night"] {
      割り込むことがあるため(sepiaの--accent-ink定義部コメント参照)、45%(#8D95A0)に
      補正する(実測4.88)。 */
   --chrome-fg: color-mix(in srgb, var(--ink-mute) 55%, var(--ink) 45%);
+  /* UI点検第2弾 指摘4の修正で追加。上でvar(--ink-mute)自体を補正済みのため、
+     var(--code-bg)に対しても実測6.04でAA基準を満たす。var(--ink-mute)のまま問題ない。 */
+  --code-linenum-fg: var(--ink-mute);
+  /* UI点検第2弾 指摘7の修正で追加。var(--surface)(#2E3033)とvar(--danger)(このテーマは
+     --dangerを上書きしていないため既定ダーク値#E07B6Eのまま)の実測コントラスト比は
+     4.56でAA基準を満たすため、var(--surface)のまま問題ない。 */
+  --danger-ink: var(--surface);
+  /* UI点検第2弾 指摘13の修正で追加(根拠はファイル冒頭のコメント参照)。 */
+  --input-bg: var(--paper);
+  --danger-soft: color-mix(in srgb, var(--danger) 15%, var(--paper));
+  --pre-bg: var(--code-bg);
+  --pre-ink: var(--ink);
 }

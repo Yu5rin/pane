@@ -2,7 +2,7 @@ namespace Pane.Tests;
 
 /// <summary>
 /// ログに文書の絶対パスやリンク先URLが大量に平文で残っていた不具合
-/// (.review-security.md B、<see cref="PrivacyLogFormatter"/>)の修正を固定するテスト。
+/// (docs/調査記録/点検-セキュリティ.md B、<see cref="PrivacyLogFormatter"/>)の修正を固定するテスト。
 ///
 /// Paneのログ(%LOCALAPPDATA%\Pane\logs)は利用者が開発者へ送る運用があり、既定(Info)の
 /// ログに Windows のユーザーフォルダ(C:\Users\本名\...)や外部リンクのクエリ文字列
