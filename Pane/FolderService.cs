@@ -110,9 +110,17 @@ internal static class FolderService
 
             var result = new FolderScanResult(fullRoot, Path.GetFileName(fullRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)), entries, truncated);
 
-            // 打ち切った結果(MaxEntriesに達した)は不完全なので使い回さない。
+            // 打ち切った結果(MaxEntriesに達した)も使い回す。
+            //
+            // 【実際に落ちたこと】最初はここを `if (!truncated)` にしていた。「不完全な結果は
+            // 使い回さない」という理屈だったが、実機ログ(2026-09-05)で使い回しが1度も
+            // 起きなかった。直そうとしていたダウンロードフォルダがまさに1万件で打ち切られる
+            // フォルダで、この条件がそれを丸ごと除外していた。
+            // 打ち切りは走査の失敗ではなく、走査し直しても同じところで打ち切られる。
+            // 不完全さは使い回しとは無関係。
+            //
             // 返した結果は読むだけ(呼び出し側で書き換えない)前提で共有する。
-            if (!truncated) ScanCache.Set(BuildCacheKey(fullRoot, showHiddenFiles, excludePatterns), result);
+            ScanCache.Set(BuildCacheKey(fullRoot, showHiddenFiles, excludePatterns), result);
 
             return result;
         }, ct);
