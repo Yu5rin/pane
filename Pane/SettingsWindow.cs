@@ -371,7 +371,11 @@ internal sealed class SettingsWindow : Form
     private void OnLoadAsync(object? sender, EventArgs e)
     {
         bool alreadyStarted = _initializeWebViewTask is not null;
-        Logger.Write($"SettingsWindow.OnLoadAsync開始 (事前生成{(alreadyStarted ? "が先に初期化を始めていた" : "はまだ始まっていなかった → ここから初期化する")})");
+        // alreadyStartedは「初期化が既に始まっているか」であって、その理由が事前生成とは限らない
+        // (Revealが始めた場合も真になる)。実機ログ(2026-09-06)で、事前生成を設定でオフに
+        // しているのに「事前生成が先に初期化を始めていた」と出て紛らわしかったため、
+        // 事前生成に触れない書き方へ改めた。
+        Logger.Write($"SettingsWindow.OnLoadAsync開始 (初期化は{(alreadyStarted ? "既に始まっていた" : "まだ始まっていなかった → ここから始める")})");
         _ = EnsureWebViewInitializedAsync().ContinueWith(
             t => Logger.WriteException("SettingsWindow: OnLoadAsync経由の初期化に失敗", t.Exception!),
             TaskContinuationOptions.OnlyOnFaulted);

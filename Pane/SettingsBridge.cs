@@ -39,6 +39,7 @@ internal static class SettingsBridge
             startupFolderPath = settings.StartupFolderPath,
             quitOnLastWindowClosed = settings.QuitOnLastWindowClosed,
             preloadOnStartup = settings.PreloadOnStartup,
+            pregenerateWindows = settings.PregenerateWindows,
             showStatusBar = settings.ShowStatusBar,
             showOutlineByDefault = settings.ShowOutlineByDefault,
             collapsibleOutline = settings.CollapsibleOutline,
@@ -442,6 +443,7 @@ internal static class SettingsBridge
             }
             if (TryGetBool(s, "quitOnLastWindowClosed", out bool quitOnLastWindowClosed)) settings.QuitOnLastWindowClosed = quitOnLastWindowClosed;
             if (TryGetBool(s, "preloadOnStartup", out bool preloadOnStartup)) settings.PreloadOnStartup = preloadOnStartup;
+            if (TryGetBool(s, "pregenerateWindows", out bool pregenerateWindows)) settings.PregenerateWindows = pregenerateWindows;
             if (TryGetBool(s, "showStatusBar", out bool showStatusBar)) settings.ShowStatusBar = showStatusBar;
             if (TryGetBool(s, "showOutlineByDefault", out bool showOutlineByDefault)) settings.ShowOutlineByDefault = showOutlineByDefault;
             if (TryGetBool(s, "collapsibleOutline", out bool collapsibleOutline)) settings.CollapsibleOutline = collapsibleOutline;

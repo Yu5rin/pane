@@ -122,13 +122,17 @@ internal sealed class PaneApplicationContext : ApplicationContext
         // なるが、EnsureEnvironmentAsync自体がロックで多重呼び出しに対応しているため競合しない
         // (SettingsWindow.OnLoadAsyncも同じEnsureEnvironmentAsyncを呼ぶので、先に完了していれば
         // そのままキャッシュを使う)。
+        // 設定「設定と取扱説明書の画面をあらかじめ用意しておく」(仕様書 C-15)がオフなら、
+        // タイマー自体を回さない(実行側でも同じ判定をするが、無駄に起こさないため)。
+        bool pregenerate = IsPregenerationEnabled();
+
         _settingsPregenerateTimer = new System.Windows.Forms.Timer { Interval = SettingsPregenerateFallbackMs };
         _settingsPregenerateTimer.Tick += (_, _) =>
         {
             _settingsPregenerateTimer.Stop();
             PregenerateSettingsWindow();
         };
-        _settingsPregenerateTimer.Start();
+        if (pregenerate) _settingsPregenerateTimer.Start();
 
         _helpPregenerateTimer = new System.Windows.Forms.Timer { Interval = HelpPregenerateFallbackMs };
         _helpPregenerateTimer.Tick += (_, _) =>
@@ -136,7 +140,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
             _helpPregenerateTimer.Stop();
             PregenerateHelpWindow();
         };
-        _helpPregenerateTimer.Start();
+        if (pregenerate) _helpPregenerateTimer.Start();
 
         _startupUpdateCheckTimer = new System.Windows.Forms.Timer { Interval = StartupUpdateCheckDelayMs };
         _startupUpdateCheckTimer.Tick += (_, _) =>
@@ -370,10 +374,18 @@ internal sealed class PaneApplicationContext : ApplicationContext
         }
 
         // [計測] 仕様書 第8.4節の数値目標のうち、これまで測る手立てが無かった2つを記録する。
-        //   ・2枚目以降のウィンドウ追加メモリ(目標60MB以内)
+        //   ・2枚目以降のウィンドウ追加メモリ(目標110MB以内)
         //   ・既存インスタンスへのファイル追加表示(目標300ms以内。パイプ経由の要求が対象)
         // 1枚目は「起動」であってこの目標の対象外なので、2枚目以降だけを見る。
-        bool measureAdditionalWindow = _windows.Count > 0;
+        //
+        // 【実際に困ったこと】以前は枚数の上限を設けず、開くたびに毎回測っていた。
+        // メモリの計測(MeasureTotalMemoryBytes)はWebView2のプロセスを1つずつ開いて
+        // WorkingSetを足す処理で、ウィンドウが増えるほど数えるプロセスも増える。
+        // 実機ログ(2026-09-06)では2枚目で53ms、17枚目では157msかかっており、しかも
+        // ウィンドウを開く前と後の2回、UIスレッドの上で走っていた。
+        // 目標そのものは「2枚目以降のウィンドウ」であって17枚目を測る必要はないため、
+        // 確認に足りる枚数で打ち切る。
+        bool measureAdditionalWindow = _windows.Count > 0 && _windows.Count < MeasuredWindowLimit;
         bool memoryBeforeOwnOnly = false;
         long memoryBeforeBytes = measureAdditionalWindow ? MeasureTotalMemoryBytes(out memoryBeforeOwnOnly) : 0;
         var windowStopwatch = measureAdditionalWindow ? System.Diagnostics.Stopwatch.StartNew() : null;
@@ -479,7 +491,19 @@ internal sealed class PaneApplicationContext : ApplicationContext
             System.Diagnostics.Stopwatch stopwatch = windowStopwatch!;
             form.ReadyToUse += () =>
             {
+                // 【実際に間違えたこと】以前はこの下のMeasureTotalMemoryBytesを先に呼び、
+                // そのあとで stopwatch.ElapsedMilliseconds を読んでいた。メモリの計測は
+                // WebView2のプロセスを1つずつ開いてWorkingSetを足す処理で、ウィンドウが
+                // 増えるほど数えるプロセスも増える。その所要時間(実機で56〜82ms)が
+                // 「表示まで」に足し込まれ、2枚目302ms・6枚目357msと、目標の300msを
+                // 超えたように見えていた(実際は246〜278msで収まっていた)。
+                // 枚数が増えるほど報告値だけが伸びるのが、その兆候だった。
+                // 測り終えた時刻は、他のことをする前にここで確定させる。
+                long elapsedMs = stopwatch.ElapsedMilliseconds;
+
+                long measureStart = System.Diagnostics.Stopwatch.GetTimestamp();
                 long afterBytes = MeasureTotalMemoryBytes(out bool ownOnly);
+                long measureMs = (long)System.Diagnostics.Stopwatch.GetElapsedTime(measureStart).TotalMilliseconds;
                 long deltaMb = (afterBytes - beforeBytes) / (1024 * 1024);
                 // 前後で数え方が変わっていたら、その差は比べられない(片方に他アプリのぶんが
                 // 入っている)。黙って数字だけ出すと読み違えるので、その旨を添える。
@@ -491,9 +515,10 @@ internal sealed class PaneApplicationContext : ApplicationContext
                     _ => "メモリはPane本体とWebView2の各プロセスの合計。WebView2環境がまだ無く実行ファイル名で数えたため、" +
                          "他のアプリのWebView2が動いていると多めに出る",
                 };
-                Logger.Write($"[計測] {_windows.Count}枚目のウィンドウ: 表示まで{stopwatch.ElapsedMilliseconds}ms, " +
-                             $"メモリ増加{deltaMb}MB (目標: 表示300ms以内・メモリ60MB以内。{memoryNote})");
-                PerfWatch.Report($"{_windows.Count}枚目のウィンドウの表示", stopwatch.ElapsedMilliseconds, 300);
+                Logger.Write($"[計測] {_windows.Count}枚目のウィンドウ: 表示まで{elapsedMs}ms, " +
+                             $"メモリ増加{deltaMb}MB (目標: 表示300ms以内・メモリ110MB以内。{memoryNote}。" +
+                             $"このメモリ計測自体に{measureMs}msかかっており、表示までの時間には含めていない)");
+                PerfWatch.Report($"{_windows.Count}枚目のウィンドウの表示", elapsedMs, 300);
             };
         }
 
@@ -534,6 +559,13 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// それらのプロセスも同じ名前で並ぶ。実機では2枚目のウィンドウのメモリ増加が373MBと
     /// 出ていたが、これは他のアプリのぶんを一緒に数えていた疑いが強く、数字として当てにならない。
     /// </summary>
+    /// <summary>
+    /// [計測] 仕様書8.4節の確認としてメモリと表示時間を測るウィンドウの上限。
+    /// この枚数に達したら測らない(理由は<see cref="OpenWindow"/>の該当箇所を参照)。
+    /// 2枚目から5枚目までを見れば、目標(2枚目以降のウィンドウ)の確認には足りる。
+    /// </summary>
+    private const int MeasuredWindowLimit = 5;
+
     private static long MeasureTotalMemoryBytes(out bool measuredOwnProcessesOnly)
     {
         long total = 0;
@@ -550,17 +582,39 @@ internal sealed class PaneApplicationContext : ApplicationContext
             {
                 // この環境が持っているプロセスだけを数える。他のアプリのWebView2は別の環境なので
                 // ここには出てこない。
+                //
+                // 種別ごとの内訳も残す。実機ログ(2026-09-06)でこの内訳を採ったところ、
+                // ウィンドウを1枚増やすと Renderer が1つ増えて84〜97MB、Browser(147→160MB)・
+                // Gpu(78→82MB)・Utility(59MB)はほぼ一定だった。つまり増えるぶんはすべて
+                // レンダラーで、同じプロセス内でも共有されない。これを根拠に仕様書8.4節の
+                // 目標を60MB以内から110MB以内へ改めている。
+                // 今後この数字が変わったとき(WebView2の更新など)に気づけるよう、内訳は残す。
+                var byKind = new Dictionary<string, (int Count, long Bytes)>();
                 foreach (Microsoft.Web.WebView2.Core.CoreWebView2ProcessInfo info in env.GetProcessInfos())
                 {
                     try
                     {
                         using System.Diagnostics.Process p = System.Diagnostics.Process.GetProcessById(info.ProcessId);
                         total += p.WorkingSet64;
+
+                        string kind = info.Kind.ToString();
+                        (int Count, long Bytes) sum = byKind.TryGetValue(kind, out var current) ? current : (0, 0L);
+                        byKind[kind] = (sum.Count + 1, sum.Bytes + p.WorkingSet64);
                     }
                     catch (ArgumentException)
                     {
                         // 数え終わる前に終了したプロセス。数に入れないだけでよい。
                     }
+                }
+                if (byKind.Count > 0)
+                {
+                    string breakdown = string.Join(", ", byKind
+                        .OrderByDescending(entry => entry.Value.Bytes)
+                        .Select(entry => $"{entry.Key}×{entry.Value.Count}={entry.Value.Bytes / (1024 * 1024)}MB"));
+                    // 詳細ログ(Debug)にすると、実機で確かめてもらうたびに設定の変更をお願いする
+                    // ことになる。測るのは最初の数枚だけ(MeasuredWindowLimit)で行数も増えないため、
+                    // 既定のログに出す。
+                    Logger.Write($"[計測] メモリの内訳(WebView2): {breakdown}");
                 }
                 measuredOwnProcessesOnly = true;
                 return total;
@@ -855,8 +909,11 @@ internal sealed class PaneApplicationContext : ApplicationContext
         // タイマーの開始をReveal側に一本化した(SettingsWindow.Revealのコメント参照)ため、
         // ここでもRevealを通さないとそのタイマーが一生始動しない新規作成パスができてしまう。
         _settingsWindow!.Reveal(owner, category);
+        // 事前生成が設定でオフのときに「間に合っていなかった」と書くと、走ったのに遅れたように
+        // 読める(実機ログ2026-09-06で実際に紛らわしかった)。オフのときはそう書く。
+        string pregenerateNote = IsPregenerationEnabled() ? "事前生成は間に合っていなかった" : "事前生成は設定でオフ";
         Logger.Write(isNew
-            ? $"OpenSettingsWindow: 新規に開いた(事前生成は間に合っていなかった, {sw.ElapsedMilliseconds}ms)"
+            ? $"OpenSettingsWindow: 新規に開いた({pregenerateNote}, {sw.ElapsedMilliseconds}ms)"
             : $"OpenSettingsWindow: 既存インスタンスを表示({(_settingsWindow.IsRevealed ? "事前生成/前回分の読み込み完了済み" : "まだ読み込み中")}, {sw.ElapsedMilliseconds}ms)");
     }
 
@@ -886,6 +943,16 @@ internal sealed class PaneApplicationContext : ApplicationContext
     {
         if (_settingsWindow is not null && _helpWindow is not null) return;
 
+        // 設定「設定と取扱説明書の画面をあらかじめ用意しておく」(仕様書 C-15、既定オン)。
+        // オフのときは何も先回りしない。開いたその場で作る従来の経路(OpenSettingsWindow /
+        // OpenHelpWindow)に落ちるだけで、初回の表示が遅くなる代わりに、まだ開いていない
+        // 画面ぶんのWebView2描画プロセス(実機で約160MB)を使わずに済む。
+        if (!IsPregenerationEnabled())
+        {
+            Logger.Debug("事前生成: 設定で無効になっているため行わない");
+            return;
+        }
+
         if (_settingsWindow is null)
         {
             _settingsPregenerateTimer.Stop();
@@ -901,8 +968,31 @@ internal sealed class PaneApplicationContext : ApplicationContext
         Logger.Debug("事前生成: 本体ウィンドウが使える状態になったので、ここから数え直す");
     }
 
+    /// <summary>設定「設定と取扱説明書の画面をあらかじめ用意しておく」の現在値。
+    /// 設定が読めなければ既定(用意する)に倒す。</summary>
+    private static bool IsPregenerationEnabled()
+    {
+        try
+        {
+            return SettingsService.Load().PregenerateWindows;
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException("事前生成: 設定を読めなかったため既定(用意する)で続ける", ex);
+            return true;
+        }
+    }
+
     private void PregenerateSettingsWindow()
     {
+        // 【実際に漏らしたこと】最初はSchedulePregenerationAfterFirstWindowにだけ
+        // 設定の判定を置いていた。だが事前生成にはもう1つ、コンストラクタで始まる
+        // タイマー(本体ウィンドウのReadyToUseが来なかったときの保険。preload起動では
+        // 常にこちらが働く)からの経路がある。実機ログ(2026-09-06)で、設定をオフに
+        // したのに取扱説明書の事前生成が走っていた。
+        // 入口が複数あるものは、入口ごとではなく実行する側で塞ぐ。
+        if (!IsPregenerationEnabled()) return;
+
         if (_settingsWindow is not null) return;
         SettingsWindow? window = null;
         try
@@ -942,8 +1032,9 @@ internal sealed class PaneApplicationContext : ApplicationContext
             _helpWindow.FormClosed += (_, _) => _helpWindow = null;
         }
         _helpWindow!.Reveal(owner);
+        string helpPregenerateNote = IsPregenerationEnabled() ? "事前生成は間に合っていなかった" : "事前生成は設定でオフ";
         Logger.Write(isNew
-            ? $"OpenHelpWindow: 新規に開いた(事前生成は間に合っていなかった, {sw.ElapsedMilliseconds}ms)"
+            ? $"OpenHelpWindow: 新規に開いた({helpPregenerateNote}, {sw.ElapsedMilliseconds}ms)"
             : $"OpenHelpWindow: 既存インスタンスを表示({(_helpWindow.IsRevealed ? "事前生成/前回分の読み込み完了済み" : "まだ読み込み中")}, {sw.ElapsedMilliseconds}ms)");
     }
 
@@ -954,6 +1045,9 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// </summary>
     private void PregenerateHelpWindow()
     {
+        // 設定の判定はここでも行う(理由はPregenerateSettingsWindowの説明を参照)。
+        if (!IsPregenerationEnabled()) return;
+
         if (_helpWindow is not null) return;
         HelpWindow? window = null;
         try

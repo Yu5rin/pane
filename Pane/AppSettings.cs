@@ -146,6 +146,19 @@ internal sealed class AppSettings
     /// 高速化するか(StartupServiceでHKCU\...\Run に登録)。</summary>
     public bool PreloadOnStartup { get; set; }
 
+    /// <summary>
+    /// 設定・取扱説明書の画面を、本体ウィンドウが落ち着いたあとに先回りして用意しておくか
+    /// (仕様書 C-15)。既定true。
+    ///
+    /// 実測(2026-09-06)で、設定画面の初回表示はオンなら35ms・オフなら134ms。
+    /// 引き換えに、まだ開いていない画面ぶんのWebView2描画プロセスが2つ増える(約160MB)。
+    /// 差が100ms程度に収まるのは、重い部分(フォント列挙とPandoc検出)を起動直後に
+    /// 済ませてあるため(<see cref="Program"/>のWarmUpForSettingsWindow)。
+    /// メモリを優先したい場合に切れるようにする
+    /// (docs/調査記録/調査-ウィンドウ表示の300ms超過.md)。
+    /// </summary>
+    public bool PregenerateWindows { get; set; } = true;
+
     /// <summary>ステータスバーの表示(仕様書外・一般的なテキストエディタ相当)。既定true。JS側で効かせる。</summary>
     public bool ShowStatusBar { get; set; } = true;
 
