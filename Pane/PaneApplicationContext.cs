@@ -122,13 +122,17 @@ internal sealed class PaneApplicationContext : ApplicationContext
         // なるが、EnsureEnvironmentAsync自体がロックで多重呼び出しに対応しているため競合しない
         // (SettingsWindow.OnLoadAsyncも同じEnsureEnvironmentAsyncを呼ぶので、先に完了していれば
         // そのままキャッシュを使う)。
+        // 設定「設定と取扱説明書の画面をあらかじめ用意しておく」(仕様書 C-15)がオフなら、
+        // タイマー自体を回さない(実行側でも同じ判定をするが、無駄に起こさないため)。
+        bool pregenerate = IsPregenerationEnabled();
+
         _settingsPregenerateTimer = new System.Windows.Forms.Timer { Interval = SettingsPregenerateFallbackMs };
         _settingsPregenerateTimer.Tick += (_, _) =>
         {
             _settingsPregenerateTimer.Stop();
             PregenerateSettingsWindow();
         };
-        _settingsPregenerateTimer.Start();
+        if (pregenerate) _settingsPregenerateTimer.Start();
 
         _helpPregenerateTimer = new System.Windows.Forms.Timer { Interval = HelpPregenerateFallbackMs };
         _helpPregenerateTimer.Tick += (_, _) =>
@@ -136,7 +140,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
             _helpPregenerateTimer.Stop();
             PregenerateHelpWindow();
         };
-        _helpPregenerateTimer.Start();
+        if (pregenerate) _helpPregenerateTimer.Start();
 
         _startupUpdateCheckTimer = new System.Windows.Forms.Timer { Interval = StartupUpdateCheckDelayMs };
         _startupUpdateCheckTimer.Tick += (_, _) =>
@@ -978,6 +982,14 @@ internal sealed class PaneApplicationContext : ApplicationContext
 
     private void PregenerateSettingsWindow()
     {
+        // 【実際に漏らしたこと】最初はSchedulePregenerationAfterFirstWindowにだけ
+        // 設定の判定を置いていた。だが事前生成にはもう1つ、コンストラクタで始まる
+        // タイマー(本体ウィンドウのReadyToUseが来なかったときの保険。preload起動では
+        // 常にこちらが働く)からの経路がある。実機ログ(2026-09-06)で、設定をオフに
+        // したのに取扱説明書の事前生成が走っていた。
+        // 入口が複数あるものは、入口ごとではなく実行する側で塞ぐ。
+        if (!IsPregenerationEnabled()) return;
+
         if (_settingsWindow is not null) return;
         SettingsWindow? window = null;
         try
@@ -1029,6 +1041,9 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// </summary>
     private void PregenerateHelpWindow()
     {
+        // 設定の判定はここでも行う(理由はPregenerateSettingsWindowの説明を参照)。
+        if (!IsPregenerationEnabled()) return;
+
         if (_helpWindow is not null) return;
         HelpWindow? window = null;
         try

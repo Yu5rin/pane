@@ -1299,7 +1299,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
         ${fieldCheckbox("preloadOnStartup", "PCの起動時からあらかじめ常駐しておく(起動が速くなります)",
           "こちらは「PCの起動直後から常駐するか」の設定です(上の項目とは独立して動作します)。")}
         ${fieldCheckbox("pregenerateWindows", "設定と取扱説明書の画面をあらかじめ用意しておく(初回表示が速くなります)",
-          "オフにするとメモリの使用量が減りますが、設定画面を初めて開くときに数秒待つことがあります。")}
+          "オフにするとメモリの使用量が約160MB減ります。初めて開くときの待ちは少し伸びます(実測で35ms→134ms)。")}
       </div>
       <div class="settings-group">
         <div class="settings-group-title">ヘルプ</div>
