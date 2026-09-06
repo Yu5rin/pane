@@ -909,8 +909,11 @@ internal sealed class PaneApplicationContext : ApplicationContext
         // タイマーの開始をReveal側に一本化した(SettingsWindow.Revealのコメント参照)ため、
         // ここでもRevealを通さないとそのタイマーが一生始動しない新規作成パスができてしまう。
         _settingsWindow!.Reveal(owner, category);
+        // 事前生成が設定でオフのときに「間に合っていなかった」と書くと、走ったのに遅れたように
+        // 読める(実機ログ2026-09-06で実際に紛らわしかった)。オフのときはそう書く。
+        string pregenerateNote = IsPregenerationEnabled() ? "事前生成は間に合っていなかった" : "事前生成は設定でオフ";
         Logger.Write(isNew
-            ? $"OpenSettingsWindow: 新規に開いた(事前生成は間に合っていなかった, {sw.ElapsedMilliseconds}ms)"
+            ? $"OpenSettingsWindow: 新規に開いた({pregenerateNote}, {sw.ElapsedMilliseconds}ms)"
             : $"OpenSettingsWindow: 既存インスタンスを表示({(_settingsWindow.IsRevealed ? "事前生成/前回分の読み込み完了済み" : "まだ読み込み中")}, {sw.ElapsedMilliseconds}ms)");
     }
 
@@ -1029,8 +1032,9 @@ internal sealed class PaneApplicationContext : ApplicationContext
             _helpWindow.FormClosed += (_, _) => _helpWindow = null;
         }
         _helpWindow!.Reveal(owner);
+        string helpPregenerateNote = IsPregenerationEnabled() ? "事前生成は間に合っていなかった" : "事前生成は設定でオフ";
         Logger.Write(isNew
-            ? $"OpenHelpWindow: 新規に開いた(事前生成は間に合っていなかった, {sw.ElapsedMilliseconds}ms)"
+            ? $"OpenHelpWindow: 新規に開いた({helpPregenerateNote}, {sw.ElapsedMilliseconds}ms)"
             : $"OpenHelpWindow: 既存インスタンスを表示({(_helpWindow.IsRevealed ? "事前生成/前回分の読み込み完了済み" : "まだ読み込み中")}, {sw.ElapsedMilliseconds}ms)");
     }
 

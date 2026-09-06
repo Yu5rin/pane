@@ -230,7 +230,8 @@ internal sealed class HelpWindow : Form
     private void OnLoadAsync(object? sender, EventArgs e)
     {
         bool alreadyStarted = _initializeWebViewTask is not null;
-        Logger.Write($"HelpWindow.OnLoadAsync開始 (事前生成{(alreadyStarted ? "が先に初期化を始めていた" : "はまだ始まっていなかった → ここから初期化する")})");
+        // 理由はSettingsWindowの同じ箇所を参照(事前生成とは限らないため、そう書かない)。
+        Logger.Write($"HelpWindow.OnLoadAsync開始 (初期化は{(alreadyStarted ? "既に始まっていた" : "まだ始まっていなかった → ここから始める")})");
         _ = EnsureWebViewInitializedAsync().ContinueWith(
             t => Logger.WriteException("HelpWindow: OnLoadAsync経由の初期化に失敗", t.Exception!),
             TaskContinuationOptions.OnlyOnFaulted);
