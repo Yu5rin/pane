@@ -28,6 +28,7 @@
     <Compile Include="../Pane/UpdateLeftoverPolicy.cs" Link="取り込み/UpdateLeftoverPolicy.cs" />
     <Compile Include="../Pane/UpdateProcessWaitPolicy.cs" Link="取り込み/UpdateProcessWaitPolicy.cs" />
     <Compile Include="../Pane/TimedCache.cs" Link="取り込み/TimedCache.cs" />
+    <Compile Include="../Pane/ExceptionDetail.cs" Link="取り込み/ExceptionDetail.cs" />
     <Compile Include="../Pane/FileEncodingKind.cs" Link="取り込み/FileEncodingKind.cs" />
     <Compile Include="../Pane/EncodingLossGuard.cs" Link="取り込み/EncodingLossGuard.cs" />
     <Compile Include="../Pane/StartupPathResolver.cs" Link="取り込み/StartupPathResolver.cs" />

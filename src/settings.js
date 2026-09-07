@@ -2095,9 +2095,21 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     if (updatePhase === "applying" || updatePhase === "failed") {
       const percent = updateProgress && typeof updateProgress.percent === "number" ? updateProgress.percent : -1;
       const isError = updatePhase === "failed";
+      // 失敗したときは、手で入れ替えるための導線を残す。
+      // 【なぜ要るか】更新のダウンロードだけが通らないネットワーク(会社のプロキシ等)が
+      // 実際にある。そこでは自動更新が何度やっても終わらないので、リリースページから
+      // 自分で取ってきて入れ替える道が要る(仕様書はもともと手動更新を許容している)。
+      // 以前はここでボタンを出しておらず、失敗した人ほど導線を失っていた。
+      const failedActions = isError && updateCheckResult && updateCheckResult.releaseUrl
+        ? `<div class="settings-info-row">
+          <button type="button" class="btn tiny" data-update-action="open-release">リリースページを開く</button>
+        </div>
+        <div class="settings-field-desc">自動で更新できない場合は、リリースページからZipを取得して、いまのPane.exeとdistフォルダを置き換えてください。</div>`
+        : "";
       body = `
         <div class="settings-update-status${isError ? " error" : ""}">${escapeHtml((updateProgress && updateProgress.message) || "")}</div>
-        ${percent >= 0 ? `<div class="settings-update-bar"><span style="width:${Math.max(0, Math.min(100, percent))}%"></span></div>` : ""}`;
+        ${percent >= 0 ? `<div class="settings-update-bar"><span style="width:${Math.max(0, Math.min(100, percent))}%"></span></div>` : ""}
+        ${failedActions}`;
     } else if (updatePhase === "checked" && updateCheckResult) {
       const r = updateCheckResult;
       const sizeText = r.sizeBytes > 0 ? `（約${Math.round(r.sizeBytes / (1024 * 1024))}MB）` : "";

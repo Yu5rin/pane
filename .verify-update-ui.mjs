@@ -219,6 +219,20 @@ const sectionText = (page) =>
   ok("(B) 失敗後も「更新を確認」を押し直せる",
     !(await page.$eval('[data-update-action="check"]', (b) => b.disabled)));
 
+  // 失敗したときこそ、手で入れ替えるための導線が要る。
+  // 【なぜ固定するか】更新のダウンロードだけが通らないネットワーク(会社のプロキシ等)が
+  // 実際にある。そこでは自動更新が何度やっても終わらないので、リリースページから
+  // 自分で取ってくる道が残っていないと詰む。以前はここでボタンを出しておらず、
+  // 失敗した人ほど導線を失っていた。
+  ok("(B) 失敗しても「リリースページを開く」が出る",
+    (await page.$('[data-update-action="open-release"]')) !== null);
+  ok("(B) 失敗時に手で入れ替える方法を案内する",
+    (await sectionText(page)).includes("Zipを取得"));
+  await page.click('[data-update-action="open-release"]');
+  await page.waitForTimeout(200);
+  ok("(B) 失敗時のボタンからもリリースページを開ける",
+    (await sentTypes(page)).includes("open-release-page"));
+
   await page.close();
 }
 
