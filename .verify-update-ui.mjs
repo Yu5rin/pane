@@ -233,6 +233,43 @@ const sectionText = (page) =>
   ok("(B) 失敗時のボタンからもリリースページを開ける",
     (await sentTypes(page)).includes("open-release-page"));
 
+  // ---- 通信を確かめる(仕様書 U-08) ----
+  //
+  // 【なぜこの入口が要るか】会社のネットワークで、更新の確認は通るのに配布物の
+  // ダウンロードだけが失敗する事例があった。原因を追うログを入れた版を配っても、
+  // それを入れた時点で「最新版だから更新するものが無い」状態になり、ダウンロードを
+  // 試す手段そのものが消える。最新版のままでも通信だけを試せる入口が要る。
+  ok("(B) 「通信を確かめる」ボタンがある",
+    (await page.$('[data-update-action="check-connection"]')) !== null);
+  await page.click('[data-update-action="check-connection"]');
+  await page.waitForTimeout(200);
+  ok("(B) 押すとcheck-connectionを送る", (await sentTypes(page)).includes("check-connection"));
+  ok("(B) 確認中はボタンを押せない",
+    await page.$eval('[data-update-action="check-connection"]', (b) => b.disabled));
+
+  await page.evaluate(() => window.__reply({
+    type: "connection-check-result", ok: true,
+    message: "配布物の置き場まで届きました（256KBを受け取って確認を終えました）。",
+    logFolderPath: "C:\\Users\\Test\\AppData\\Local\\Pane\\logs",
+  }));
+  await page.waitForTimeout(200);
+  ok("(B) 成功の結果が出る", (await sectionText(page)).includes("配布物の置き場まで届きました"));
+  ok("(B) 成功はエラー表示にしない",
+    (await page.$$(".settings-update-status.error")).length === 0
+    || !(await page.$eval(".settings-update-status.error", (e) => e.textContent)).includes("届きました"));
+  ok("(B) 結果のあとボタンを押し直せる",
+    !(await page.$eval('[data-update-action="check-connection"]', (b) => b.disabled)));
+
+  await page.evaluate(() => window.__reply({
+    type: "connection-check-result", ok: false,
+    message: "配布物の置き場から 403 が返りました。ネットワークの経路で止められている可能性があります。",
+    logFolderPath: "",
+  }));
+  await page.waitForTimeout(200);
+  ok("(B) 失敗の結果はエラーとして出る",
+    (await page.$(".settings-update-status.error")) !== null
+    && (await sectionText(page)).includes("403"));
+
   await page.close();
 }
 

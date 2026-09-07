@@ -245,6 +245,23 @@ internal static class SettingsBridge
     }
 
     /// <summary>
+    /// { type: "check-connection" } を受けて、配布物の置き場へ実際に接続してみる
+    /// (仕様書 U-08)。更新はしない。詳しい内訳はログに残し、画面には結果だけ返す。
+    /// </summary>
+    public static async Task HandleCheckConnectionRequestAsync(Action<object> postToWeb)
+    {
+        UpdateService.ConnectionCheckResult result =
+            await UpdateService.CheckConnectionAsync(SettingsService.Load());
+        postToWeb(new
+        {
+            type = "connection-check-result",
+            ok = result.Ok,
+            message = result.Message,
+            logFolderPath = Path.GetDirectoryName(Logger.FilePath) ?? "",
+        });
+    }
+
+    /// <summary>
     /// { type: "apply-update" } を受けて、ダウンロード・検証・入れ替え・再起動を行う
     /// (仕様書 U-03・U-04)。
     ///

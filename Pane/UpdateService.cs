@@ -473,6 +473,115 @@ internal static class UpdateService
         }
     }
 
+    /// <summary>
+    /// 通信の確認(仕様書 U-08)の結果。画面へ短く出す用。詳しい内訳はログに残す。
+    /// </summary>
+    internal sealed record ConnectionCheckResult(bool Ok, string Message);
+
+    /// <summary>「通信を確かめる」で受け取ってみるバイト数。繋がるかどうかを見るのが
+    /// 目的なので、配布物すべて(70MB超)を落とす必要は無い。</summary>
+    private const int ConnectionProbeBytes = 256 * 1024;
+
+    /// <summary>「通信を確かめる」の待ち時間の上限。</summary>
+    private static readonly TimeSpan ConnectionCheckTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// 配布物の置き場へ実際に接続して、何が返ってくるかをログに残す(仕様書 U-08)。
+    ///
+    /// 【なぜ「更新の確認」と別に要るか】
+    /// 会社のネットワークで、更新の確認は通るのにダウンロードだけが失敗する、という
+    /// 報告があった。原因を調べるには失敗したときのログが要るが、そのログを出す版を
+    /// 会社のPCへ入れると今度は「最新版だから更新するものが無い」状態になり、
+    /// ダウンロードを試す手段そのものが無くなってしまう。
+    /// 最新版のままでも通信だけを試せる入口が要る。
+    ///
+    /// 受け取るのは先頭の一部だけで、ファイルは保存しない(更新はしない)。
+    /// </summary>
+    public static async Task<ConnectionCheckResult> CheckConnectionAsync(AppSettings settings)
+    {
+        Logger.Write("更新の通信確認: 開始");
+        UpdateCheckResult info;
+        try
+        {
+            info = await CheckAsync(settings);
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"更新の通信確認: 配布元への問い合わせに失敗: {ExceptionDetail.Summarize(ex)}");
+            return new ConnectionCheckResult(false, $"配布元へ問い合わせられませんでした。{ExceptionMessages.Describe(ex)}");
+        }
+
+        // 最新版でも試せることが要点なので、status は見ない。見るのは「Zipの置き場が
+        // 分かったかどうか」だけ。分からなければ、その事実自体が手がかりになる。
+        if (string.IsNullOrEmpty(info.DownloadUrl))
+        {
+            Logger.Warn($"更新の通信確認: 配布物のURLが分からなかった(status={info.Status}, message={info.Message})");
+            return new ConnectionCheckResult(false,
+                "配布物の場所が分かりませんでした。問い合わせの段階で止まっています。詳しくはログを確認してください。");
+        }
+
+        Logger.Write($"更新の通信確認: 配布物へ接続する: {info.DownloadUrl}");
+        LogNetworkEnvironmentOnce(info.DownloadUrl);
+        using var cts = new CancellationTokenSource(ConnectionCheckTimeout);
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, info.DownloadUrl);
+            request.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/octet-stream"));
+            using HttpResponseMessage response = await Http.SendAsync(
+                request, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+
+            string finalUrl = response.RequestMessage?.RequestUri?.ToString() ?? "(不明)";
+            string contentType = response.Content.Headers.ContentType?.ToString() ?? "(なし)";
+            string via = response.Headers.TryGetValues("Via", out var viaValues) ? string.Join(",", viaValues) : "(なし)";
+            long? length = response.Content.Headers.ContentLength;
+            Logger.Write($"更新の通信確認: 応答 {(int)response.StatusCode} {response.StatusCode}, " +
+                         $"Content-Type={contentType}, Content-Length={length?.ToString() ?? "(なし)"}, Via={via}");
+            Logger.Write($"更新の通信確認: 転送先={finalUrl}");
+
+            if (!response.IsSuccessStatusCode)
+            {
+                return new ConnectionCheckResult(false,
+                    $"配布物の置き場から {(int)response.StatusCode} が返りました。ネットワークの経路で止められている可能性があります。");
+            }
+
+            // 先頭だけ受け取って切る。ここまで来れば「繋がって中身が流れてくる」ことは分かる。
+            long received = 0;
+            using (Stream source = await response.Content.ReadAsStreamAsync(cts.Token))
+            {
+                var buffer = new byte[81920];
+                int read;
+                while (received < ConnectionProbeBytes && (read = await source.ReadAsync(buffer, cts.Token)) > 0)
+                {
+                    received += read;
+                }
+            }
+            Logger.Write($"更新の通信確認: {received}バイトを受け取れた(先頭のみ。ファイルは保存していない)");
+
+            // 中身がZipではなくHTMLだった場合、途中の中継がエラーページを返している。
+            if (contentType.Contains("text/html", StringComparison.OrdinalIgnoreCase))
+            {
+                return new ConnectionCheckResult(false,
+                    "配布物ではなくWebページが返りました。ネットワークの経路で差し替えられている可能性があります。");
+            }
+            if (received <= 0)
+            {
+                return new ConnectionCheckResult(false, "接続はできましたが、中身を受け取れませんでした。");
+            }
+            return new ConnectionCheckResult(true,
+                $"配布物の置き場まで届きました（{received / 1024}KBを受け取って確認を終えました）。");
+        }
+        catch (OperationCanceledException)
+        {
+            Logger.Warn($"更新の通信確認: {ConnectionCheckTimeout.TotalSeconds}秒以内に応答がなかった");
+            return new ConnectionCheckResult(false, "時間内に応答がありませんでした。");
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"更新の通信確認に失敗: {ExceptionDetail.Summarize(ex)}");
+            return new ConnectionCheckResult(false, $"配布物の置き場へ接続できませんでした。{ExceptionMessages.Describe(ex)}");
+        }
+    }
+
     /// <summary>この起動で1回だけ、通信環境をログに残したか。</summary>
     private static bool _networkEnvironmentLogged;
 
