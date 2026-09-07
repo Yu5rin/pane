@@ -9,7 +9,7 @@ import { createSearchUI, refreshOpenSearchCount } from "./search-ui.js";
 import { createSidebar } from "./sidebar.js";
 import { createQuickOpen } from "./quick-open.js";
 import { createWordCountPopup } from "./word-count.js";
-import { htmlToMarkdown } from "./html-to-markdown.js";
+import { htmlToMarkdown, htmlIsPlainTextLike } from "./html-to-markdown.js";
 import { parseFrontMatterOverrides } from "./md-to-html.js";
 import { resolveFileMode, codeLanguages } from "./languages.js";
 import { FILE_TYPES } from "./file-types.js";
@@ -1306,7 +1306,10 @@ const editor = createEditor(host, {
       insertImageFile(imageFile);
       return true;
     }
-    if (html) {
+    // 書式が何も無いHTML(各行を<div>や<p>で包んだだけのもの)は、変換しても得るものが
+    // 無いどころか、段落の区切りとして空行が入って行数がほぼ倍になる。プレーンテキストを
+    // そのまま貼る側(return false)に任せる(htmlIsPlainTextLike参照)。
+    if (html && !htmlIsPlainTextLike(html)) {
       const md = htmlToMarkdown(html).trim();
       if (md) {
         lastPasteLength = md.length;
