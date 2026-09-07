@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO.Compression;
+using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -81,7 +82,10 @@ internal static class UpdateService
     {
         var client = new HttpClient();
         client.DefaultRequestHeaders.Add("User-Agent", "Pane-Updater");
-        client.DefaultRequestHeaders.Add("Accept", "application/vnd.github+json");
+        // Acceptは要求ごとに付ける。以前はここで "application/vnd.github+json" を
+        // 既定にしていたため、Zipを取りに行く要求にまで「JSONをください」と言っていた。
+        // GitHub自体は無視するが、中身とヘッダの不一致を見る経路(会社のプロキシ等)を
+        // 通るときに弾かれる余地を残す必要は無い。
         return client;
     }
 
@@ -171,7 +175,12 @@ internal static class UpdateService
             // 1回ぶんの上限(CheckTimeout)と全体の上限(totalCts)の、早く来たほうで打ち切る。
             using var apiCts = CancellationTokenSource.CreateLinkedTokenSource(totalCts.Token);
             apiCts.CancelAfter(CheckTimeout);
-            string json = await Http.GetStringAsync(url, apiCts.Token);
+            // GitHub APIへの要求。Acceptは要求ごとに付ける(CreateHttpClientのコメント参照)。
+            using var apiRequest = new HttpRequestMessage(HttpMethod.Get, url);
+            apiRequest.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+            using HttpResponseMessage apiResponse = await Http.SendAsync(apiRequest, apiCts.Token);
+            apiResponse.EnsureSuccessStatusCode();
+            string json = await apiResponse.Content.ReadAsStringAsync(apiCts.Token);
 
             using JsonDocument doc = JsonDocument.Parse(json);
             JsonElement root = doc.RootElement;
@@ -384,13 +393,38 @@ internal static class UpdateService
         string zipPath = Path.Combine(directory, "Pane-update.zip");
 
         Logger.Write($"更新のダウンロード開始: {info.DownloadUrl}");
+        LogNetworkEnvironmentOnce(info.DownloadUrl);
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(DownloadTimeout);
 
+        long receivedBytes = 0;
         try
         {
-            using HttpResponseMessage response = await Http.GetAsync(
-                info.DownloadUrl, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+            using var request = new HttpRequestMessage(HttpMethod.Get, info.DownloadUrl);
+            // Zipを取りに行く要求なので、JSONではなくバイト列を要求する。
+            request.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/octet-stream"));
+            using HttpResponseMessage response = await Http.SendAsync(
+                request, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+
+            // 【何のためのログか】会社のPCで「確認はできるがダウンロードだけ失敗する」
+            // という報告があり、原因の切り分けにはここが要る
+            // (docs/調査記録/修正-更新の失敗を追えるようにする.md)。
+            //   ・最終URL … github.com は objects.githubusercontent.com へ転送される。
+            //                転送先だけ許可されていない構成かどうかが分かる
+            //   ・状態コード … 403(拒否)・407(プロキシ認証)の区別
+            //   ・Content-Type … 中身がZipではなくプロキシのエラーページに
+            //                    すり替わっていないか(text/html なら典型的にそれ)
+            //   ・Via / X-Cache … 途中に中継が入っているか
+            string finalUrl = response.RequestMessage?.RequestUri?.ToString() ?? "(不明)";
+            string contentType = response.Content.Headers.ContentType?.ToString() ?? "(なし)";
+            string via = response.Headers.TryGetValues("Via", out var viaValues) ? string.Join(",", viaValues) : "(なし)";
+            Logger.Write($"更新のダウンロード: 応答 {(int)response.StatusCode} {response.StatusCode}, " +
+                         $"Content-Type={contentType}, Content-Length={response.Content.Headers.ContentLength?.ToString() ?? "(なし)"}, " +
+                         $"Via={via}");
+            if (!string.Equals(finalUrl, info.DownloadUrl, StringComparison.Ordinal))
+            {
+                Logger.Write($"更新のダウンロード: 転送先={finalUrl}");
+            }
             response.EnsureSuccessStatusCode();
 
             long total = response.Content.Headers.ContentLength ?? info.SizeBytes;
@@ -408,6 +442,7 @@ internal static class UpdateService
                 {
                     await destination.WriteAsync(buffer.AsMemory(0, read), cts.Token);
                     received += read;
+                    receivedBytes = received;
                     if (received > limit)
                     {
                         throw new InvalidDataException(
@@ -426,10 +461,159 @@ internal static class UpdateService
             Logger.Write($"更新のダウンロード完了: {zipPath} ({new FileInfo(zipPath).Length}バイト)");
             return zipPath;
         }
-        catch
+        catch (Exception ex)
         {
+            // ここで必ず記録する。以前は握らずthrowするだけで、呼び出し元(SettingsBridge)の
+            // ログには「更新の適用に失敗」としか残らず、ダウンロードのどこで落ちたのか
+            // (そもそも繋がらなかったのか、途中で切れたのか)が分からなかった。
+            Logger.Error($"更新のダウンロードに失敗: {ExceptionDetail.Summarize(ex)} " +
+                         $"(受信済み {receivedBytes}バイト / 想定 {info.SizeBytes}バイト)");
             TryDeleteDirectory(directory);
             throw;
+        }
+    }
+
+    /// <summary>
+    /// 通信の確認(仕様書 U-08)の結果。画面へ短く出す用。詳しい内訳はログに残す。
+    /// </summary>
+    internal sealed record ConnectionCheckResult(bool Ok, string Message);
+
+    /// <summary>「通信を確かめる」で受け取ってみるバイト数。繋がるかどうかを見るのが
+    /// 目的なので、配布物すべて(70MB超)を落とす必要は無い。</summary>
+    private const int ConnectionProbeBytes = 256 * 1024;
+
+    /// <summary>「通信を確かめる」の待ち時間の上限。</summary>
+    private static readonly TimeSpan ConnectionCheckTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// 配布物の置き場へ実際に接続して、何が返ってくるかをログに残す(仕様書 U-08)。
+    ///
+    /// 【なぜ「更新の確認」と別に要るか】
+    /// 会社のネットワークで、更新の確認は通るのにダウンロードだけが失敗する、という
+    /// 報告があった。原因を調べるには失敗したときのログが要るが、そのログを出す版を
+    /// 会社のPCへ入れると今度は「最新版だから更新するものが無い」状態になり、
+    /// ダウンロードを試す手段そのものが無くなってしまう。
+    /// 最新版のままでも通信だけを試せる入口が要る。
+    ///
+    /// 受け取るのは先頭の一部だけで、ファイルは保存しない(更新はしない)。
+    /// </summary>
+    public static async Task<ConnectionCheckResult> CheckConnectionAsync(AppSettings settings)
+    {
+        Logger.Write("更新の通信確認: 開始");
+        UpdateCheckResult info;
+        try
+        {
+            info = await CheckAsync(settings);
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"更新の通信確認: 配布元への問い合わせに失敗: {ExceptionDetail.Summarize(ex)}");
+            return new ConnectionCheckResult(false, $"配布元へ問い合わせられませんでした。{ExceptionMessages.Describe(ex)}");
+        }
+
+        // 最新版でも試せることが要点なので、status は見ない。見るのは「Zipの置き場が
+        // 分かったかどうか」だけ。分からなければ、その事実自体が手がかりになる。
+        if (string.IsNullOrEmpty(info.DownloadUrl))
+        {
+            Logger.Warn($"更新の通信確認: 配布物のURLが分からなかった(status={info.Status}, message={info.Message})");
+            return new ConnectionCheckResult(false,
+                "配布物の場所が分かりませんでした。問い合わせの段階で止まっています。詳しくはログを確認してください。");
+        }
+
+        Logger.Write($"更新の通信確認: 配布物へ接続する: {info.DownloadUrl}");
+        LogNetworkEnvironmentOnce(info.DownloadUrl);
+        using var cts = new CancellationTokenSource(ConnectionCheckTimeout);
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, info.DownloadUrl);
+            request.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/octet-stream"));
+            using HttpResponseMessage response = await Http.SendAsync(
+                request, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+
+            string finalUrl = response.RequestMessage?.RequestUri?.ToString() ?? "(不明)";
+            string contentType = response.Content.Headers.ContentType?.ToString() ?? "(なし)";
+            string via = response.Headers.TryGetValues("Via", out var viaValues) ? string.Join(",", viaValues) : "(なし)";
+            long? length = response.Content.Headers.ContentLength;
+            Logger.Write($"更新の通信確認: 応答 {(int)response.StatusCode} {response.StatusCode}, " +
+                         $"Content-Type={contentType}, Content-Length={length?.ToString() ?? "(なし)"}, Via={via}");
+            Logger.Write($"更新の通信確認: 転送先={finalUrl}");
+
+            if (!response.IsSuccessStatusCode)
+            {
+                return new ConnectionCheckResult(false,
+                    $"配布物の置き場から {(int)response.StatusCode} が返りました。ネットワークの経路で止められている可能性があります。");
+            }
+
+            // 先頭だけ受け取って切る。ここまで来れば「繋がって中身が流れてくる」ことは分かる。
+            long received = 0;
+            using (Stream source = await response.Content.ReadAsStreamAsync(cts.Token))
+            {
+                var buffer = new byte[81920];
+                int read;
+                while (received < ConnectionProbeBytes && (read = await source.ReadAsync(buffer, cts.Token)) > 0)
+                {
+                    received += read;
+                }
+            }
+            Logger.Write($"更新の通信確認: {received}バイトを受け取れた(先頭のみ。ファイルは保存していない)");
+
+            // 中身がZipではなくHTMLだった場合、途中の中継がエラーページを返している。
+            if (contentType.Contains("text/html", StringComparison.OrdinalIgnoreCase))
+            {
+                return new ConnectionCheckResult(false,
+                    "配布物ではなくWebページが返りました。ネットワークの経路で差し替えられている可能性があります。");
+            }
+            if (received <= 0)
+            {
+                return new ConnectionCheckResult(false, "接続はできましたが、中身を受け取れませんでした。");
+            }
+            return new ConnectionCheckResult(true,
+                $"配布物の置き場まで届きました（{received / 1024}KBを受け取って確認を終えました）。");
+        }
+        catch (OperationCanceledException)
+        {
+            Logger.Warn($"更新の通信確認: {ConnectionCheckTimeout.TotalSeconds}秒以内に応答がなかった");
+            return new ConnectionCheckResult(false, "時間内に応答がありませんでした。");
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"更新の通信確認に失敗: {ExceptionDetail.Summarize(ex)}");
+            return new ConnectionCheckResult(false, $"配布物の置き場へ接続できませんでした。{ExceptionMessages.Describe(ex)}");
+        }
+    }
+
+    /// <summary>この起動で1回だけ、通信環境をログに残したか。</summary>
+    private static bool _networkEnvironmentLogged;
+
+    /// <summary>
+    /// 通信がどの経路を通るのかをログに残す(この起動で1回だけ)。
+    ///
+    /// 会社のネットワークでは、Windowsの設定やPACファイルによってプロキシ経由になることが
+    /// 多い。プロキシを通っているのかどうかが分かるだけで、切り分けの幅がかなり狭まる。
+    /// アドレス自体は社内のホスト名なので、既定のログにはホストとポートだけを出す。
+    /// </summary>
+    private static void LogNetworkEnvironmentOnce(string url)
+    {
+        if (_networkEnvironmentLogged) return;
+        _networkEnvironmentLogged = true;
+        try
+        {
+            var target = new Uri(url);
+            IWebProxy proxy = HttpClient.DefaultProxy;
+            Uri? via = proxy.GetProxy(target);
+            if (via is null)
+            {
+                Logger.Write($"更新の通信: プロキシを経由しない(宛先 {target.Host})");
+            }
+            else
+            {
+                Logger.Write($"更新の通信: プロキシを経由する({via.Host}:{via.Port}, 宛先 {target.Host}, " +
+                             $"資格情報={(proxy.Credentials is null ? "なし" : "あり")})");
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug($"更新の通信: 経路を調べられなかった: {ex.GetType().Name}");
         }
     }
 

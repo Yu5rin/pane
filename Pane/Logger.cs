@@ -270,7 +270,9 @@ internal static class Logger
 
     public static void WriteException(string context, Exception ex)
     {
-        Error($"{context}: {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
+        // 内部例外の連鎖まで出す。ネットワークの失敗は本当の理由がInnerExceptionに
+        // 入っており、外側の型名だけでは切り分けに使えない(ExceptionDetail参照)。
+        Error($"{context}: {ExceptionDetail.Summarize(ex)}\n{ex.StackTrace}");
     }
 
     private static void Enqueue(LogLevel level, string message)

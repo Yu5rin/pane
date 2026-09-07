@@ -72,12 +72,17 @@ function block(node, out, ctx) {
       continue;
     }
     if (tag === "ul" || tag === "ol") {
+      // 【実際に落ちたこと】以前は項目を1つずつoutへpushしていた。outは最後に "\n\n" で
+      // 連結されるため、項目の間に空行が入って「ゆるいリスト」(各項目が段落として描かれる)に
+      // なっていた。表と同じく、リストは1つのブロックとしてまとめてから積む。
       let i = 1;
+      const items = [];
       for (const li of child.children) {
         if (li.tagName.toLowerCase() !== "li") continue;
         const prefix = tag === "ol" ? `${i++}. ` : "- ";
-        out.push(prefix + inline(li).trim());
+        items.push(prefix + inline(li).trim());
       }
+      if (items.length) out.push(items.join("\n"));
       continue;
     }
     if (tag === "table") {
@@ -96,6 +101,44 @@ function block(node, out, ctx) {
     if (tag === "br") continue;
     // 未対応のブロック要素は中身を再帰的に見る(div/section/article相当の包括タグ対策)
     block(child, out, ctx);
+  }
+}
+
+// 「書式」と呼べる要素。1つも無ければ、そのHTMLはただの行の並びであって、
+// Markdownへ変換しても得るものが無い(htmlIsPlainTextLike参照)。
+const MEANINGFUL_TAGS = [
+  "h1", "h2", "h3", "h4", "h5", "h6",
+  "ul", "ol", "table", "pre", "blockquote", "hr",
+  "a[href]", "img",
+  "strong", "b", "em", "i", "code", "del", "s", "strike", "mark", "sup", "sub",
+].join(",");
+
+/**
+ * クリップボードのHTMLが「書式を持たない、ただの行の並び」かどうか。
+ *
+ * 【なぜ要るか】
+ * メールソフトやテキスト系のアプリは、ただの複数行テキストをコピーしたときにも
+ * text/html を一緒に載せる。その中身は各行を <div> や <p> で包んだだけのことが多い。
+ * これをMarkdownへ変換すると、htmlToMarkdown は段落の区切りとして空行を入れるため、
+ * 行数がほぼ倍になる。実機で21行のテキストを貼って35行になった
+ * (docs/調査記録/修正-貼り付けで改行が増える.md)。
+ *
+ * 行頭の全角スペースが消える・連続した半角スペースが1つに縮む、といった副作用もある。
+ * HTMLの空白の扱いとしては正しいが、書式が何も無いHTMLに対してそこまでする理由は無い。
+ *
+ * 見出し・リスト・表・引用・コード・リンク・画像・強調のどれか1つでもあれば、
+ * 変換する値打ちがあるものとして従来どおり htmlToMarkdown に回す。
+ */
+export function htmlIsPlainTextLike(html) {
+  if (!html) return false;
+  // 危険な入力は htmlToMarkdown 側が空文字を返して自動的にプレーンテキストへ落ちる。
+  // ここで判定を試みてDOMParserを走らせる必要は無い(そのコストこそ避けたいもの)。
+  if (isHtmlInputTooDangerous(html)) return false;
+  try {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    return !doc.body.querySelector(MEANINGFUL_TAGS);
+  } catch {
+    return false;
   }
 }
 

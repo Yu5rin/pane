@@ -520,6 +520,11 @@ internal sealed class SettingsWindow : Form
             // 更新の確認と適用(仕様書 U-01・U-04)。利用者がボタンを押したときだけ通信する。
             // どちらも待ち時間があるため非同期で走らせ、結果は update-check-result /
             // update-progress として画面へ返す(ここでawaitするとUIが固まる)。
+            case "check-connection":
+                // 仕様書 U-08「通信を確かめる」。更新はせず、配布物の置き場へ接続してみるだけ。
+                _ = SettingsBridge.HandleCheckConnectionRequestAsync(PostToWeb);
+                break;
+
             case "check-update":
                 _ = SettingsBridge.HandleCheckUpdateRequestAsync(PostToWeb);
                 break;

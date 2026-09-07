@@ -567,6 +567,9 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
   // 設定ウィンドウを開いている間だけ保持すればよいので、保存はしない。
   let updatePhase = "idle";
   let updateCheckResult = null;
+  // 「通信を確かめる」(仕様書 U-08)の結果。{ ok, message, logFolderPath } または null。
+  let connectionCheckResult = null;
+  let connectionChecking = false;
   let updateProgress = null; // { message, percent } percentが0未満なら進捗バーを出さない
 
   // キーバインドタブの状態。
@@ -594,6 +597,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
       // ときだけ意味を持つが、閉じている間に届いても状態だけ更新しておけば、
       // 開き直したときにそのまま最後の結果が出る。
       if (msg.type === "update-check-result") { handleUpdateCheckResult(msg); return; }
+      if (msg.type === "connection-check-result") { handleConnectionCheckResult(msg); return; }
       if (msg.type === "update-progress") { handleUpdateProgress(msg); return; }
     });
   }
@@ -2095,9 +2099,21 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     if (updatePhase === "applying" || updatePhase === "failed") {
       const percent = updateProgress && typeof updateProgress.percent === "number" ? updateProgress.percent : -1;
       const isError = updatePhase === "failed";
+      // 失敗したときは、手で入れ替えるための導線を残す。
+      // 【なぜ要るか】更新のダウンロードだけが通らないネットワーク(会社のプロキシ等)が
+      // 実際にある。そこでは自動更新が何度やっても終わらないので、リリースページから
+      // 自分で取ってきて入れ替える道が要る(仕様書はもともと手動更新を許容している)。
+      // 以前はここでボタンを出しておらず、失敗した人ほど導線を失っていた。
+      const failedActions = isError && updateCheckResult && updateCheckResult.releaseUrl
+        ? `<div class="settings-info-row">
+          <button type="button" class="btn tiny" data-update-action="open-release">リリースページを開く</button>
+        </div>
+        <div class="settings-field-desc">自動で更新できない場合は、リリースページからZipを取得して、いまのPane.exeとdistフォルダを置き換えてください。</div>`
+        : "";
       body = `
         <div class="settings-update-status${isError ? " error" : ""}">${escapeHtml((updateProgress && updateProgress.message) || "")}</div>
-        ${percent >= 0 ? `<div class="settings-update-bar"><span style="width:${Math.max(0, Math.min(100, percent))}%"></span></div>` : ""}`;
+        ${percent >= 0 ? `<div class="settings-update-bar"><span style="width:${Math.max(0, Math.min(100, percent))}%"></span></div>` : ""}
+        ${failedActions}`;
     } else if (updatePhase === "checked" && updateCheckResult) {
       const r = updateCheckResult;
       const sizeText = r.sizeBytes > 0 ? `（約${Math.round(r.sizeBytes / (1024 * 1024))}MB）` : "";
@@ -2112,13 +2128,26 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     // 問い合わせ先を隠さずに出す(仕様書 U-02)。どこへ通信するのかを、設定ファイルを
     // 開かなくてもこの画面で確かめられるようにするため。
     const url = draft.updateCheckUrl || "";
+    // 「通信を確かめる」(仕様書 U-08)。更新が要らない状態(最新版)でも押せることが要点で、
+    // 会社のネットワーク等で配布物のダウンロードだけが通らない場合の切り分けに使う。
+    const connectionLabel = connectionChecking ? "確かめています…" : "通信を確かめる";
+    const connectionBody = connectionCheckResult
+      ? `<div class="settings-update-status${connectionCheckResult.ok ? "" : " error"}">${escapeHtml(connectionCheckResult.message)}</div>
+         <div class="settings-field-desc">詳しい内訳はログに残しています。${connectionCheckResult.logFolderPath ? `（${escapeHtml(connectionCheckResult.logFolderPath)}）` : ""}</div>`
+      : "";
     return `
       <p class="settings-intro">確認と更新は、下のボタンを押したときにだけ行います。自動では通信しません。</p>
       <div class="settings-info-row">
         <button type="button" class="btn tiny" data-update-action="check"${busy ? " disabled" : ""}>${escapeHtml(checkLabel)}</button>
       </div>
       ${body}
-      ${url ? `<div class="settings-field-desc">問い合わせ先: ${escapeHtml(url)}</div>` : ""}`;
+      ${url ? `<div class="settings-field-desc">問い合わせ先: ${escapeHtml(url)}</div>` : ""}
+      <div class="settings-group-title" style="margin-top:16px">うまく更新できないとき</div>
+      <div class="settings-info-row">
+        <button type="button" class="btn tiny" data-update-action="check-connection"${connectionChecking ? " disabled" : ""}>${escapeHtml(connectionLabel)}</button>
+      </div>
+      <div class="settings-field-desc">配布物の置き場まで実際に接続してみます。更新はしません（先頭の一部だけ受け取って切ります）。</div>
+      ${connectionBody}`;
   }
 
   // 更新セクションだけを描き直す。バージョン情報タブを開いていなければ何もしない
@@ -2150,6 +2179,13 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
       ctx.bridge.postMessage({ type: "open-release-page" });
       return;
     }
+    if (action === "check-connection") {
+      connectionChecking = true;
+      connectionCheckResult = null;
+      refreshUpdateSection();
+      ctx.bridge.postMessage({ type: "check-connection" });
+      return;
+    }
     if (action === "apply") {
       // 入れ替えのあと自動で再起動するため、始める前に必ず確認する
       // (押し間違いで作業中のウィンドウが閉じてしまうのを防ぐ)。
@@ -2178,6 +2214,16 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
       releaseUrl: msg.releaseUrl || "",
       canApply: !!msg.canApply,
       sizeBytes: typeof msg.sizeBytes === "number" ? msg.sizeBytes : 0,
+    };
+    refreshUpdateSection();
+  }
+
+  function handleConnectionCheckResult(msg) {
+    connectionChecking = false;
+    connectionCheckResult = {
+      ok: !!msg.ok,
+      message: msg.message || "",
+      logFolderPath: msg.logFolderPath || "",
     };
     refreshUpdateSection();
   }
