@@ -1307,10 +1307,11 @@ const editor = createEditor(host, {
       return true;
     }
     // 書式が何も無いHTML(各行を<div>や<p>で包んだだけのもの)は、変換しても得るものが
-    // 無いどころか、段落の区切りとして空行が入って行数がほぼ倍になる。プレーンテキストを
-    // そのまま貼る側(return false)に任せる(htmlIsPlainTextLike参照)。
-    if (html && !htmlIsPlainTextLike(html)) {
-      const md = htmlToMarkdown(html).trim();
+    // 無いどころか、段落の区切りとして空行が入って行数がほぼ倍になる。その場合は
+    // markdownFromClipboardHtmlがnullを返し、プレーンテキストをそのまま貼る側
+    // (return false)に落ちる。
+    {
+      const md = markdownFromClipboardHtml(html);
       if (md) {
         lastPasteLength = md.length;
         editor.pasteText(md);
@@ -1905,6 +1906,23 @@ function buildEditorContextMenuTree(c, e) {
 // (navigator.clipboard.read())でHTML/画像/プレーンテキストを順に試す。onPasteと同じ優先順位
 // (HTML→画像→プレーン)に揃える。read()自体が使えない/権限が無い環境ではプレーンテキスト
 // 貼り付け(既存のpasteAsPlainText経路)へフォールバックする。
+/**
+ * クリップボードのHTMLから、貼り付けるMarkdownを作る。書式が何も無いHTML
+ * (=変換しても得るものが無い)なら null を返し、呼び出し側はプレーンテキストへ落とす。
+ *
+ * 【なぜ関数にまとめてあるか】
+ * 貼り付けの入口は2つある。Ctrl+Vなどの本物のpasteイベント(onPaste)と、
+ * 右クリック・編集メニューからの pasteRichFromContextMenu である。
+ * 最初にこの判定を入れたとき onPaste にしか置かず、右クリックからの貼り付けでは
+ * 空行が入ったままだった(利用者からの再指摘で気づいた)。
+ * 入口ごとに書くと必ずどちらかを漏らすので、判断はここ1つに集約する。
+ */
+function markdownFromClipboardHtml(html) {
+  if (!html || htmlIsPlainTextLike(html)) return null;
+  const md = htmlToMarkdown(html).trim();
+  return md || null;
+}
+
 async function pasteRichFromContextMenu() {
   if (!navigator.clipboard?.read) { await ctx.actions.pasteAsPlainText(); return; }
   try {
@@ -1912,8 +1930,11 @@ async function pasteRichFromContextMenu() {
     for (const item of items) {
       if (!item.types.includes("text/html")) continue;
       const html = await (await item.getType("text/html")).text();
-      const md = htmlToMarkdown(html).trim();
+      const md = markdownFromClipboardHtml(html);
       if (md) { editor.pasteText(md); return; }
+      // 書式が無いHTMLだった場合はここで打ち切り、下のプレーンテキストへ落とす
+      // (このループを続けても同じ判定を繰り返すだけ)。
+      break;
     }
     for (const item of items) {
       const imgType = item.types.find((ty) => ty.startsWith("image/"));

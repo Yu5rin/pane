@@ -30,6 +30,26 @@ await page.addInitScript(() => {
     },
   };
   window.__reply = (data) => listeners.forEach((fn) => fn({ data }));
+
+  // 右クリック・編集メニューの「貼り付け」は navigator.clipboard.read を使う
+  // (本物のpasteイベントを通らない別経路)。テストから中身を差し替えられるようにする。
+  window.__setClipboard = (html, plain) => { window.__clip = { html, plain }; };
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: {
+      read: async () => {
+        const c = window.__clip || {};
+        const types = [];
+        if (c.html) types.push("text/html");
+        if (c.plain != null) types.push("text/plain");
+        return [{
+          types,
+          getType: async (ty) => new Blob([ty === "text/html" ? c.html : c.plain], { type: ty }),
+        }];
+      },
+      readText: async () => (window.__clip || {}).plain ?? "",
+    },
+  });
 });
 await page.goto("http://localhost:8201/index.html");
 await page.waitForTimeout(800);
@@ -125,6 +145,60 @@ for (const [name, html, check] of formatted) {
 {
   const got = await paste("<h2>見出し</h2><p>1段落目</p><p>2段落目</p>", "見出し\n1段落目\n2段落目");
   ok("(B) 段落の間には空行が入る", got.includes("1段落目\n\n2段落目"), `→ ${JSON.stringify(got)}`);
+}
+
+// ---- (C) 右クリック・編集メニューからの貼り付けも同じ判断をする ----
+//
+// 【実際に漏らしたこと】最初は onPaste(本物のpasteイベント)にだけ判定を入れ、
+// 右クリックからの貼り付け(pasteRichFromContextMenu、navigator.clipboard.read を使う
+// 別経路)は素通しにしていた。利用者に「右クリック→貼り付けだと改行が入る」と
+// 再指摘されて気づいた。入口が2つあるものは、両方をテストで固定する。
+async function pasteViaContextMenu(html, plain) {
+  await page.evaluate(() => window.__reply({ type: "new-document" }));
+  await page.waitForTimeout(150);
+  await page.evaluate(({ html, plain }) => window.__setClipboard(html, plain), { html, plain });
+  // 右クリックメニューのコマンドは「最後にメニューを開いた側」へ配られる
+  // (commands.js の activeNativeOwner)。まず contextmenu を発火させて開いた状態を作り、
+  // そのとき C# へ送られた項目一覧から「貼り付け」のidを拾う(idは ctx0, ctx1 … と
+  // 並び順で振られるため、決め打ちにすると項目が増減したときに黙って別の項目を押す)。
+  await page.evaluate(() => {
+    window.__sent.length = 0;
+    document.querySelector(".cm-content").dispatchEvent(
+      new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 100, clientY: 100 }));
+  });
+  await page.waitForTimeout(200);
+  const pasteId = await page.evaluate(() => {
+    const menu = window.__sent.find((m) => m.type === "open-context-menu");
+    return menu?.items?.find((it) => it.label === "貼り付け")?.id ?? null;
+  });
+  if (!pasteId) return "(貼り付け項目が見つからない)";
+  await page.evaluate((id) => window.__reply({ type: "menu-command", id }), pasteId);
+  await page.waitForTimeout(400);
+  return page.evaluate(async () => {
+    window.__sent.length = 0;
+    window.__reply({ type: "request-text" });
+    for (let i = 0; i < 60; i++) {
+      const m = window.__sent.find((x) => x.type === "text-response");
+      if (m) return m.text;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    return "(取得できず)";
+  });
+}
+{
+  const html = PLAIN.split("\n").map((l) => `<div>${l || "<br>"}</div>`).join("");
+  const got = await pasteViaContextMenu(html, PLAIN);
+  ok("(C) 右クリック経由でも行数が変わらない", got.split("\n").length === PLAIN.split("\n").length,
+    `(期待 ${PLAIN.split("\n").length}行, 実際 ${got.split("\n").length}行)`);
+  ok("(C) 右クリック経由でも中身がそのまま", got === PLAIN);
+}
+{
+  const got = await pasteViaContextMenu("<h2>見出し</h2><p>本文</p>", "見出し\n本文");
+  ok("(C) 右クリック経由でも書式ありは変換される", got.startsWith("## 見出し"), `→ ${JSON.stringify(got)}`);
+}
+{
+  const got = await pasteViaContextMenu("<ul><li>あ</li><li>い</li></ul>", "あ\nい");
+  ok("(C) 右クリック経由でも箇条書きに空行が入らない", got === "- あ\n- い", `→ ${JSON.stringify(got)}`);
 }
 
 ok("ページエラーが無い", errors.length === 0, errors.join(" / "));
