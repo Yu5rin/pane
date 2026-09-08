@@ -77,6 +77,42 @@ internal static class UpdateCheckLogic
         }
     }
 
+    /// <summary>
+    /// 配布物(Zip)のファイル名。リリースを作るワークフロー(.github/workflows/release.yml)が
+    /// この名前で作るので、タグさえ分かれば組み立てられる。
+    /// </summary>
+    internal static string BuildAssetFileName(string tag) => $"Pane-{tag}-win-x64.zip";
+
+    /// <summary>
+    /// APIを使わずに、配布物のダウンロードURLを組み立てる。組み立てられなければnull。
+    ///
+    /// 【なぜ要るか】
+    /// GitHubのAPIには1時間60回(未認証)の上限があり、IPアドレスごとに数えられる。
+    /// 会社などの共有回線では他の通信で先に使い切られてしまう。実機のログ(2026-09-08)では、
+    /// Atomフィードで「新しい版がある」ことは分かるのに、配布物の詳細を取りに行くAPIが
+    /// 毎回403で失敗し、一度も更新できていなかった。自宅(専有IP)では必ず成功する。
+    ///
+    /// ダウンロードURLは規則的なので、APIに頼らず組み立てられる。
+    ///
+    ///   https://github.com/{owner}/{repo}/releases/download/{tag}/Pane-{tag}-win-x64.zip
+    ///
+    /// 引き換えにSHA256は分からない(APIからしか取れない)。照合を省いて続行する経路は
+    /// 元からあり(UpdateService.VerifyHash)、HTTPSで取得している以上そこで防げるのは
+    /// 転送中の破損だけ、という点も変わらない(README・仕様書U-05に明記済み)。
+    ///
+    /// 【この組み立てが前提にしていること】
+    /// ファイル名の付け方(BuildAssetFileName)が release.yml と一致していること。
+    /// 将来ワークフロー側で名前を変えるなら、ここも直す必要がある。組み立てたURLが
+    /// 404なら、呼び出し側はダウンロードに失敗するだけで、誤ったものは入らない。
+    /// </summary>
+    internal static string? TryBuildDownloadUrl(string atomUrl, string tag)
+    {
+        if (string.IsNullOrEmpty(tag)) return null;
+        if (!atomUrl.EndsWith(".atom", StringComparison.OrdinalIgnoreCase)) return null;
+        string baseUrl = atomUrl[..^".atom".Length];   // https://github.com/{owner}/{repo}/releases
+        return $"{baseUrl}/download/{Uri.EscapeDataString(tag)}/{Uri.EscapeDataString(BuildAssetFileName(tag))}";
+    }
+
     /// <summary>AtomフィードのURLから、あるタグのリリースページのURLを組み立てる。</summary>
     internal static string BuildReleasePageUrl(string atomUrl, string tag)
         => atomUrl.EndsWith(".atom", StringComparison.OrdinalIgnoreCase)

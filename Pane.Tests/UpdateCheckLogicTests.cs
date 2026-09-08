@@ -247,4 +247,45 @@ public class UpdateCheckLogicTests
         // はっきり返して、呼び出し元に確認を諦めさせる。
         Assert.Null(UpdateCheckLogic.IsNewerThanCurrent(latestTag, current));
     }
+
+    // ---- APIを使わずに組み立てるダウンロードURL(会社の共有回線でAPIが上限に当たる件) ----
+
+    [Fact]
+    public void ダウンロードURLをAPIなしで組み立てられる()
+    {
+        Assert.Equal(
+            "https://github.com/Yu5rin/pane/releases/download/v1.1.6/Pane-v1.1.6-win-x64.zip",
+            UpdateCheckLogic.TryBuildDownloadUrl("https://github.com/Yu5rin/pane/releases.atom", "v1.1.6"));
+    }
+
+    [Fact]
+    public void 配布物のファイル名はタグから決まる()
+    {
+        // .github/workflows/release.yml が作る名前と一致していること。
+        Assert.Equal("Pane-v1.1.6-win-x64.zip", UpdateCheckLogic.BuildAssetFileName("v1.1.6"));
+    }
+
+    [Fact]
+    public void Atom以外のURLからは組み立てない()
+    {
+        Assert.Null(UpdateCheckLogic.TryBuildDownloadUrl("https://example.com/feed", "v1.1.6"));
+        Assert.Null(UpdateCheckLogic.TryBuildDownloadUrl("", "v1.1.6"));
+    }
+
+    [Fact]
+    public void タグが空なら組み立てない()
+    {
+        Assert.Null(UpdateCheckLogic.TryBuildDownloadUrl("https://github.com/Yu5rin/pane/releases.atom", ""));
+    }
+
+    [Fact]
+    public void タグに使えない文字が混ざってもURLとして壊れない()
+    {
+        // 配布元の応答から来る値なので、そのまま埋め込まずエスケープする。
+        string? got = UpdateCheckLogic.TryBuildDownloadUrl(
+            "https://github.com/Yu5rin/pane/releases.atom", "v1.0 beta/../x");
+        Assert.NotNull(got);
+        Assert.DoesNotContain("/../", got);
+        Assert.DoesNotContain(" ", got);
+    }
 }
