@@ -122,6 +122,9 @@ internal static class UpdateService
         // そちらが上限や障害で失敗しても、分かっているところまでは利用者へ伝えたい
         // (「新しい版がある」ことと、リリースページの場所)。
         string? knownNewerTag = null;
+        // APIが上限で失敗したときに、ダウンロードURLを組み立てるために控えておく
+        // (NewerButNoDetails参照)。
+        string? knownAtomUrl = null;
         string knownReleaseUrl = "";
 
         // 確認全体の制限時間。Atomとリリース情報の2回ぶんをまとめてここで打ち切る
@@ -148,6 +151,7 @@ internal static class UpdateService
             // プレリリースを使わない運用なので許容している。使い始めるならAtomの
             // entryを除外する条件が要る。
             string? atomUrl = UpdateCheckLogic.TryBuildAtomUrl(url);
+            knownAtomUrl = atomUrl;
             if (atomUrl is not null)
             {
                 string? tagFromAtom = await TryReadLatestTagFromAtomAsync(atomUrl, totalCts.Token);
@@ -224,7 +228,7 @@ internal static class UpdateService
             // 問い合わせ回数の上限。何が起きたのかを利用者の言葉で伝える(「403」とだけ
             // 出しても、自分の操作が原因ではないことが分からない)。
             Logger.Warn("更新の確認: 問い合わせ回数の上限に達していた(403)");
-            if (knownNewerTag is not null) return NewerButNoDetails(currentVersionText, knownNewerTag, knownReleaseUrl);
+            if (knownNewerTag is not null) return NewerButNoDetails(currentVersionText, knownNewerTag, knownReleaseUrl, knownAtomUrl);
             return Error(currentVersionText,
                 "配布元への問い合わせが、回数の上限に達していました。この上限は同じネットワークを使う人たちで共有されるため、" +
                 "自分が何度も押していなくても起こります。しばらく時間をおくか、リリースページから直接ご確認ください。");
@@ -236,7 +240,7 @@ internal static class UpdateService
             // 伝わらなかった)。詳細はLogger.WriteExceptionが型名・メッセージ・スタック
             // トレースまで含めて残すので、調査に必要な情報は失われない。
             Logger.WriteException("更新の確認に失敗", ex);
-            if (knownNewerTag is not null) return NewerButNoDetails(currentVersionText, knownNewerTag, knownReleaseUrl);
+            if (knownNewerTag is not null) return NewerButNoDetails(currentVersionText, knownNewerTag, knownReleaseUrl, knownAtomUrl);
             return Error(currentVersionText, $"更新を確認できませんでした。{ExceptionMessages.Describe(ex)}");
         }
     }
@@ -248,8 +252,29 @@ internal static class UpdateService
     /// 出さず、リリースページへの導線だけを見せる(canApplyはDownloadUrlの有無で決まる)。
     /// 黙って「確認できませんでした」にしてしまうと、更新があること自体が伝わらない。
     /// </summary>
-    private static UpdateCheckResult NewerButNoDetails(string currentVersion, string tag, string releaseUrl)
+    private static UpdateCheckResult NewerButNoDetails(
+        string currentVersion, string tag, string releaseUrl, string? atomUrl)
     {
+        // APIが使えなくても、ダウンロードURLは規則から組み立てられる
+        // (UpdateCheckLogic.TryBuildDownloadUrl参照)。
+        //
+        // 【なぜここまでするか】実機のログ(2026-09-08)で、会社の共有回線では
+        // APIが毎回403(上限)になり、一度も自動更新できていなかった。Atomで「新しい版が
+        // ある」ことは分かるのに、配布物のURLがAPIからしか取れないせいで止まっていた。
+        // ここで組み立てれば、上限に関係なく更新できる。
+        //
+        // 引き換えにSHA256は分からない。照合を省いて続行する経路は元からあり
+        // (VerifyHash)、HTTPSで取得している以上そこで防げるのは転送中の破損だけ、
+        // という点も変わらない(仕様書 U-05)。
+        string? built = atomUrl is null ? null : UpdateCheckLogic.TryBuildDownloadUrl(atomUrl, tag);
+        if (built is not null)
+        {
+            Logger.Write($"更新の確認: 新しい版({tag})はあるが配布物の詳細を取れなかった。" +
+                         $"ダウンロードURLを組み立てて続行する(SHA256の照合は省く): {built}");
+            return new UpdateCheckResult("available", currentVersion, tag, built, "", 0, releaseUrl,
+                $"新しい版 {tag} があります。");
+        }
+
         Logger.Write($"更新の確認: 新しい版({tag})はあるが、配布物の詳細を取れなかった。手動更新を案内する");
         return new UpdateCheckResult("available", currentVersion, tag, "", "", 0, releaseUrl,
             $"新しい版 {tag} があります。ただし配布元が混み合っていて、自動で入れ替えるための情報を取れませんでした。" +
@@ -511,21 +536,38 @@ internal static class UpdateService
             return new ConnectionCheckResult(false, $"配布元へ問い合わせられませんでした。{ExceptionMessages.Describe(ex)}");
         }
 
-        // 最新版でも試せることが要点なので、status は見ない。見るのは「Zipの置き場が
-        // 分かったかどうか」だけ。分からなければ、その事実自体が手がかりになる。
-        if (string.IsNullOrEmpty(info.DownloadUrl))
+        // 【実際に動かなかったこと】最初は info.DownloadUrl をそのまま使っていた。
+        // ところが最新版のとき CheckAsync は "latest" を返し、配布物の詳細(DownloadUrl)を
+        // 取りに行かない。「最新版でも押せることが要点」と言いながら、まさにその場合に
+        // 「配布物のURLが分からなかった」で終わっていた(実機ログ 2026-09-08)。
+        //
+        // 確かめたいのは「配布物の置き場まで通信が届くか」であって、更新の要否ではない。
+        // URLが空なら、いま分かっているタグから組み立てる(APIを使わない。
+        // UpdateCheckLogic.TryBuildDownloadUrl参照)。
+        string downloadUrl = info.DownloadUrl;
+        if (string.IsNullOrEmpty(downloadUrl))
+        {
+            string? atomUrl = UpdateCheckLogic.TryBuildAtomUrl(settings.UpdateCheckUrl?.Trim() ?? "");
+            string tag = !string.IsNullOrEmpty(info.LatestVersion) ? info.LatestVersion : info.CurrentVersion;
+            downloadUrl = (atomUrl is not null ? UpdateCheckLogic.TryBuildDownloadUrl(atomUrl, tag) : null) ?? "";
+            if (!string.IsNullOrEmpty(downloadUrl))
+            {
+                Logger.Write($"更新の通信確認: 配布物のURLを組み立てた(最新版のため詳細は取っていない): {downloadUrl}");
+            }
+        }
+        if (string.IsNullOrEmpty(downloadUrl))
         {
             Logger.Warn($"更新の通信確認: 配布物のURLが分からなかった(status={info.Status}, message={info.Message})");
             return new ConnectionCheckResult(false,
                 "配布物の場所が分かりませんでした。問い合わせの段階で止まっています。詳しくはログを確認してください。");
         }
 
-        Logger.Write($"更新の通信確認: 配布物へ接続する: {info.DownloadUrl}");
-        LogNetworkEnvironmentOnce(info.DownloadUrl);
+        Logger.Write($"更新の通信確認: 配布物へ接続する: {downloadUrl}");
+        LogNetworkEnvironmentOnce(downloadUrl);
         using var cts = new CancellationTokenSource(ConnectionCheckTimeout);
         try
         {
-            using var request = new HttpRequestMessage(HttpMethod.Get, info.DownloadUrl);
+            using var request = new HttpRequestMessage(HttpMethod.Get, downloadUrl);
             request.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/octet-stream"));
             using HttpResponseMessage response = await Http.SendAsync(
                 request, HttpCompletionOption.ResponseHeadersRead, cts.Token);
