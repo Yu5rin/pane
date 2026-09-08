@@ -81,6 +81,27 @@ cd C:\Users\YUGO\pane; Get-Process Pane -ErrorAction SilentlyContinue | Stop-Pro
 - `cd` と各コマンドは `;` でつないだ**1つのPowerShellコードブロック**として提示する
 - この手順は**プッシュしたときだけ**提示する
 
+## リリースの手順
+
+リリースする版が決まったら、**毎回この手順をそのまま提示する**。省略しない。
+タグのpushは開発コンテナからできない（`send-pack: unexpected disconnect` / HTTP 403 が
+再現する）ため、ユーザーの手元で実行してもらう。
+
+1. `Pane/Pane.csproj` の `<Version>` を上げたコミットが main に入っていること
+   （リリースのワークフローがタグとの一致を確かめ、ずれていると失敗する）
+2. 次のコマンドを1つのPowerShellコードブロックとして提示する（`vX.Y.Z` は実際の版に置き換える）
+
+   ```powershell
+   cd C:\Users\YUGO\pane; git fetch origin main; git tag vX.Y.Z origin/main; git push origin vX.Y.Z
+   ```
+
+3. タグをpushすると GitHub Actions（`.github/workflows/release.yml`）が Zip を作り、
+   **下書きの**リリースを用意する。SHA256とサイズは自動で入る
+4. **リリース本文の案をこちらで用意して添える。** 利用者向けの言葉で書き、
+   内部の用語（クラス名・メソッド名・HTTPの状態コードなど）は出さない。
+   見出しは「## 変更点」から始め、最後に「## ダウンロード」の表を置く形で揃える
+5. 公開はユーザーが行う。こちらから公開しない
+
 ## 時刻の扱い
 
 - ユーザーへの報告で時刻に触れるときは、**必ず日本時間(JST, UTC+9)で書く**。
