@@ -268,6 +268,9 @@ internal sealed class HelpWindow : Form
         // Chromium標準のオートフィル候補を出さない(読むだけのウィンドウだが、設定を3ウィンドウで
         // 揃えておく。入力内容をブラウザプロファイルへ保存しない方針も同じ)。
         _webView.CoreWebView2.Settings.IsGeneralAutofillEnabled = false;
+        // SmartScreen(URLの評判チェック)を止める。3ウィンドウのうち1つでも設定を
+        // 漏らすと全体で有効に戻るため、ここも必ず呼ぶ(理由はWebViewReputationCheck)。
+        WebViewReputationCheck.Disable(_webView.CoreWebView2, "取扱説明書");
         _webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
         // 外部リンクをPane内のポップアップで開かせず、OSの既定ブラウザへ委譲する
         // (処理の中身と判断の理由は3ウィンドウ共通のExternalLinkServiceを参照)。

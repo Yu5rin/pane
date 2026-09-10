@@ -780,6 +780,10 @@ internal sealed class MainForm : Form
         // 見た目のポップアップが入力欄に出るうえ、メモ帳アプリとして入力内容をブラウザ
         // プロファイルへ保存しないのが妥当なため。
         _webView.CoreWebView2.Settings.IsGeneralAutofillEnabled = false;
+        // SmartScreen(URLの評判チェック)を止める。会社のPCでウィンドウを開くたびに
+        // 2秒待たされていた原因。3ウィンドウすべてで呼ばないと全体で有効に戻るため、
+        // 理由と根拠はWebViewReputationCheckに集約している。
+        WebViewReputationCheck.Disable(_webView.CoreWebView2, "本文");
         _webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
         // 外部リンク(window.open・target="_blank"・iframe内のリンク・中クリック等)は、Pane内に
         // 新しいWebView2ウィンドウを作らせず、OSの既定ブラウザで開く(実機で確認された不具合の修正)。
