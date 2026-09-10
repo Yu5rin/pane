@@ -418,6 +418,9 @@ internal sealed class SettingsWindow : Form
         // Chromium標準のオートフィル候補を出さない。設定画面は入力欄が多く、Paneのデザインと
         // 無関係な候補ポップアップが頻繁に出るうえ、入力内容をブラウザプロファイルへ保存しない。
         _webView.CoreWebView2.Settings.IsGeneralAutofillEnabled = false;
+        // SmartScreen(URLの評判チェック)を止める。3ウィンドウのうち1つでも設定を
+        // 漏らすと全体で有効に戻るため、ここも必ず呼ぶ(理由はWebViewReputationCheck)。
+        WebViewReputationCheck.Disable(_webView.CoreWebView2, "設定");
         _webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
         // 外部リンクをPane内のポップアップで開かせず、OSの既定ブラウザへ委譲する
         // (処理の中身と判断の理由は3ウィンドウ共通のExternalLinkServiceを参照)。
