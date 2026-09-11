@@ -3198,6 +3198,13 @@ const foldKeymapSafe = [
 // 仕様書10.2節の6変数の範囲内)のため、地・枠をvar(--ink)に変更した。
 // 検証は.verify-codefold.mjs (T)節(地色vs背景)と(Z)節(記号色vs地色、今回追加)参照。
 const FOLD_MARKER_SIZE = 15; // マーカー本体の一辺(px)。旧実装から変更なし。
+// 折りたたみマーカーの記号(SVG)。文字で描くと利用者が選んだ等幅フォントの字形に
+// 左右されるため使わない(理由はFoldOpenMarkerWidget.toDOM参照)。線幅2.55は、
+// viewBox16を11pxで描いたときに仕様書10.1節の基準(16pxで1.75)と同じ太さに見える値。
+const FOLD_MARKER_SVG_ATTRS =
+  'viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.55" stroke-linecap="round"';
+const FOLD_MARKER_SVG_MINUS = `<svg ${FOLD_MARKER_SVG_ATTRS}><path d="M3.5 8h9"/></svg>`;
+const FOLD_MARKER_SVG_PLUS = `<svg ${FOLD_MARKER_SVG_ATTRS}><path d="M3.5 8h9M8 3.5v9"/></svg>`;
 const FOLD_MARKER_GAP_LEFT = 5; // 本文エリアの左端→マーカー左端の隙間(px、依頼どおり)。
 const FOLD_MARKER_GAP_RIGHT = 5; // マーカー右端→コード開始位置の隙間(px、依頼どおり左右対称)。
 
@@ -3261,10 +3268,28 @@ class FoldOpenMarkerWidget extends WidgetType {
     const el = document.createElement("span");
     el.className = "cm-fold-marker2";
     el.style.left = `${this.leftPx}px`;
-    // 畳まれている(folded=true)→"+"、展開中(folded=false)→"−"。U+2212(MINUS SIGN)は
-    // ハイフンマイナス(-)より線が太く、"+"と字面の太さが揃って見やすいためこちらを使う
-    // (旧実装から引き継ぎ)。
-    el.textContent = this.folded ? "+" : "−";
+    // 畳まれている(folded=true)→"+"、展開中(folded=false)→"−"。
+    //
+    // 【なぜ文字ではなくSVGなのか】
+    // 以前は el.textContent に "+" / "−"(U+2212 MINUS SIGN)を入れていた。ところが
+    // 実機(会社PC、2026-09-11)で記号が読めない報告があり、開発者ツールで調べると
+    // **"−" だけが等幅フォント(HackGen35)ではなく BIZ UDGothic で描かれていた**。
+    // U+2212 を持たない等幅フォントだと日本語フォントへ落ち、そちらの字形は全角幅で
+    // 設計されているため、15pxの小さな枠では線の太さも位置も揃わない。"+"(U+002B)は
+    // ほぼどのフォントにもあるので落ちず、記号によって描画フォントが変わっていた。
+    //
+    // 文字で描くかぎり、利用者が選べる等幅フォント(設定 → 外観)の字形に左右され続ける。
+    // CLAUDE.md・仕様書10.1節も「アイコンと記号はすべてSVG」としており、ここだけが
+    // 例外になっていた。SVGにすればフォントに一切依存しない。
+    //
+    // 線幅は、仕様書10.1節の基準(16pxで線幅1.75)と同じ見た目になるよう逆算している
+    // (viewBox 16 を 11px で描くので 1.75 ÷ (11/16) ≒ 2.55)。
+    // 色は stroke="currentColor" なので、従来どおりCSSの color がそのまま効く
+    // (テーマごとのコントラストを見る(Z)節の検証もそのまま通る)。
+    el.innerHTML = this.folded ? FOLD_MARKER_SVG_PLUS : FOLD_MARKER_SVG_MINUS;
+    // 状態を属性にも出す。SVGにしたことで textContent から "+"/"−" が読めなくなるため、
+    // 検証スイート(.verify-codefold.mjs)と、将来の調査がここを見る。
+    el.dataset.foldState = this.folded ? "folded" : "open";
     el.title = view.state.phrase(this.folded ? "Unfold line" : "Fold line");
     // CodeMirror本体がこのクリックをカーソル移動として解釈しないよう、mousedown/click
     // 双方でpreventDefault+stopPropagationする(widget自体もignoreEvent()でtrueを返し
@@ -3870,10 +3895,10 @@ const foldOpenMarkerTheme = EditorView.theme({
     boxSizing: "border-box",
     width: `${FOLD_MARKER_SIZE}px`,
     height: `${FOLD_MARKER_SIZE}px`,
-    lineHeight: "1",
-    fontSize: "12px",
-    fontWeight: "800",
-    fontFamily: "var(--font-mono, ui-monospace, monospace)",
+    // 記号はSVGなので、フォントの指定は要らない(以前はfontSize/fontWeight/fontFamilyを
+    // 置いていたが、利用者が選んだ等幅フォントに字形が左右され、実機で記号が読めない
+    // 原因になっていた。FoldOpenMarkerWidget.toDOM参照)。
+    // colorはSVGのstroke="currentColor"が参照するので、テーマごとの配色は従来どおり効く。
     color: "var(--paper)",
     border: "1.5px solid var(--ink)",
     borderRadius: "3px",

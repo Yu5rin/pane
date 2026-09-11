@@ -266,7 +266,16 @@ async function firstVisibleMarker(page) {
     const span = document.querySelector(".cm-fold-marker2");
     if (!span) return null;
     const cs = getComputedStyle(span);
-    return { text: span.textContent, title: span.title, borderWidth: cs.borderWidth, borderStyle: cs.borderStyle, color: cs.color, fontWeight: cs.fontWeight };
+    // 記号はSVG(理由はeditor.jsのFoldOpenMarkerWidget.toDOM参照)。textContentからは
+    // "+"/"−"を読めないので、状態はdata-fold-state属性で、描けているかは
+    // SVGのpathの有無で見る。
+    const svg = span.querySelector("svg");
+    return {
+      state: span.dataset.foldState, title: span.title,
+      svgPaths: svg ? svg.querySelectorAll("path").length : 0,
+      svgBox: svg ? (() => { const r = svg.getBoundingClientRect(); return [Math.round(r.width), Math.round(r.height)]; })() : null,
+      borderWidth: cs.borderWidth, borderStyle: cs.borderStyle, color: cs.color,
+    };
   });
 }
 
@@ -652,7 +661,8 @@ const JS_DOC = [
   await openFile(page, "markershape.js", JS_DOC);
 
   const beforeFold = await firstVisibleMarker(page);
-  ok(`(J) 展開中のマーカーは「−」(実際="${beforeFold?.text}")`, beforeFold?.text === "−");
+  ok(`(J) 展開中のマーカーは「−」の形(state=${beforeFold?.state}, SVGのpath=${beforeFold?.svgPaths}本, 大きさ=${beforeFold?.svgBox})`,
+    beforeFold?.state === "open" && beforeFold?.svgPaths === 1 && beforeFold?.svgBox?.[0] > 0 && beforeFold?.svgBox?.[1] > 0);
   ok(`(J) 展開中のtitleは"Fold line"(実際="${beforeFold?.title}")`, beforeFold?.title === "Fold line");
   ok(`(J) マーカーが四角い枠(border)で囲まれている(実際: ${beforeFold?.borderWidth} ${beforeFold?.borderStyle})`,
     !!beforeFold && parseFloat(beforeFold.borderWidth) > 0 && beforeFold.borderStyle === "solid");
@@ -660,7 +670,8 @@ const JS_DOC = [
   await clickFirstMarker(page, "Fold line");
   await page.waitForTimeout(300);
   const afterFold = await firstVisibleMarker(page);
-  ok(`(J) クリックで畳むとマーカーが「+」になる(実際="${afterFold?.text}")`, afterFold?.text === "+");
+  ok(`(J) クリックで畳むとマーカーが「+」の形になる(state=${afterFold?.state}, SVGのpath=${afterFold?.svgPaths}本)`,
+    afterFold?.state === "folded" && afterFold?.svgPaths === 1);
   ok(`(J) 畳んだ後のtitleは"Unfold line"(実際="${afterFold?.title}")`, afterFold?.title === "Unfold line");
   const foldedText = await contentText(page);
   ok("(J) クリックで実際に畳まれ、関数の中身が画面から消える", !foldedText.includes("console.log(msg)"));
@@ -668,7 +679,20 @@ const JS_DOC = [
   await clickFirstMarker(page, "Unfold line");
   await page.waitForTimeout(300);
   const afterUnfold = await firstVisibleMarker(page);
-  ok(`(J) クリックで展開するとマーカーが「−」に戻る(実際="${afterUnfold?.text}")`, afterUnfold?.text === "−");
+  ok(`(J) クリックで展開するとマーカーが「−」の形に戻る(state=${afterUnfold?.state})`, afterUnfold?.state === "open");
+
+  // 実機(会社PC、2026-09-11)で記号が読めなかった原因は、"−"(U+2212)を持たない等幅フォントが
+  // 選ばれていて、そこだけ日本語フォントへ落ちていたこと。文字で描くかぎり、利用者が
+  // どの等幅フォントを選ぶかで字形が変わり続ける。SVGへ戻す事故を防ぐため、
+  // 「マーカーの中に文字が入っていないこと」を固定する。
+  const markerGlyphs = await page.evaluate(() =>
+    [...document.querySelectorAll(".cm-fold-marker2")].map((m) => ({
+      text: m.textContent.trim(),
+      svg: m.querySelectorAll("svg").length,
+      fontDependent: /[+\u2212\u002d]/.test(m.textContent),
+    })));
+  ok(`(J) マーカーの記号は文字ではなくSVGで描く(フォントに依存させない。${markerGlyphs.length}個を確認)`,
+    markerGlyphs.length > 0 && markerGlyphs.every((g) => g.text === "" && g.svg === 1 && !g.fontDependent));
   const unfoldedText = await contentText(page);
   ok("(J) クリックで実際に展開され、関数の中身が画面に戻る", unfoldedText.includes("console.log(msg)"));
 
@@ -1332,12 +1356,12 @@ const NEST_DOC3 = [
     const lines = [...document.querySelectorAll(".cm-line")];
     const forLine = lines.find((l) => l.textContent.includes("for (let"));
     const marker = forLine?.querySelector(".cm-fold-marker2");
-    return { left: marker?.getBoundingClientRect().left ?? null, text: marker?.textContent, title: marker?.title, lineText: forLine?.textContent };
+    return { left: marker?.getBoundingClientRect().left ?? null, state: marker?.dataset.foldState, title: marker?.title, lineText: forLine?.textContent };
   });
   console.log(`  [実測] 折りたたみ前のfor行マーカーleft=${beforeFoldLeft?.toFixed(2)} / 折りたたみ後=${afterFold.left?.toFixed(2)} (行内容="${afterFold.lineText}")`);
   ok(`(V) 折りたたんだ状態でもマーカーが同じ列(=正しい位置)に出る(差=${Math.abs((beforeFoldLeft ?? 0) - (afterFold.left ?? 0)).toFixed(2)}px)`,
     beforeFoldLeft != null && afterFold.left != null && Math.abs(beforeFoldLeft - afterFold.left) < 0.5);
-  ok(`(V) 折りたたみ後のマーカーは「+」・title="Unfold line"になる(実際="${afterFold.text}"/"${afterFold.title}")`, afterFold.text === "+" && afterFold.title === "Unfold line");
+  ok(`(V) 折りたたみ後のマーカーは「+」の形・title="Unfold line"になる(実際=${afterFold.state}/"${afterFold.title}")`, afterFold.state === "folded" && afterFold.title === "Unfold line");
   ok(`(V) 折りたたみ後の行が「{…}」の省略表示になる(実際="${afterFold.lineText}")`, /for \(let i.*\{.*\}/.test((afterFold.lineText || "").replace(/^[−+]/, "")));
 
   await page.keyboard.press("Alt+BracketRight");
