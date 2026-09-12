@@ -74,12 +74,32 @@ PRとmainへの変更では、同じものがCI（`.github/workflows/ci.yml`）�
 方針のため、確認も `dotnet publish` で作った `publish\Pane.exe` を起動して行う。
 
 ```powershell
-cd C:\Users\YUGO\pane; Get-Process Pane -ErrorAction SilentlyContinue | Stop-Process -Force; git pull origin claude/pane-phase-1-setup-87833g; npm install; Remove-Item -Recurse -Force dist,publish -ErrorAction SilentlyContinue; npm run build; dotnet publish Pane\Pane.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o publish; .\publish\Pane.exe
+cd C:\Users\YUGO\pane; Get-Process Pane -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep -Milliseconds 500; git fetch origin claude/pane-phase-1-setup-87833g; git reset --hard FETCH_HEAD; npm install; Remove-Item -Recurse -Force dist,publish -ErrorAction SilentlyContinue; npm run build; if ($LASTEXITCODE -ne 0) { throw "npm run build に失敗しました。ここで止めます" }; dotnet publish Pane\Pane.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o publish; if ($LASTEXITCODE -ne 0) { throw "dotnet publish に失敗しました。ここで止めます" }; .\publish\Pane.exe
 ```
 
 - パス（`C:\Users\YUGO\pane`）は省略せず毎回そのまま書く
 - `cd` と各コマンドは `;` でつないだ**1つのPowerShellコードブロック**として提示する
 - この手順は**プッシュしたときだけ**提示する
+- **一部だけを抜き出して渡さない。** 短縮版を作ると、下の3点のどれかを落とす
+  （実際に `Stop-Process` を落としたコマンドを渡して、実機のビルドを2回失敗させた）
+
+### この形にしている理由（2026-09-13、実機で2回続けて失敗したため）
+
+1. **`git pull` ではなく `git fetch` + `git reset --hard FETCH_HEAD`**
+   開発側はブランチを `origin/main` から作り直して force push する運用のため、
+   手元の履歴とは食い違う。`git pull` はマージを試みて衝突し、`src/main.js` に
+   `<<<<<<< HEAD` を残したまま止まる。そのまま `npm run build` が落ち、**古い
+   `dist` のままアプリが起動する**ので「アプリが壊れた」ように見える。
+   実機のソースを手で編集することはない前提なので、リモートに合わせて捨ててよい。
+
+2. **`npm run build` と `dotnet publish` は、失敗したらそこで止める**
+   `;` でつなぐと失敗しても次へ進む。実際、ビルドが落ちたのに publish が続行し、
+   古い `dist` を抱えた exe が起動した。失敗に気づけないのが一番たちが悪い。
+
+3. **`Stop-Process` のあとに少し待つ**
+   Paneは常駐するため、ウィンドウを閉じてもプロセスが残る。残っていると
+   `publish\Pane.exe` を上書きできず `GenerateBundle` が
+   「being used by another process」で失敗する。終了は即座ではないので待ちを入れる。
 
 ## リリースの手順
 

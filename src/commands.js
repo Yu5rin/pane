@@ -106,6 +106,7 @@ export function buildCommands(ctx) {
     { id: "edit.copy", menu: "Edit", label: "コピー", keyHint: `${MOD}+C`, enabled: () => ctx.getState().hasSelection, run: () => document.execCommand("copy") },
     { id: "edit.paste", menu: "Edit", label: "貼り付け", keyHint: `${MOD}+V`, run: app((c) => c.actions.pasteRich()) },
     { id: "edit.selectAll", menu: "Edit", label: "すべて選択", keyHint: `${MOD}+A`, run: () => editor().applyAction("selectAll"), separatorAfter: true },
+    { id: "edit.copyAll", menu: "Edit", label: "全文をコピー", run: app((c) => c.actions.copyAll()) },
     { id: "edit.copyMarkdown", menu: "Edit", label: "Markdownとしてコピー", shortcut: `${MOD}+Shift+C`, run: app((c) => c.actions.copyAsMarkdown()) },
     { id: "edit.copyHtml", menu: "Edit", label: "HTMLとしてコピー", run: app((c) => c.actions.copyAsHtml()) },
     { id: "edit.pastePlain", menu: "Edit", label: "プレーンテキストとして貼り付け", shortcut: `${MOD}+Shift+V`, run: app((c) => c.actions.pasteAsPlainText()), separatorAfter: true },
@@ -642,6 +643,86 @@ export function initMenuBar(container, commands, ctx) {
     }
     container.insertBefore(btn, anchor);
   }
+
+  // ---- メニューバー右端の左3つ: サイドバー・記法を隠さない表示・全文コピー(依頼) ----
+  // 既存の設定・ヘルプと同じく、ボタン自体は静的HTML側(index.html)にあり、ここでは
+  // クリックの配線と「いまの状態」の反映だけを行う。押したときの動作は必ずコマンド経由に
+  // する(メニュー・ショートカット・コマンドパレットと完全に同じ経路を通す)。
+  const runCommand = (id) => commands.find((c) => c.id === id)?.run();
+  const sidebarBtn = container.querySelector("#btn-menu-sidebar");
+  const sourceBtn = container.querySelector("#btn-menu-source");
+  const copyAllBtn = container.querySelector("#btn-menu-copyall");
+  if (sidebarBtn) sidebarBtn.addEventListener("click", () => runCommand("view.sidebar"));
+  if (sourceBtn) sourceBtn.addEventListener("click", () => runCommand("view.sourceMode"));
+
+  // 押しても本文のカーソルを外さない(利用者要望)。
+  // 既定では、ボタンを押した時点でフォーカスがボタンへ移り、本文のカーソルが消える
+  // (実測: view.hasFocus が false になる。カーソル位置自体は保たれるので、見えなく
+  // なるだけだが、書きかけの位置を見失う)。mousedownを止めればフォーカスは動かない。
+  // 対象は「押したあと本文へ戻ってきたい」4つ(サイドバー・記法・全文コピー・テーマ切替)。
+  // 設定と取扱説明書は別ウィンドウを開くので、どのみちフォーカスはそちらへ移る。
+  // テーマ切替(#btn-theme、配線はmain.js)も同じ症状だったため、ここでまとめて面倒を見る。
+  // 同じメニューバーのボタンで挙動が割れると、押すたびにカーソルが消えたり消えなかったり
+  // して分かりにくいため。
+  // キーボード操作(Tabで移動してEnter/Space)は、mousedownを経由しないので影響しない。
+  for (const el of [sidebarBtn, sourceBtn, copyAllBtn, container.querySelector("#btn-theme")]) {
+    el?.addEventListener("mousedown", (e) => e.preventDefault());
+  }
+
+  // 全文コピー。押した実感が無いと「効いたのか」が分からないため、コードブロックの
+  // コピーボタン(editor.jsのCodeCopyWidget)と同じ流儀で、1.2秒だけアイコンを
+  // チェックマークへ差し替える。
+  if (copyAllBtn) {
+    const idleIcon = copyAllBtn.querySelector(".icon-idle");
+    const doneIcon = copyAllBtn.querySelector(".icon-done");
+    const idleLabel = copyAllBtn.getAttribute("aria-label") || "全文をコピー";
+    let doneTimer = 0;
+    copyAllBtn.addEventListener("click", async () => {
+      const okCopied = await ctx.actions.copyAll();
+      if (!okCopied) return;   // 失敗したのに成功の見た目を出さない
+      if (idleIcon) idleIcon.hidden = true;
+      if (doneIcon) doneIcon.hidden = false;
+      copyAllBtn.setAttribute("aria-label", "コピーしました");
+      copyAllBtn.title = "コピーしました";
+      clearTimeout(doneTimer);   // 連打しても最後の1回から1.2秒数える
+      doneTimer = setTimeout(() => {
+        if (idleIcon) idleIcon.hidden = false;
+        if (doneIcon) doneIcon.hidden = true;
+        copyAllBtn.setAttribute("aria-label", idleLabel);
+        copyAllBtn.title = "全文をコピー";
+      }, 1200);
+    });
+  }
+
+  // 状態(サイドバーの開閉・記法を隠さない表示のON/OFF・いまのモード)をボタンへ反映する。
+  const syncToolbarButtons = () => {
+    const st = ctx.getState();
+    if (sidebarBtn) sidebarBtn.setAttribute("aria-pressed", String(!!st.sidebarOpen));
+    if (sourceBtn) {
+      sourceBtn.setAttribute("aria-pressed", String(!!st.sourceMode));
+      // 記法を隠さない表示はMarkdownモードでしか意味がない。それ以外では押せなくする
+      // (隠すとアイコンの位置が動いて右隣を押し間違えるため、薄くするだけにとどめる)。
+      sourceBtn.disabled = st.mode !== "markdown";
+    }
+  };
+
+  // 【なぜアクションを包むのか】状態が変わる経路は、右上のアイコン・メニュー・
+  // ショートカット・コマンドパレット・ファイルを開いたときの自動判定と複数ある。
+  // 経路ごとに同期の呼び出しを足すと必ずどれかを忘れる(docs/調査記録/README.md の
+  // 「繰り返し出てきた誤り」8番と同じ形)。すべての経路が最後にはctx.actionsの
+  // これらを通るので、実行する側を1か所で包んで確実に同期させる。
+  for (const name of ["toggleSidebar", "toggleSourceMode", "setMode", "showSidebarPanel"]) {
+    const original = ctx.actions[name];
+    if (typeof original !== "function") continue;
+    ctx.actions[name] = (...args) => {
+      const result = original.apply(ctx.actions, args);
+      // 非同期のアクションでも、状態が変わり終えてから反映されるようにする。
+      if (result && typeof result.then === "function") result.then(syncToolbarButtons, syncToolbarButtons);
+      else syncToolbarButtons();
+      return result;
+    };
+  }
+  syncToolbarButtons();   // 起動直後の初期表示
 
   // ---- メニューバー右端の設定・ヘルプアイコン(Graftと同じ並び。テーマ切替の右隣) ----
   // ボタン自体は静的HTML側(index.html)に既に置かれているため、ここではクリック時の
