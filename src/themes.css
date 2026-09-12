@@ -767,6 +767,24 @@ html[data-theme="dark"][data-dark-theme="night"] {
      寄せて補正する(補正後の実測: vs sidebar-bg 6.68 / vs code-bg 7.08 / vs paper
      5.71 / vs accent-soft 4.74)。 */
   --ink-mute: color-mix(in srgb, white 50%, #6A7280 50%);
+  /* 【調べた結果、あえて現状のままにしている・2026-09-12】
+     上の2つ(--ink-sub / --ink-mute)は、どちらも「--accent-soft(#3C4851)の上でもAAを
+     満たす」ところまで白へ寄せた結果、**--ink(#b8bfc6)とほぼ同じ明るさに揃ってしまって
+     いる**(9テーマを実測: ink↔ink-sub のコントラスト比は night が1.06で最小。
+     default-darkは2.15、githubは2.58)。文字の濃淡で情報の重みを分ける、という
+     本来の役割はこのテーマでは果たせていない。
+
+     直そうとすると、次の連鎖が必要になると分かったため、今回は見送っている。
+       ・--accent-soft を制約から外せば #A1A6AC / #A1A6AF まで下げられる(ink↔1.32)。
+         ただし accent-soft 上で3.83に落ちるため、アウトラインh4-h6ホバーと
+         アーカイブ帯(src/style.css)の個別補正を 15% → 55% へ上げる必要がある
+         (9テーマ共通のセレクタなので全テーマに影響する。他テーマは余裕が増えるだけ)。
+       ・.verify-theme-ui.mjs (H-1)の「night vs --accent-soft」を除外対象に加える必要がある。
+       ・それでも 1.32 止まり。背景(#363B40)と本文文字(#b8bfc6)がどちらも中間の明るさで、
+         AAを保ったまま濃淡を作る余地が構造的に小さい。はっきり差を付けるには
+         --ink 自体を明るくする必要があり、Typora Night の公式値から離れる。
+     見た目を変えない方を選んだ、という判断の記録。数値を動かすときは上記をまとめて
+     見直すこと。 */
   --line: #555555;
   --rule: #555555;
   --accent: #6dc1e7;
@@ -800,11 +818,14 @@ html[data-theme="dark"][data-dark-theme="night"] {
      var(--surface)/var(--accent-soft)いずれに対しても実測4.5以上(5.62/6.57/4.66)の
      ためvar(--accent)のまま問題ない。 */
   --accent-ink: var(--accent);
-  /* UI点検 指摘3の修正で追加。var(--ink-mute)(#6A7280)とvar(--chrome-bg)(#26282B)の
-     実測コントラスト比は3.05でAA未満。var(--ink)(#b8bfc6)へcolor-mix()で寄せて
-     補正するが、境界ぎりぎりの混合率だと実ブラウザのcolor-mix()の丸め誤差でAAを
-     割り込むことがあるため(sepiaの--accent-ink定義部コメント参照)、45%(#8D95A0)に
-     補正する(実測4.88)。 */
+  /* UI点検 指摘3の修正で追加。補正前のvar(--ink-mute)(#6A7280)とvar(--chrome-bg)
+     (#26282B)の実測コントラスト比は3.05でAA未満だったため、var(--ink)(#b8bfc6)へ
+     45%寄せた。
+     【注記、2026-09-12】この45%という比率は、--ink-mute がまだ生の #6A7280 だった
+     時点の計算(その時の混合結果は #8D95A0、実測4.88)。その後の指摘4の修正で
+     --ink-mute 自体を白へ50%寄せたため、いまの混合結果は #B6BBC2、
+     --chrome-bg に対する実測は 7.65 になっている(AAに対して大きく余裕がある)。
+     混合率を見直すなら、--ink-mute 側が既に補正済みであることを踏まえること。 */
   --chrome-fg: color-mix(in srgb, var(--ink-mute) 55%, var(--ink) 45%);
   /* UI点検第2弾 指摘4の修正で追加。上でvar(--ink-mute)自体を補正済みのため、
      var(--code-bg)に対しても実測6.04でAA基準を満たす。var(--ink-mute)のまま問題ない。 */
