@@ -523,6 +523,16 @@ html[data-theme="dark"] #theme-moon { display: none; }
    上の文字色に使うと、solarized-darkで実測3.59とAA未満になる(--menu-hover-fg導入時と
    同じ問題)。--menu-hover-fgに差し替える。 */
 .menu-theme-btn:hover { color: var(--menu-hover-fg, var(--accent)); background: var(--accent-soft); }
+/* 右上のアイコンのうち、ON/OFFを持つもの(サイドバー・記法を隠さない表示)のON表示。
+   いまの状態が見て分かるように、ホバーと同じ「アクセントの薄い面 + --menu-hover-fg」で
+   塗る(ホバー色を別に用意すると、ON中にホバーしたとき色が2種類に割れるため同じにする)。
+   --menu-hover-fg を使う理由は上のコメント参照(--ink だと solarized-dark でAA未満)。 */
+.menu-theme-btn[aria-pressed="true"] { color: var(--menu-hover-fg, var(--accent)); background: var(--accent-soft); }
+/* 記法を隠さない表示は Markdownモードでしか意味がないため、それ以外のモードでは押せなく
+   する。隠さずに薄くするのは、アイコンが消えると右隣のボタンが左へ動いて押し間違える
+   ため(位置を固定したまま「いまは使えない」ことを示す)。 */
+.menu-theme-btn:disabled { opacity: .38; cursor: default; }
+.menu-theme-btn:disabled:hover { color: var(--ink-mute); background: transparent; }
 
 /* ===== タブバー(仕様書 第2.10節 C-14、隠し設定) =====
    settings.jsonを直接編集してdisplayMode:"tab"にしたときだけmain.jsがhiddenを外して表示する

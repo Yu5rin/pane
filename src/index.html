@@ -73,6 +73,21 @@
 <body>
   <div id="menubar">
     <span style="flex:1"></span>
+    <!-- 右上のアイコン(依頼): 左3つ=いま開いている文書への操作、右3つ=アプリへの操作、
+         という並び。左3つは「画面の左側(サイドバー) → 本文の見え方(記法表示) →
+         本文の中身(全文コピー)」と、操作の対象が外側から内側へ向かう順に置いている。
+         既存3つ(テーマ・設定・取扱説明書)は位置を覚えて使われているため動かさない。
+         クリック時の配線と状態の反映は src/commands.js の initMenuBar が行う。 -->
+    <button id="btn-menu-sidebar" class="menu-theme-btn" type="button" title="サイドバーの表示切替 (Ctrl+Shift+L)" aria-label="サイドバーの表示切替" aria-pressed="false">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M9.5 4.5v15"/></svg>
+    </button>
+    <button id="btn-menu-source" class="menu-theme-btn" type="button" title="記法を隠さない表示 (Ctrl+/)" aria-label="記法を隠さない表示" aria-pressed="false">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m9 8-4 4 4 4M15 8l4 4-4 4"/></svg>
+    </button>
+    <button id="btn-menu-copyall" class="menu-theme-btn" type="button" title="全文をコピー" aria-label="全文をコピー">
+      <svg class="icon-idle" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15.5V6a2 2 0 0 1 2-2h9.5"/></svg>
+      <svg class="icon-done" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" hidden><path d="m5 12.5 4.5 4.5L19 7"/></svg>
+    </button>
     <button id="btn-theme" class="menu-theme-btn" type="button" title="テーマ切替" aria-label="テーマ切替">
       <svg id="theme-icon-light" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2.5v2.5M12 19v2.5M4.2 4.2l1.8 1.8M18 18l1.8 1.8M2.5 12H5M19 12h2.5M4.2 19.8 6 18M18 6l1.8-1.8"/></svg>
       <svg id="theme-icon-dark" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" hidden><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/></svg>

@@ -1527,6 +1527,15 @@ const ctx = {
     async copyAsMarkdown() {
       try { await navigator.clipboard.writeText(editor.getMarkdownForClipboard()); } catch { /* クリップボード権限が無い環境ではベストエフォート */ }
     },
+    /// 本文をまるごとクリップボードへ入れる(右上のアイコン・Editメニュー・コマンドパレット
+    /// 共通)。「Markdownとしてコピー」(copyAsMarkdown)との違いは、装飾の付いた表示ではなく
+    /// エディタが持っている文字列をそのまま渡すこと。コードやプレーンテキストを別のツールへ
+    /// 移すときに使うため、記法の変換は一切しない。
+    /// 成否は呼び出し元(右上のアイコン)がアイコンの切り替えで示すので、真偽値を返す。
+    async copyAll() {
+      try { await navigator.clipboard.writeText(editor.getValue()); return true; }
+      catch { return false; /* クリップボード権限が無い環境ではベストエフォート */ }
+    },
     async copyAsHtml() {
       const html = editor.getHtmlForClipboard();
       const md = editor.getMarkdownForClipboard();
