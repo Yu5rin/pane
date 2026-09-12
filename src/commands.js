@@ -655,6 +655,20 @@ export function initMenuBar(container, commands, ctx) {
   if (sidebarBtn) sidebarBtn.addEventListener("click", () => runCommand("view.sidebar"));
   if (sourceBtn) sourceBtn.addEventListener("click", () => runCommand("view.sourceMode"));
 
+  // 押しても本文のカーソルを外さない(利用者要望)。
+  // 既定では、ボタンを押した時点でフォーカスがボタンへ移り、本文のカーソルが消える
+  // (実測: view.hasFocus が false になる。カーソル位置自体は保たれるので、見えなく
+  // なるだけだが、書きかけの位置を見失う)。mousedownを止めればフォーカスは動かない。
+  // 対象は「押したあと本文へ戻ってきたい」4つ(サイドバー・記法・全文コピー・テーマ切替)。
+  // 設定と取扱説明書は別ウィンドウを開くので、どのみちフォーカスはそちらへ移る。
+  // テーマ切替(#btn-theme、配線はmain.js)も同じ症状だったため、ここでまとめて面倒を見る。
+  // 同じメニューバーのボタンで挙動が割れると、押すたびにカーソルが消えたり消えなかったり
+  // して分かりにくいため。
+  // キーボード操作(Tabで移動してEnter/Space)は、mousedownを経由しないので影響しない。
+  for (const el of [sidebarBtn, sourceBtn, copyAllBtn, container.querySelector("#btn-theme")]) {
+    el?.addEventListener("mousedown", (e) => e.preventDefault());
+  }
+
   // 全文コピー。押した実感が無いと「効いたのか」が分からないため、コードブロックの
   // コピーボタン(editor.jsのCodeCopyWidget)と同じ流儀で、1.2秒だけアイコンを
   // チェックマークへ差し替える。

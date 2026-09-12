@@ -46,6 +46,23 @@ const btnState = () => page.evaluate(() => ({
   const want = ["btn-menu-sidebar", "btn-menu-source", "btn-menu-copyall", "btn-theme", "btn-menu-settings", "btn-menu-help"];
   ok(`(A) 右上のアイコンの並びが決めどおり(実際=${order.join(" → ")})`, JSON.stringify(order) === JSON.stringify(want));
 
+  // 区切り(利用者要望)。全文コピーとテーマ切替のあいだに、文字ではなく罫線で入れる。
+  const sep = await page.evaluate(() => {
+    const s = document.querySelector(".menubar-sep");
+    if (!s) return null;
+    const r = s.getBoundingClientRect();
+    const kids = [...document.querySelector("#menubar").children];
+    return {
+      w: Math.round(r.width), h: Math.round(r.height),
+      前: kids[kids.indexOf(s) - 1]?.id, 後: kids[kids.indexOf(s) + 1]?.id,
+      文字: s.textContent.trim(), 読み上げ除外: s.getAttribute("aria-hidden"),
+    };
+  });
+  ok(`(A) 全文コピーとテーマ切替のあいだに区切りがある(前=${sep?.前}, 後=${sep?.後})`,
+    sep?.前 === "btn-menu-copyall" && sep?.後 === "btn-theme");
+  ok(`(A) 区切りは文字ではなく線で描き、読み上げ対象から外している(${sep?.w}x${sep?.h}px, 文字="${sep?.文字}")`,
+    sep?.文字 === "" && sep?.読み上げ除外 === "true" && sep?.w >= 1 && sep?.h > 0);
+
   const labels = await page.evaluate(() => ["#btn-menu-sidebar", "#btn-menu-source", "#btn-menu-copyall"]
     .map((s) => document.querySelector(s)?.getAttribute("aria-label")));
   ok(`(A) 3つとも読み上げ用の名前が付いている(実際=${JSON.stringify(labels)})`,
@@ -157,6 +174,47 @@ const btnState = () => page.evaluate(() => ({
   await page.waitForTimeout(200);
   const clip2 = await page.evaluate(() => navigator.clipboard.readText());
   ok(`(E) コマンド(ctx.actions.copyAll)からも同じ結果になる(${JSON.stringify(clip2)})`, clip2 === "別の本文\n");
+}
+
+// ---- (F) 押しても本文のカーソルが外れない(利用者要望) ----
+// 既定では、ボタンを押した時点でフォーカスがボタンへ移り、本文のカーソルが消える。
+// 書きかけの位置を見失うため、mousedownを止めてフォーカスを動かさないようにしている。
+// 設定・取扱説明書は別ウィンドウを開くので対象外。
+{
+  await page.evaluate(() => window.__paneDebugEditor.setValue("あいうえお\n"));
+  await page.click(".cm-content");
+  await page.keyboard.press("End");
+  await page.waitForTimeout(200);
+  const head0 = await page.evaluate(() => window.__paneDebugEditor.view.state.selection.main.head);
+
+  for (const id of ["#btn-menu-sidebar", "#btn-menu-source", "#btn-menu-copyall", "#btn-theme"]) {
+    await page.click(id);
+    await page.waitForTimeout(250);
+    const st = await page.evaluate(() => ({
+      本文にフォーカス: window.__paneDebugEditor.view.hasFocus,
+      位置: window.__paneDebugEditor.view.state.selection.main.head,
+    }));
+    ok(`(F) ${id} を押しても本文のカーソルが残る(フォーカス=${st.本文にフォーカス}, 位置=${st.位置})`,
+      st.本文にフォーカス === true && st.位置 === head0);
+  }
+
+  // マウスを止めてもキーボードからは押せること(Tabで移動してEnter)。
+  const before = await page.evaluate(() => window.__paneDebugCtx.getState().sidebarOpen);
+  await page.evaluate(() => document.querySelector("#btn-menu-sidebar").focus());
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(300);
+  const after = await page.evaluate(() => window.__paneDebugCtx.getState().sidebarOpen);
+  ok(`(F) キーボード(Enter)でも押せる(${before} → ${after})`, before !== after);
+
+  // サイドバーを開いたあと、その中の要素へフォーカスを移せること
+  // (本文へ固定しすぎて、サイドバーが操作できなくなっていないか)。
+  const canFocus = await page.evaluate(() => {
+    const el = document.querySelector("#sidebar input, #sidebar button, .sidebar input, .sidebar button");
+    if (!el) return null;
+    el.focus();
+    return document.activeElement === el;
+  });
+  ok("(F) サイドバーを開いたあと、その中の要素へフォーカスを移せる", canFocus === true);
 }
 
 ok(`ページエラー0件 ${JSON.stringify(allErrors.slice(0, 2))}`, allErrors.length === 0);

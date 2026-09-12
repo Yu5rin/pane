@@ -533,6 +533,10 @@ html[data-theme="dark"] #theme-moon { display: none; }
    ため(位置を固定したまま「いまは使えない」ことを示す)。 */
 .menu-theme-btn:disabled { opacity: .38; cursor: default; }
 .menu-theme-btn:disabled:hover { color: var(--ink-mute); background: transparent; }
+/* 右上のアイコンの区切り(利用者要望)。左3つ(文書への操作)と右3つ(アプリへの操作)の
+   境目。文字の「|」ではなく罫線で描く(記号は文字で描かない。仕様書10.1節)。
+   高さはアイコンより少し低くして、線が主張しすぎないようにする。 */
+.menubar-sep { width: 1px; height: 16px; background: var(--rule); margin: 0 5px; flex: none; }
 
 /* ===== タブバー(仕様書 第2.10節 C-14、隠し設定) =====
    settings.jsonを直接編集してdisplayMode:"tab"にしたときだけmain.jsがhiddenを外して表示する
