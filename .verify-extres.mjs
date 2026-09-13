@@ -112,6 +112,14 @@ async function openFile(page, path, text, extra = {}) {
     encoding: "UTF-8", lineEnding: "CRLF", readOnly: false, ...extra,
   }), { path, text, extra });
   await page.waitForTimeout(400);
+  // 起動時に本文の先頭へフォーカスが当たるようになった(利用者要望、src/main.jsの
+  // focusEditorAtStart参照)。カーソルのある行は記法をむき出しで見せる仕様のため、
+  // そのままだと1行目の装飾(画像ウィジェット・見出し記号の非表示など)が出ず、
+  // 「装飾されること」を確かめるこのスイートが落ちる。装飾の確認が目的なので、
+  // 本文からフォーカスを外してから検証する(フォーカスが無ければ常に装飾。
+  // src/editor.jsのcursorInside参照)。
+  await page.evaluate(() => document.activeElement?.blur?.());
+  await page.waitForTimeout(120);
 }
 function countRequestsTo(page, host) {
   return page.__requestLog.filter((u) => u.includes(host)).length;

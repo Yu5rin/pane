@@ -551,6 +551,11 @@ class CodeCopyWidget extends WidgetType {
       // .done)のに加え、aria-label/titleも一時的に「コピーしました」へ変える。ボタンは
       // ホバー/カーソルが無ければ既定で不透明度0(表示条件は下記CSS参照)だが、.doneの間だけは
       // 常に不透明にする(CSS側)ため、マウスが離れても結果が見える。
+      // 連打しても毎回アニメーション(style.cssのcopy-pop / copy-draw)をやり直す。
+      // クラスを付けたままもう一度addしても再生されないため、いったん外し、間に
+      // レイアウトの読み取りを挟んでから付け直す(commands.jsの全文コピーと同じ)。
+      btn.classList.remove("done");
+      void btn.offsetWidth;
       btn.classList.add("done");
       btn.setAttribute("aria-label", "コピーしました");
       btn.title = "コピーしました";
@@ -4852,6 +4857,31 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
     }),
   });
 
+  // view.setState()でstateを丸ごと差し替えると、focusFieldは新しいstateのcreate()の
+  // 既定値(false)に戻る。ところがDOM側のフォーカスは何も変わらないため
+  // EditorView.focusChangeEffect(focusNotifier)は発火せず、「実際には本文にフォーカスが
+  // あるのに、focusFieldはfalse」という食い違いが残り続ける(利用者がいったん別の場所を
+  // クリックしてから本文へ戻るまで直らない)。
+  //
+  // この食い違いは見た目の問題では済まない。focusFieldを見ているのは表・[toc]・Mermaid・
+  // コードブロック内数式・$$裸記法・生HTMLの6つのブロック装飾で、いずれも「フォーカスが
+  // あってカーソルがそのブロックに重なっているなら装飾せず生テキストで見せる」という
+  // 判定に使っている。falseのままだとカーソルの真下でブロックが描画され、カーソルは
+  // 置き換え範囲(atomic)の外へ押し出される。そこで次の1文字を打つと押し出された位置へ
+  // 入ってしまい、打った文字が別の行に紛れ込む(実際に"[toc]"と打つと
+  // "cursor-park\n]\n[toc]" のように壊れた。.verify-blockfield-recompute.mjsの(3-toc)が
+  // これを捕らえた)。
+  //
+  // 起動直後に本文へフォーカスするようにした(main.jsのfocusEditorAtStart)ことで
+  // 表面化したが、原因はsetState側にあり、タブ切替(setEditorState)でも同じことが起きる。
+  // 復旧はstateの外にある唯一の真実=view.hasFocusから当て直す。
+  function syncFocusFieldToDom() {
+    const real = view.hasFocus;
+    if ((view.state.field(focusField, false) ?? false) !== real) {
+      view.dispatch({ effects: focusEffect.of(real) });
+    }
+  }
+
   return {
     view,
     getValue: () => view.state.doc.toString(),
@@ -4884,6 +4914,7 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
         selection: { anchor: 0 },
         extensions: buildExtensionsForSetValue(prevState),
       }));
+      syncFocusFieldToDom();
       const restoreEffects = [];
       if (prevExtToggles !== undefined) restoreEffects.push(setExtToggles.of(prevExtToggles));
       if (prevColorPreviewEnabled !== undefined) restoreEffects.push(setColorPreviewEnabled.of(prevColorPreviewEnabled));
@@ -5365,6 +5396,7 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
       // 切り替わった後のタブ(=別のEditorState)を誤って書き換えることがなくなる。
       modeGen++;
       view.setState(state);
+      syncFocusFieldToDom(); // 上のsyncFocusFieldToDom定義部のコメント参照
       if (onRender) requestAnimationFrame(() => onRender());
     },
     // 新規タブ用のまっさらなEditorState(履歴を含め何も持たない状態)を作る。

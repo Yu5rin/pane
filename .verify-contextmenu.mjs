@@ -75,9 +75,20 @@ async function openFile(page, text, extra = {}) {
     encoding: "UTF-8", lineEnding: "CRLF", readOnly: false, ...extra,
   }), { text, extra });
   await page.waitForTimeout(400);
+  // 下のsetDocPlainと同じ理由で本文からフォーカスを外す(コメントはそちらを参照)。
+  // ここはブリッジありのページでも使うため、__paneDebugEditorに頼らずDOM側から外す
+  // (__paneDebugEditorはブリッジが無いときだけ公開される。src/main.jsの該当箇所参照)。
+  await page.evaluate(() => document.activeElement?.blur?.());
+  await page.waitForTimeout(200);
 }
 async function setDocPlain(page, text) {
   await page.evaluate((t) => { window.__paneDebugEditor.setValue(t); }, text);
+  // 起動時に本文の先頭へフォーカスが当たるようになった(利用者要望、src/main.jsの
+  // focusEditorAtStart参照)。カーソルのある行は記法をむき出しで見せる仕様のため、
+  // 1行目から始まる表は生テキストのままになり、`.cm-table td`を右クリックできない。
+  // 表として描画された状態を見たいので、本文からフォーカスを外す
+  // (フォーカスが無ければ常に装飾。src/editor.jsのcursorInside参照)。
+  await page.evaluate(() => window.__paneDebugEditor.blur());
   await page.waitForTimeout(200);
 }
 function clearSent(page) { return page.evaluate(() => { window.__sent = []; }); }

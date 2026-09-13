@@ -125,6 +125,12 @@ const JS_CODE = "function f(a) {\n  if (a > 0) {\n    return a;\n  }\n  return 0
   }));
   ok(`① (6) コピー直後に.doneクラスが付く: ${doneState.hasDone}`, doneState.hasDone === true);
   ok(`① (6) コピー直後のaria-label: "${doneState.ariaLabel}"`, doneState.ariaLabel === "コピーしました");
+  // コピーできたことが分かる動き(利用者要望)。右上の全文コピーと同じ手応えにしてある
+  // (style.cssのcopy-pop / copy-draw)。名前だけでなく再生中であることまで見る。
+  const doneAnims = await page.locator(".cm-code-copy").evaluate((el) =>
+    el.getAnimations({ subtree: true }).filter((a) => a.animationName).map((a) => `${a.animationName}:${a.playState}`));
+  ok(`① (6) コピーできたことが分かる動きが走る(実際=${JSON.stringify(doneAnims)})`,
+    doneAnims.some((a) => a.startsWith("copy-pop:running")) && doneAnims.some((a) => a.startsWith("copy-draw:running")));
   await page.waitForTimeout(1300);
   const afterState = await page.locator(".cm-code-copy").evaluate((el) => ({
     hasDone: el.classList.contains("done"),

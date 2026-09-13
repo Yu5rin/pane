@@ -46,6 +46,13 @@ async function open(fileName) {
     encoding: "UTF-8", lineEnding: "CRLF", readOnly: false,
   }), { fileName, text: SAMPLE });
   await page.waitForTimeout(900);
+  // 起動時に本文の先頭へフォーカスが当たるようになった(利用者要望、src/main.jsの
+  // focusEditorAtStart参照)。カーソルのある行は記法をむき出しで見せる仕様のため、
+  // そのままだと1行目の見出し記号が隠れず、このスイートが見たい「Markdownでは記法が
+  // 隠れる」の確認にならない。本文からフォーカスを外してから読む
+  // (フォーカスが無ければ常に装飾。src/editor.jsのcursorInside参照)。
+  await page.evaluate(() => document.activeElement?.blur?.());
+  await page.waitForTimeout(150);
   return {
     mode: await page.textContent("#status-mode"),
     // 画面上に見えているテキスト(記法マーカーが隠れていればここから消える)

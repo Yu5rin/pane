@@ -292,8 +292,35 @@ function trySignalInitialRenderReady() {
   // requestAnimationFrame/setTimeoutを一切使わない同期呼び出しにした)。
   reportStartupMetrics();
   startStallWatch();
+  // 起動したらすぐ書き始められるように、本文へフォーカスしてカーソルを先頭へ置く
+  // (利用者要望)。これが無いと起動直後のフォーカスはbody(実測: view.hasFocusがfalse、
+  // activeElementがBODY)で、一度クリックしないとキー入力もCtrl+Z等のショートカットも
+  // 効かない(CodeMirrorのkeymapはcontentDOMにフォーカスがある時だけ働く)。
+  //
+  // 位置を0にするのは、前回のカーソル位置を復元する仕組みが無いため
+  // (タブのスナップショットはスクロール位置だけを持つ。saveActiveTabSnapshot参照)。
+  // 将来カーソル位置の復元を入れるなら、ここは復元後の位置を尊重するよう直すこと。
+  //
+  // ここで呼ぶ理由: C#側はこの直後にWebView2を表示する。それより前だと、非表示の
+  // コントロールに対するフォーカス指定になり実機で効かない恐れがある。逆にこれより
+  // 後だと「送ってから表示されるまで」の隙間に利用者がクリックした位置を奪いかねない。
+  focusEditorAtStart();
   logToHost("log", "initial-render-ready送信(テーマ・メニューバー・ステータスバー・本文エリアの初期描画完了)");
   bridge?.postMessage({ type: "initial-render-ready" });
+}
+
+/// 起動時に一度だけ、本文の先頭へカーソルを置いてフォーカスする。
+/// 失敗しても起動は続ける(フォーカスが当たらないだけで、クリックすれば従来どおり使える)。
+function focusEditorAtStart() {
+  try {
+    // 既に利用者が別の場所(サイドバーの検索欄など)を触っていたら奪わない。
+    const active = document.activeElement;
+    if (active && active !== document.body && active !== document.documentElement) return;
+    editor.view.dispatch({ selection: { anchor: 0, head: 0 } });
+    editor.focus();
+  } catch (e) {
+    logToHost("warn", `起動時のフォーカスに失敗: ${e && e.message ? e.message : e}`);
+  }
 }
 
 let currentHandle = null; // File System Access API(ブラウザ単体時のみ使用)
@@ -1288,6 +1315,16 @@ const editor = createEditor(host, {
     // (editor.hasBlockedRemoteResources()はO(1)の読み出しのみ。文書全体は走査しない)。
     updateRemoteBlockedStatus();
   },
+  // 【実際に起きた不具合の修正】フォーカスの出入りでも外部リソースの判定をやり直す。
+  // カーソルのある行は記法をむき出しで見せる(cursorInside)ため、フォーカスの有無で
+  // ライブプレビューが組み直され、画像ウィジェット——つまり「ブロック中の外部リソースが
+  // あるか」——も変わる。ところがupdateRemoteBlockedStatus()はonSelectionChangeからしか
+  // 呼んでおらず、フォーカスが出入りしただけでは選択が動かないため、ステータスバーの
+  // 「外部リソースを読み込む」が古い状態のまま取り残されていた。
+  // 起動時に本文へフォーカスするようにした(focusEditorAtStart)ことで表面化した。
+  // それ以前は起動直後にフォーカスが無く、最初から装飾済みだったので出番が無かった。
+  onFocus() { updateRemoteBlockedStatus(); },
+  onBlur() { updateRemoteBlockedStatus(); },
   // スマートペースト(仕様書 第2.9.3節): クリップボードにHTMLがあればMarkdownへ変換して挿入する。
   // プレーンテキストのみの場合は既定の貼り付け(CM6の処理)に任せる。
   // 併せて貼り付け文字数を記録する(内容からの編集モード自動判定のトリガーに使う。上のonChange参照)。
@@ -2044,6 +2081,17 @@ if (bridge) {
   });
   bridge.postMessage({ type: "ready" });
 }
+
+// 起動したらすぐ書き始められるようにする(利用者要望)。呼ぶ場所が2か所あるのは、
+// どちらか一方だけでは足りないため。
+//   ・ここ(スクリプトの読み込み直後): C#と繋がっていない状態(ブラウザ単体・回帰スイート)
+//     でも必ず通る。C#が居るときも、この時点で当てられるなら当てておく。
+//   ・trySignalInitialRenderReady()の中: C#はinitial-render-readyを受け取るまでWebView2を
+//     非表示にしている。非表示のコントロールへのフォーカス指定が実機で効かない場合に備え、
+//     表示される直前にもう一度当てる。
+// focusEditorAtStart()は「既にどこかにフォーカスがあれば奪わない」ので、2回通っても
+// 二重に動くことはない(1回目で本文に当たれば2回目は何もしない)。
+focusEditorAtStart();
 
 // 拡張子既定(fileModeOverridesがあればそちらを優先)による自動判定。
 // setMode()が「手動で選んだモードが自動判定と一致するか」を調べるのにも使う
