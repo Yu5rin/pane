@@ -150,22 +150,51 @@ const btnState = () => page.evaluate(() => ({
   const clip = await page.evaluate(() => navigator.clipboard.readText());
   ok(`(E) 本文がそのままクリップボードへ入る(${JSON.stringify(clip.slice(0, 18))}…)`, clip === BODY);
 
-  const during = await page.evaluate(() => ({
-    idle: document.querySelector("#btn-menu-copyall .icon-idle")?.hidden,
-    done: document.querySelector("#btn-menu-copyall .icon-done")?.hidden,
-    label: document.querySelector("#btn-menu-copyall")?.getAttribute("aria-label"),
-  }));
-  ok(`(E) 押した直後はチェックマークに変わる(label="${during.label}")`,
-    during.idle === true && during.done === false && during.label === "コピーしました");
+  // 【ここは実際に見えているかを見る】以前はSVGの`hidden`プロパティだけを確かめていたが、
+  // `hidden`はHTMLElementのものでSVGElementには無く、JSから代入しても属性は変わらない。
+  // そのためチェックマークは一度も表示されていないのにテストは通っていた。
+  // 見た目の確認は、実際に描画されているか(computedStyleのdisplay)で行う。
+  const iconState = () => page.evaluate(() => {
+    const btn = document.querySelector("#btn-menu-copyall");
+    const disp = (sel) => {
+      const el = btn.querySelector(sel);
+      return el ? getComputedStyle(el).display : null;
+    };
+    return {
+      idle: disp(".icon-idle"),
+      done: disp(".icon-done"),
+      label: btn.getAttribute("aria-label"),
+      copied: btn.classList.contains("copied"),
+      // 動き(アニメーション)が実際に走っているか。名前だけでなく再生中であることまで見る。
+      anims: btn.getAnimations({ subtree: true })
+        .filter((a) => a.animationName)
+        .map((a) => `${a.animationName}:${a.playState}`),
+    };
+  });
+  const during = await iconState();
+  ok(`(E) 押した直後はチェックマークが実際に表示される(コピー前=${during.idle}, チェック=${during.done}, label="${during.label}")`,
+    during.idle === "none" && during.done !== "none" && during.label === "コピーしました");
+  // 利用者要望: コピーできたことが分かるアニメーション。ボタンの弾みとチェックマークの
+  // 描き進めの2つが同時に走る。
+  ok(`(E) コピーできたことが分かる動きが走る(実際=${JSON.stringify(during.anims)})`,
+    during.anims.some((a) => a.startsWith("copy-pop:running"))
+    && during.anims.some((a) => a.startsWith("copy-draw:running")));
+
+  // 連打しても毎回やり直す(同じ場所で続けて押したときに何も起きないように見えない)。
+  await page.waitForTimeout(500);
+  await page.click("#btn-menu-copyall");
+  await page.waitForTimeout(30);
+  const again = await page.evaluate(() => {
+    const btn = document.querySelector("#btn-menu-copyall");
+    const a = btn.getAnimations({ subtree: true }).find((x) => x.animationName === "copy-pop");
+    return a ? Math.round(a.currentTime) : null;
+  });
+  ok(`(E) 連打しても動きが最初からやり直す(2回目の経過=${again}ms)`, again !== null && again < 120);
 
   await page.waitForTimeout(1400);
-  const after = await page.evaluate(() => ({
-    idle: document.querySelector("#btn-menu-copyall .icon-idle")?.hidden,
-    done: document.querySelector("#btn-menu-copyall .icon-done")?.hidden,
-    label: document.querySelector("#btn-menu-copyall")?.getAttribute("aria-label"),
-  }));
-  ok(`(E) 1.2秒で元のアイコンへ戻る(label="${after.label}")`,
-    after.idle === false && after.done === true && after.label === "全文をコピー");
+  const after = await iconState();
+  ok(`(E) 1.2秒で元のアイコンへ戻る(コピー前=${after.idle}, チェック=${after.done}, label="${after.label}")`,
+    after.idle !== "none" && after.done === "none" && after.label === "全文をコピー" && after.copied === false);
 
   // メニュー・コマンドパレットからも同じ動作になること(ボタンだけの機能にしない)。
   await page.evaluate(() => window.__paneDebugEditor.setValue("別の本文\n"));
@@ -216,6 +245,92 @@ const btnState = () => page.evaluate(() => ({
   });
   ok("(F) サイドバーを開いたあと、その中の要素へフォーカスを移せる", canFocus === true);
 }
+
+// ---- (G) 起動したら本文の先頭にカーソルがある(利用者要望) ----
+// 起動直後のフォーカスはbody(実測: view.hasFocusがfalse、activeElementがBODY)で、
+// 一度クリックしないとキー入力もCtrl+Z等のショートカットも効かなかった。
+// 呼ぶ場所が2か所ある理由(bridgeの有無)は src/main.js のコメント参照。
+{
+  const fresh = await context.newPage();
+  fresh.on("pageerror", (e) => allErrors.push(String(e.stack || e)));
+  await fresh.goto(BASE, { waitUntil: "load" });
+  await fresh.waitForSelector(".cm-content", { timeout: 15000 });
+  await fresh.waitForTimeout(600);
+
+  const st = await fresh.evaluate(() => ({
+    フォーカス: window.__paneDebugEditor.view.hasFocus,
+    位置: window.__paneDebugEditor.view.state.selection.main.head,
+  }));
+  ok(`(G) 起動直後、本文にフォーカスがありカーソルが先頭にある(フォーカス=${st.フォーカス}, 位置=${st.位置})`,
+    st.フォーカス === true && st.位置 === 0);
+
+  // 要点は「クリックせずにそのまま書き始められること」。フォーカスの有無だけでなく
+  // 実際に文字が入るところまで見る。
+  await fresh.keyboard.type("すぐ書ける");
+  await fresh.waitForTimeout(200);
+  const typed = await fresh.evaluate(() => window.__paneDebugEditor.view.state.doc.toString());
+  ok(`(G) クリックせずにそのまま入力できる(実際="${typed}")`, typed === "すぐ書ける");
+
+  // 本文がある状態でも先頭に来ること(末尾やスクロール位置に飛ばない)。
+  await fresh.evaluate(() => window.__paneDebugEditor.setValue("一行目\n二行目\n三行目\n"));
+  await fresh.waitForTimeout(300);
+  const st2 = await fresh.evaluate(() => ({
+    位置: window.__paneDebugEditor.view.state.selection.main.head,
+    長さ: window.__paneDebugEditor.view.state.doc.length,
+  }));
+  ok(`(G) 本文があっても先頭のまま(位置=${st2.位置}, 長さ=${st2.長さ})`, st2.位置 === 0 && st2.長さ > 0);
+  await fresh.close();
+}
+
+// 先に別の場所へフォーカスがあれば奪わないこと。
+{
+  const fresh = await context.newPage();
+  fresh.on("pageerror", (e) => allErrors.push(String(e.stack || e)));
+  await fresh.addInitScript(() => {
+    document.addEventListener("DOMContentLoaded", () => {
+      document.querySelector("#btn-menu-settings")?.focus();
+    }, { once: true });
+  });
+  await fresh.goto(BASE, { waitUntil: "load" });
+  await fresh.waitForSelector(".cm-content", { timeout: 15000 });
+  await fresh.waitForTimeout(600);
+  const who = await fresh.evaluate(() => document.activeElement?.id || document.activeElement?.className);
+  ok(`(G) 先に別の場所へフォーカスがあれば奪わない(実際=${who})`, who === "btn-menu-settings");
+  await fresh.close();
+}
+
+// ---- (H) 本文を差し替えてもフォーカスの状態が食い違わない(起動時フォーカスで表面化した不具合) ----
+// view.setState()はstateを丸ごと作り直すため、フォーカス状態を持つStateFieldが既定値(false)へ
+// 戻る。DOMのフォーカスは変わらないので通知も飛ばず、「実際にはフォーカスがあるのにfalse」が
+// 残り続ける。するとカーソルの真下でブロック([toc]・表・Mermaid等)が描画され、カーソルが
+// 置き換え範囲の外へ押し出されて、次に打った1文字が別の行へ紛れ込む。
+// 起動時に本文へフォーカスするようにしたこと(上の(G))で表面化したが、原因はsetState側にある。
+// 詳しくは src/editor.js の syncFocusFieldToDom 定義部のコメントを参照。
+async function testTypingAfterDocSwap(label, swap) {
+  const fresh = await context.newPage();
+  fresh.on("pageerror", (e) => allErrors.push(String(e.stack || e)));
+  await fresh.goto(BASE, { waitUntil: "load" });
+  await fresh.waitForSelector(".cm-content", { timeout: 15000 });
+  await fresh.waitForTimeout(600); // 起動時フォーカスが当たるのを待つ(クリックはしない)
+  await fresh.evaluate(swap);
+  await fresh.waitForTimeout(200);
+  await fresh.keyboard.press("Control+End");
+  await fresh.keyboard.type("[toc]", { delay: 8 }); // 1文字ずつ。途中で"[toc]"が完成する
+  await fresh.waitForTimeout(200);
+  const doc = await fresh.evaluate(() => window.__paneDebugEditor.view.state.doc.toString());
+  ok(`(H) ${label}のあと、クリックせず打った文字が崩れない(実際=${JSON.stringify(doc)})`,
+    doc === "park\n\n[toc]");
+  // 本来の表示(カーソルを外せば目次として描画される)も壊れていないこと。
+  await fresh.evaluate(() => window.__paneDebugEditor.blur());
+  await fresh.waitForTimeout(400);
+  const tocCount = await fresh.evaluate(() => document.querySelectorAll(".cm-toc").length);
+  ok(`(H) ${label}のあとでもカーソルを外せば目次として描画される(個数=${tocCount})`, tocCount >= 1);
+  await fresh.close();
+}
+await testTypingAfterDocSwap("setValue(別ファイルを開く相当)",
+  () => window.__paneDebugEditor.setValue("park\n\n"));
+await testTypingAfterDocSwap("setEditorState(タブ切替相当)",
+  () => window.__paneDebugEditor.setEditorState(window.__paneDebugEditor.createFreshState("park\n\n")));
 
 ok(`ページエラー0件 ${JSON.stringify(allErrors.slice(0, 2))}`, allErrors.length === 0);
 await browser.close();

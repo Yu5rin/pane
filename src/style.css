@@ -518,7 +518,7 @@ html[data-theme="dark"] #theme-moon { display: none; }
 .menu-item-label { flex: 1; white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
 .menu-item-shortcut { color: var(--ink-sub); font-family: var(--font-mono); font-size: 10.5px; flex: none; }
 .menu-separator { height: 1px; background: var(--rule); margin: 4px 6px; }
-.menu-theme-btn { border: none; background: transparent; color: var(--ink-mute); font: inherit; cursor: pointer; padding: 4px 8px; border-radius: 6px; display: inline-flex; align-items: center; }
+.menu-theme-btn { border: none; background: transparent; color: var(--ink-mute); font: inherit; cursor: pointer; padding: 4px 8px; border-radius: 6px; display: inline-flex; align-items: center; transition: color .18s, background-color .18s; }
 /* UI点検第2弾(自主点検で追加発見。指摘8と同根): var(--ink)をvar(--accent-soft)背景の
    上の文字色に使うと、solarized-darkで実測3.59とAA未満になる(--menu-hover-fg導入時と
    同じ問題)。--menu-hover-fgに差し替える。 */
@@ -537,6 +537,46 @@ html[data-theme="dark"] #theme-moon { display: none; }
    境目。文字の「|」ではなく罫線で描く(記号は文字で描かない。仕様書10.1節)。
    高さはアイコンより少し低くして、線が主張しすぎないようにする。 */
 .menubar-sep { width: 1px; height: 16px; background: var(--rule); margin: 0 5px; flex: none; }
+
+/* 全文コピーのアイコンの出し分け。
+   【実際に起きた不具合の修正】以前はJSでSVGの`hidden`を付け外ししていたが効いていなかった。
+   `hidden`はHTMLElementのプロパティで、SVGElementには無い。`svgEl.hidden = false`は
+   ただのJSプロパティを作るだけで、HTMLの`hidden`属性は残るため`display: none`のまま——
+   つまりチェックマークは一度も表示されていなかった。タイトルバーのコピー(#btn-copy)や
+   コードブロックのコピー(.cm-code-copy)と同じく、ボタンのクラスでCSS側が出し分ける形に
+   揃える(経緯は docs/調査記録/修正-コピーの手応え.md)。 */
+#btn-menu-copyall .icon-done { display: none; }
+#btn-menu-copyall.copied .icon-idle { display: none; }
+#btn-menu-copyall.copied .icon-done { display: inline; }
+
+/* 押したときの手応え(利用者要望)。アイコンを差し替えるだけでは「押した瞬間」が分からず、
+   マウスを動かさずに続けて押すと何も起きていないように見えた。そこで、チェックマークを
+   線として描き進めながら、ボタン全体を一度だけ軽く弾ませる。
+   色はホバー/ONと同じ「アクセントの薄い面 + --menu-hover-fg」を使い、ここだけ別の色を
+   持ち込まない(仕様書 第10.2節)。--menu-hover-fg を使う理由は上のホバーのコメント参照。
+   線の描き進めは stroke-dasharray/stroke-dashoffset で行う。26 はチェックマークの
+   パス長(実測で約22)より少し長い値で、dashoffsetが26なら線は完全に隠れ、0で全部見える。 */
+#btn-menu-copyall.copied { color: var(--menu-hover-fg, var(--accent)); background: var(--accent-soft); animation: copy-pop .34s cubic-bezier(.2, .9, .3, 1.2); }
+#btn-menu-copyall .icon-done path { stroke-dasharray: 26; stroke-dashoffset: 0; }
+#btn-menu-copyall.copied .icon-done path { animation: copy-draw .26s ease-out both; }
+@keyframes copy-pop {
+  0% { transform: scale(1); }
+  38% { transform: scale(1.16); }
+  100% { transform: scale(1); }
+}
+@keyframes copy-draw {
+  from { stroke-dashoffset: 26; }
+  to { stroke-dashoffset: 0; }
+}
+/* 動きを控える設定(prefers-reduced-motion)では動かさない。下方の共通ルールは
+   transitionだけを止めるため、animationはここで個別に止める。色の変化とアイコンの
+   差し替えは残るので、コピーできたことは動き無しでも分かる。 */
+@media (prefers-reduced-motion: reduce) {
+  #btn-menu-copyall.copied,
+  #btn-menu-copyall.copied .icon-done path,
+  .cm-code-copy.done,
+  .cm-code-copy.done .ic-done path { animation: none !important; }
+}
 
 /* ===== タブバー(仕様書 第2.10節 C-14、隠し設定) =====
    settings.jsonを直接編集してdisplayMode:"tab"にしたときだけmain.jsがhiddenを外して表示する
@@ -929,7 +969,11 @@ html[data-theme="dark"] .cm-line.cm-codeblock-line { background: var(--code-bg);
 .cm-line.cm-cb-last.cm-cb-fence-hidden { padding-bottom: 2px !important; }
 .cm-code-copy { position: absolute; top: 4px; right: 6px; z-index: 2; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; color: var(--ink-sub); cursor: pointer; padding: 0; opacity: 0; pointer-events: none; transition: color .15s, transform .15s, opacity .15s; }
 .cm-code-copy:active { transform: scale(.9); }
-.cm-code-copy.done { color: var(--accent-ink); }
+.cm-code-copy.done { color: var(--accent-ink); animation: copy-pop .34s cubic-bezier(.2, .9, .3, 1.2); }
+/* 右上の全文コピーと同じ手応えにする(同じ「コピー」なのに片方だけ動くと分かりにくい)。
+   keyframesと26という数値の意味は上のメニューバー側のコメント参照。 */
+.cm-code-copy .ic-done path { stroke-dasharray: 26; stroke-dashoffset: 0; }
+.cm-code-copy.done .ic-done path { animation: copy-draw .26s ease-out both; }
 .cm-code-copy .ic-done { display: none; }
 .cm-code-copy.done .ic-copy { display: none; }
 .cm-code-copy.done .ic-done { display: inline; }

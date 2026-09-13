@@ -672,22 +672,34 @@ export function initMenuBar(container, commands, ctx) {
   // 全文コピー。押した実感が無いと「効いたのか」が分からないため、コードブロックの
   // コピーボタン(editor.jsのCodeCopyWidget)と同じ流儀で、1.2秒だけアイコンを
   // チェックマークへ差し替える。
+  // あわせて、コピーできたことが分かるよう短いアニメーションを付ける(利用者要望)。
+  // アイコンの差し替えだけだと「押した瞬間」が分からず、同じ場所で続けて押したときに
+  // 何も起きていないように見えた。見た目はCSS側(copiedクラス、style.cssのcopy-pop /
+  // copy-draw)が持つ。動きを控える設定では止まる(style.cssの該当箇所参照)。
+  // 【実際に起きた不具合の修正】アイコンの出し分けは、以前はここでSVGの`hidden`を
+  // 付け外ししていたが、`hidden`はHTMLElementのプロパティでSVGElementには無い。
+  // `svgEl.hidden = false`はただのJSプロパティを作るだけで、HTMLの`hidden`属性は残り
+  // `display: none`のままだった。つまりチェックマークは一度も表示されていなかった
+  // (当時のテストはaria-labelしか見ていなかったので気づけなかった)。
+  // いまはcopiedクラス1つで、CSS側がアイコンの出し分けも動きも受け持つ。
   if (copyAllBtn) {
-    const idleIcon = copyAllBtn.querySelector(".icon-idle");
-    const doneIcon = copyAllBtn.querySelector(".icon-done");
     const idleLabel = copyAllBtn.getAttribute("aria-label") || "全文をコピー";
     let doneTimer = 0;
     copyAllBtn.addEventListener("click", async () => {
       const okCopied = await ctx.actions.copyAll();
       if (!okCopied) return;   // 失敗したのに成功の見た目を出さない
-      if (idleIcon) idleIcon.hidden = true;
-      if (doneIcon) doneIcon.hidden = false;
       copyAllBtn.setAttribute("aria-label", "コピーしました");
       copyAllBtn.title = "コピーしました";
+      // 連打しても毎回アニメーションをやり直す。クラスを外して付け直すだけでは、
+      // 同じフレーム内の変更が1つにまとめられてブラウザが「変化なし」と見なし、
+      // アニメーションが再生されない。間にレイアウトの読み取り(offsetWidth)を
+      // 挟んで、そこまでの状態を確定させる。
+      copyAllBtn.classList.remove("copied");
+      void copyAllBtn.offsetWidth;
+      copyAllBtn.classList.add("copied");
       clearTimeout(doneTimer);   // 連打しても最後の1回から1.2秒数える
       doneTimer = setTimeout(() => {
-        if (idleIcon) idleIcon.hidden = false;
-        if (doneIcon) doneIcon.hidden = true;
+        copyAllBtn.classList.remove("copied");
         copyAllBtn.setAttribute("aria-label", idleLabel);
         copyAllBtn.title = "全文をコピー";
       }, 1200);
