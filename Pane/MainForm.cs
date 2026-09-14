@@ -131,13 +131,17 @@ internal sealed class MainForm : Form
 
     /// <summary>開いているファイルが外部で削除・リネームされたか
     /// (docs/調査記録/点検-機能と動作.md「外部での削除・リネームを検知しない」)。trueならOnFileChangedExternally
-    /// と同じデバウンス(<see cref="_externalChangeDebounceTimer"/>)を経て、通常の「変更されました」
-    /// より優先して1回だけ知らせる(削除・リネームの方が強い信号のため)。</summary>
+    /// と同じデバウンス(<see cref="_externalChangeDebounceTimer"/>)を経て処理され、通常の
+    /// 「変更されました」より優先される(削除・リネームの方が強い信号のため)。
+    /// 【変更】以前はここでOKだけのダイアログを出していたが、いまは出さない。理由と、
+    /// 代わりに上書き保存の直前で確認する形にした経緯は<see cref="ExternalFileStateLogic"/>参照。</summary>
     private bool _externalRemovalPending;
 
-    /// <summary>削除ならnull、リネームなら変更後のフルパス。<see cref="_externalRemovalPending"/>と
-    /// 対で使う。</summary>
-    private string? _externalRenameNewFullPath;
+    /// <summary>外部で名前を変更されたとき、その変更後のフルパスを覚えておく。
+    /// 上書き保存の直前に「元の名前が無い」と分かったとき、どこへ行ったのかを文面に出すために使う
+    /// (<see cref="ExternalFileStateLogic"/>)。削除ならnull。別のファイルを開く・自分で保存する
+    /// タイミング(StartWatching/StopWatching)で捨てる。</summary>
+    private string? _externalRenamedToPath;
 
     /// <summary>外部変更ダイアログで「いいえ」を選んだファイルのパス(このウィンドウが自分で
     /// 保存する、または別のファイルを開くまで、そのファイルについては再度ダイアログを
@@ -2116,6 +2120,9 @@ internal sealed class MainForm : Form
         }
 
         string? targetPath = _currentPath;
+        // 「名前を付けて保存」で利用者が保存先を選んだかどうか。選んだのなら、その場所に
+        // 何が在ろうと(あるいは無かろうと)利用者の意思なので、下の「消えています」確認は出さない。
+        bool pickedByUser = false;
         if (saveAs || targetPath is null)
         {
             string defaultExt = SettingsService.Load().DefaultFileExtension;
@@ -2137,6 +2144,40 @@ internal sealed class MainForm : Form
                 return;
             }
             targetPath = dialog.FileName;
+            pickedByUser = true;
+        }
+
+        // 開いているファイルを黙って上書きするつもりが、その相手がもう無い場合だけ確認する
+        // (経緯はExternalFileStateLogicの先頭コメント)。検知イベントのフラグではなく
+        // 「いま実際に在るか」で判断するので、監視を張れていない経路(ログディレクトリ配下・
+        // フォルダごと消された・監視の例外)でも同じように効く。判定と文面はテストで固定してある
+        // (ExternalFileStateLogic / Pane.Tests)。
+        if (!pickedByUser)
+        {
+            string? renamedTo = _externalRenamedToPath;
+            ExternalFileState state = ExternalFileStateLogic.Evaluate(
+                File.Exists(targetPath),
+                renamedTo,
+                renamedTo is not null && File.Exists(renamedTo));
+            if (state != ExternalFileState.Present)
+            {
+                Logger.Write($"保存前の確認: 保存先が見当たらない ({state}, {PrivacyLogFormatter.ShortenPath(targetPath)})");
+                DialogResult goneChoice = PaneDialog.Show(
+                    this,
+                    ExternalFileStateLogic.BuildSaveConfirmMessage(
+                        state,
+                        Path.GetFileName(targetPath),
+                        renamedTo is null ? null : Path.GetFileName(renamedTo)),
+                    "Pane",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Warning);
+                if (goneChoice != DialogResult.Yes)
+                {
+                    CompleteSave(ok: false);
+                    PostToWeb(new { type = "save-result", ok = false, canceled = true });
+                    return;
+                }
+            }
         }
 
         // 選んでいる文字コード(通常はShift_JIS)で表現できない文字が含まれる場合、
@@ -3432,6 +3473,10 @@ internal sealed class MainForm : Form
     /// タイトルを更新する(無駄な再描画を避ける)。</summary>
     private void ClearSuppressedExternalChangePath()
     {
+        // 覚えている「名前の変更先」も一緒に捨てる。StartWatching/StopWatchingが呼ばれるのは
+        // 監視対象が変わったとき(=自分で保存した、別のファイルを開いた)なので、前のファイルに
+        // ついての記憶をそのまま持ち越すと、次のファイルの保存確認に無関係な名前が出てしまう。
+        _externalRenamedToPath = null;
         if (_suppressedExternalChangePath is null) return;
         _suppressedExternalChangePath = null;
         UpdateTitle();
@@ -3482,7 +3527,6 @@ internal sealed class MainForm : Form
         BeginInvoke(new MethodInvoker(() =>
         {
             _externalRemovalPending = true;
-            _externalRenameNewFullPath = null;
             _externalChangeDebounceTimer.Stop();
             _externalChangeDebounceTimer.Start();
         }));
@@ -3501,7 +3545,7 @@ internal sealed class MainForm : Form
         BeginInvoke(new MethodInvoker(() =>
         {
             _externalRemovalPending = true;
-            _externalRenameNewFullPath = newFullPath;
+            _externalRenamedToPath = newFullPath;
             _externalChangeDebounceTimer.Stop();
             _externalChangeDebounceTimer.Start();
         }));
@@ -3513,23 +3557,23 @@ internal sealed class MainForm : Form
         _externalChangeDebounceTimer.Stop();
 
         // 削除・リネームは「内容が変わった」より強い信号なので優先して扱い、同じ debounce
-        // 窓で内容変更も検知していた場合はそちらを出さずに済ませる(削除・リネームの通知一つで
-        // 状況は十分伝わるため)。保存確認は変わらずCtrl+S側(SaveAtomic)に任せ、ここでは
-        // 気づけるようにするだけに留める(自動での追従・復旧は行わない)。
+        // 窓で内容変更も検知していた場合はそちらを出さずに済ませる。
+        //
+        // 【変更】ここでは何も出さない。以前はOKだけのダイアログを出していたが、
+        //   ・押す以外に選びようがない(=判断が要らない)ものを、書いている最中に割り込ませる
+        //   ・前面を奪うのでキー入力を飲み込む(Enter/Spaceが「OK」に吸われる)
+        //   ・OKを押せば消えるので、後から「まだ無いのか」を確かめる手立てが残らない
+        // という3つの筋の悪さがあった。実際に必要になるのは上書き保存の直前だけなので、
+        // そこで確認する形へ移した(HandleSaveRequestCoreとExternalFileStateLogic参照)。
+        // ここは、名前の変更先を覚えておくことと、記録を1行残すことだけを行う。
         if (_externalRemovalPending)
         {
             _externalRemovalPending = false;
             _externalChangePending = false;
-            string? newPath = _externalRenameNewFullPath;
-            _externalRenameNewFullPath = null;
             if (_currentPath is null) return;
-
-            string message = newPath is null
-                ? "このファイルは外部で削除されました。\nこのまま保存すると、同じ名前で新しく作成されます。"
-                : $"このファイルは外部で「{Path.GetFileName(newPath)}」に名前を変更されました。" +
-                  "\nこのまま保存すると、元の名前で別のファイルとして新しく作成されます。";
-            Logger.Write($"OnExternalChangeDebounceElapsed: 削除/リネームを検知 ({_currentPath} → {newPath ?? "(削除)"})");
-            PaneDialog.Show(this, message, "Pane", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Logger.Write("OnExternalChangeDebounceElapsed: 削除/リネームを検知 "
+                + $"({PrivacyLogFormatter.ShortenPath(_currentPath)} → "
+                + $"{(_externalRenamedToPath is null ? "(削除)" : PrivacyLogFormatter.ShortenPath(_externalRenamedToPath))})");
             return;
         }
         if (!_externalChangePending || _currentPath is null) return;
