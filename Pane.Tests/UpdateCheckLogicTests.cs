@@ -288,4 +288,47 @@ public class UpdateCheckLogicTests
         Assert.DoesNotContain("/../", got);
         Assert.DoesNotContain(" ", got);
     }
+    // ---- 取りに行ってよい版(通常の更新と、distの修復) -------------------
+
+    [Theory]
+    [InlineData("1.2.2", "1.2.1", true)]    // 配布元が新しい → 更新する
+    [InlineData("1.2.1", "1.2.1", false)]   // 同じ版 → 取り直す意味は無い
+    [InlineData("1.2.0", "1.2.1", false)]   // 配布元が古い → しない
+    public void 通常の更新は配布元の方が新しいときだけ(string latest, string current, bool expected)
+    {
+        Assert.Equal(expected, UpdateCheckLogic.IsOfferable(Version.Parse(latest), Version.Parse(current), forRepair: false));
+    }
+
+    [Theory]
+    [InlineData("1.2.2", "1.2.1", true)]    // 配布元が新しい → 最新版で直す
+    [InlineData("1.2.1", "1.2.1", true)]    // 同じ版 → 同じ配布物で置き直せば直る
+    [InlineData("1.2.0", "1.2.1", false)]   // 配布元が古い → 断る
+    public void 修復は同じ版でも取り直すが古い版へは戻さない(string latest, string current, bool expected)
+    {
+        Assert.Equal(expected, UpdateCheckLogic.IsOfferable(Version.Parse(latest), Version.Parse(current), forRepair: true));
+    }
+
+    [Fact]
+    public void 実際に起きた不具合_最新版のPCでもdistの修復に進める()
+    {
+        // style.cssが欠けたPCは、まさに最新版(v1.2.1)を使っていた。通常の更新の判定のままだと
+        // 「最新版です」で止まり、取り直せない。
+        var current = Version.Parse("1.2.1");
+        Assert.False(UpdateCheckLogic.IsOfferable(current, current, forRepair: false));
+        Assert.True(UpdateCheckLogic.IsOfferable(current, current, forRepair: true));
+    }
+
+    [Fact]
+    public void いちばん新しいリリースのページを組み立てられる()
+    {
+        Assert.Equal("https://github.com/Yu5rin/pane/releases/latest",
+            UpdateCheckLogic.BuildLatestReleasePageUrl("https://github.com/Yu5rin/pane/releases.atom"));
+    }
+
+    [Fact]
+    public void Atomでない確認先からはいちばん新しいリリースのページを組み立てない()
+    {
+        Assert.Equal("", UpdateCheckLogic.BuildLatestReleasePageUrl("https://github.com/Yu5rin/pane/releases"));
+        Assert.Equal("", UpdateCheckLogic.BuildLatestReleasePageUrl(""));
+    }
 }

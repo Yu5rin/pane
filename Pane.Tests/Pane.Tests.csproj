@@ -42,6 +42,7 @@
     <Compile Include="../Pane/NavigationGuard.cs" Link="取り込み/NavigationGuard.cs" />
     <Compile Include="../Pane/MenuNoteFormatter.cs" Link="取り込み/MenuNoteFormatter.cs" />
     <Compile Include="../Pane/ExternalFileStateLogic.cs" Link="取り込み/ExternalFileStateLogic.cs" />
+    <Compile Include="../Pane/DistIntegrity.cs" Link="取り込み/DistIntegrity.cs" />
   </ItemGroup>
 
   <ItemGroup>

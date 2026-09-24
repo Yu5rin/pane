@@ -120,6 +120,28 @@ internal static class UpdateCheckLogic
             : "";
 
     /// <summary>
+    /// AtomフィードのURLから、「いちばん新しいリリース」のページのURLを組み立てる
+    /// (https://github.com/{owner}/{repo}/releases/latest)。タグが分からないとき
+    /// (配布元に繋がらず、修復もできなかったとき)の案内先に使う。組み立てられなければ空文字。
+    /// </summary>
+    internal static string BuildLatestReleasePageUrl(string atomUrl)
+        => atomUrl.EndsWith(".atom", StringComparison.OrdinalIgnoreCase)
+            ? $"{atomUrl[..^".atom".Length]}/latest"
+            : "";
+
+    /// <summary>
+    /// 配布元の版(<paramref name="latest"/>)を取りに行ってよいか。
+    ///
+    /// ・通常の更新: 配布元の方が新しいときだけ(同じ版を取り直す意味は無い)
+    /// ・修復(<paramref name="forRepair"/>): 同じ版でもよい。dist が欠けているので、
+    ///   同じ版の配布物で置き直せば直る(DistIntegrity参照)。
+    ///   ただし配布元の方が古いときは断る。手元で作った開発版など、配布されている版より
+    ///   新しいものを「直す」つもりで古い版へ戻してしまうため。
+    /// </summary>
+    internal static bool IsOfferable(Version latest, Version current, bool forRepair)
+        => forRepair ? latest >= current : latest > current;
+
+    /// <summary>
     /// Atomフィードのxmlから、いちばん新しいリリースのタグ名を取り出す。読めなければnull。
     ///
     /// 並び順に頼らず、読み取れたタグのうちバージョンとして最大のものを選ぶ。フィードは

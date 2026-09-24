@@ -853,6 +853,12 @@ internal sealed class MainForm : Form
             VirtualHostName, distPath, CoreWebView2HostResourceAccessKind.Allow);
         _webView.CoreWebView2.Navigate($"https://{VirtualHostName}/index.html");
         Logger.Write("Navigate呼び出し完了");
+
+        // distに必要なファイルが欠けていれば、最新版を取って直すかを尋ねる(利用者要望)。
+        // 上のindex.htmlの確認だけでは、style.cssだけが欠けたPCで画面が崩れたまま
+        // 何も言わずに動き続けていた(DistIntegrity・DistRepairFlow参照)。
+        // プロセスで1回だけ。尋ねるのはウィンドウが見えてから。
+        DistRepairFlow.CheckOnce(this, distPath, _hasUnsavedDocuments ?? (() => IsDirty), _shutdownForUpdate ?? (() => { }));
     }
 
     /// <summary>
