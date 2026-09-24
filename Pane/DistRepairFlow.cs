@@ -22,47 +22,73 @@ internal static class DistRepairFlow
     /// <summary>このプロセスで確認済みか。ウィンドウを開くたびに尋ねないよう、1回だけにする。</summary>
     private static bool _checkedThisProcess;
 
+    /// <summary>ログに並べる欠けたファイル名の上限(残りは件数だけ)。</summary>
+    private const int MaxLoggedNames = 20;
+
     /// <summary>
-    /// dist を確かめ、欠けていればウィンドウが見えたあとで修復を尋ねる。
-    /// 欠けていなければ何もしない(File.Existsを10回呼ぶだけで、起動時間への影響は無視できる)。
+    /// dist を確かめ、欠けていればウィンドウが見えたあとで修復を尋ねる。欠けていなければ何もしない。
+    ///
+    /// 確かめるのは一覧(DistIntegrity.FileListName、約6KB)の読み込みと、約210個の File.Exists。
+    /// 起動の妨げにならないよう、UIスレッドではなく裏のスレッドで行う(仕様書 第8.4節の
+    /// 起動時間の目標)。起動直後は dist を先読みしている(StartWarmingUpDist)ので、実際には数msで終わる。
     /// </summary>
-    public static void CheckOnce(Form owner, string distPath, Func<bool> hasUnsavedDocuments, Action shutdownForUpdate)
+    /// <remarks>
+    /// async void なのは、起動処理(MainForm.OnLoadAsync)をこの確認で待たせないため。
+    /// そのかわり中の例外は呼び出し元へ届かず、放っておくとアプリごと落ちうるので、
+    /// 全体を try で囲って必ずここで受け止める(確かめられないこと自体で起動を止めない)。
+    /// </remarks>
+    public static async void CheckOnce(Form owner, string distPath, Func<bool> hasUnsavedDocuments, Action shutdownForUpdate)
     {
         if (_checkedThisProcess) return;
         _checkedThisProcess = true;
 
-        IReadOnlyList<string> missing;
         try
         {
-            missing = DistIntegrity.FindMissing(name => File.Exists(Path.Combine(distPath, name)));
+            IReadOnlyList<string> missing = await Task.Run(() => FindMissingOnDisk(distPath));
+            if (missing.Count == 0) return;
+
+            // 何が欠けていたかを必ず残す。今回の件は、画面が崩れているのにログには何も無く、
+            // 利用者の手元でPowerShellを実行してもらうまで原因が分からなかった。
+            string names = string.Join(", ", missing.Take(MaxLoggedNames))
+                         + (missing.Count > MaxLoggedNames ? $" ほか{missing.Count - MaxLoggedNames}件" : "");
+            Logger.Error($"distのファイルが欠けている({missing.Count}件): {names} (distPath={distPath})");
+            if (owner.IsDisposed) return;
+
+            // ウィンドウが見える前に尋ねると、何の話か分からないうえ、オーナーの中央にも出せない。
+            // 確かめている間にウィンドウが見えていれば、すぐ尋ねる。
+            void Start()
+            {
+                if (owner.IsDisposed) return;
+                owner.BeginInvoke(new MethodInvoker(() => _ = RunAsync(owner, missing, hasUnsavedDocuments, shutdownForUpdate)));
+            }
+            if (owner.Visible)
+            {
+                Start();
+            }
+            else
+            {
+                void OnShown(object? sender, EventArgs e)
+                {
+                    owner.Shown -= OnShown;
+                    try { Start(); }
+                    catch (Exception ex) { Logger.WriteException("distの修復: 確認を出せなかった", ex); }
+                }
+                owner.Shown += OnShown;
+            }
         }
         catch (Exception ex)
         {
-            // 確かめられないこと自体で起動を止めない。
             Logger.WriteException("distの確認に失敗(続行する)", ex);
-            return;
         }
-        if (missing.Count == 0) return;
+    }
 
-        // 何が欠けていたかを必ず残す。今回の件は、画面が崩れているのにログには何も無く、
-        // 利用者の手元でPowerShellを実行してもらうまで原因が分からなかった。
-        Logger.Error($"distに必要なファイルが欠けている: {string.Join(", ", missing)} (distPath={distPath})");
-
-        // ウィンドウが見える前に尋ねると、何の話か分からないうえ、オーナーの中央にも出せない。
-        void Start() => owner.BeginInvoke(new MethodInvoker(() => _ = RunAsync(owner, missing, hasUnsavedDocuments, shutdownForUpdate)));
-        if (owner.Visible)
-        {
-            Start();
-        }
-        else
-        {
-            void OnShown(object? sender, EventArgs e)
-            {
-                owner.Shown -= OnShown;
-                Start();
-            }
-            owner.Shown += OnShown;
-        }
+    /// <summary>一覧を読み、dist の中を実際に確かめる(裏のスレッドで呼ぶ)。</summary>
+    private static IReadOnlyList<string> FindMissingOnDisk(string distPath)
+    {
+        string listPath = Path.Combine(distPath, DistIntegrity.FileListName);
+        string? listJson = File.Exists(listPath) ? File.ReadAllText(listPath) : null;
+        return DistIntegrity.FindMissing(listJson,
+            name => File.Exists(Path.Combine(distPath, name.Replace('/', Path.DirectorySeparatorChar))));
     }
 
     private static async Task RunAsync(Form owner, IReadOnlyList<string> missing, Func<bool> hasUnsavedDocuments, Action shutdownForUpdate)

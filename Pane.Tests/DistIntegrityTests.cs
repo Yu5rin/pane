@@ -13,26 +13,98 @@ public class DistIntegrityTests
 {
     // ---- 判定 ------------------------------------------------------------
 
+    /// <summary>一覧(dist-files.json)の中身を組み立てる。</summary>
+    private static string ListJson(params string[] files)
+        => System.Text.Json.JsonSerializer.Serialize(new { format = 1, files });
+
+    /// <summary>必須10個と、分割ファイル2個が載った正しい一覧。</summary>
+    private static readonly string[] Chunks = { "chunk-AAAAAAAA.js", "mermaid-BBBBBBBB.js" };
+    private static string FullList() => ListJson(DistIntegrity.RequiredFiles.Concat(Chunks).ToArray());
+
     [Fact]
     public void 全部そろっていれば欠けは無い()
     {
-        Assert.Empty(DistIntegrity.FindMissing(_ => true));
+        Assert.Empty(DistIntegrity.FindMissing(FullList(), _ => true));
     }
 
     [Fact]
     public void 実際に起きた不具合_style_cssだけが欠けても気づく()
     {
         // index.html も main.js もあるので起動はするし、ボタンも押せる。見た目だけが崩れる。
-        var missing = DistIntegrity.FindMissing(name => name != "style.css");
+        var missing = DistIntegrity.FindMissing(FullList(), name => name != "style.css");
         Assert.Equal(new[] { "style.css" }, missing);
     }
 
     [Fact]
-    public void 欠けたものは必須一覧の順に並ぶ()
+    public void 一覧にある分割ファイルの欠けにも気づく()
     {
-        var gone = new HashSet<string> { "manual.md", "index.html", "themes.css" };
-        var missing = DistIntegrity.FindMissing(name => !gone.Contains(name));
-        Assert.Equal(new[] { "index.html", "themes.css", "manual.md" }, missing);
+        // 名前にハッシュが付く分割ファイルは Pane 側で名前を決め打ちできない。一覧に載って
+        // いれば確かめられる(利用者要望: 全ファイルの一覧で突き合わせる)。
+        var missing = DistIntegrity.FindMissing(FullList(), name => name != "mermaid-BBBBBBBB.js");
+        Assert.Equal(new[] { "mermaid-BBBBBBBB.js" }, missing);
+    }
+
+    [Fact]
+    public void 欠けたものは必須一覧の順_そのあと一覧の順に並ぶ()
+    {
+        var gone = new HashSet<string> { "mermaid-BBBBBBBB.js", "manual.md", "chunk-AAAAAAAA.js", "index.html" };
+        var missing = DistIntegrity.FindMissing(FullList(), name => !gone.Contains(name));
+        Assert.Equal(new[] { "index.html", "manual.md", "chunk-AAAAAAAA.js", "mermaid-BBBBBBBB.js" }, missing);
+    }
+
+    [Fact]
+    public void 一覧と必須一覧の両方に載っているものは1回だけ数える()
+    {
+        var missing = DistIntegrity.FindMissing(FullList(), name => name != "style.css");
+        Assert.Single(missing);
+    }
+
+    [Fact]
+    public void 一覧が無ければ一覧そのものを欠けとして返し_必須ファイルは確かめる()
+    {
+        // 一覧が無いと全部は確かめられない。直せば一覧も戻るので、欠けとして修復へ進める。
+        var missing = DistIntegrity.FindMissing(null, name => name != "themes.css");
+        Assert.Equal(new[] { "themes.css", DistIntegrity.FileListName }, missing);
+    }
+
+    [Fact]
+    public void 一覧が無くても他が全部あれば欠けは一覧だけ()
+    {
+        Assert.Equal(new[] { DistIntegrity.FileListName }, DistIntegrity.FindMissing(null, _ => true));
+    }
+
+    [Theory]
+    [InlineData("")]                                                        // 空
+    [InlineData("これはJSONではない")]                                      // 壊れている
+    [InlineData("[\"index.html\"]")]                                      // 形が違う(配列だけ)
+    [InlineData("{\"files\":[\"index.html\"]}")]                        // 版が無い
+    [InlineData("{\"format\":2,\"files\":[\"index.html\"]}")]         // 知らない版
+    [InlineData("{\"format\":1}")]                                        // 一覧が無い
+    [InlineData("{\"format\":1,\"files\":[1,2]}")]                      // 名前が文字列でない
+    [InlineData("{\"format\":1,\"files\":[\"../Pane.exe\"]}")]         // distの外
+    [InlineData("{\"format\":1,\"files\":[\"C:/Windows/win.ini\"]}")]  // 絶対パス
+    public void 読めない一覧は壊れた一覧として扱う(string json)
+    {
+        Assert.Null(DistIntegrity.ParseFileList(json));
+        // 壊れた一覧は信じず、一覧そのものを欠けとして修復へ進める。必須ファイルは確かめる。
+        Assert.Equal(new[] { DistIntegrity.FileListName }, DistIntegrity.FindMissing(json, _ => true));
+    }
+
+    [Theory]
+    [InlineData("style.css", true)]
+    [InlineData("fonts/a.woff2", true)]      // サブフォルダ(今は無いが、あっても扱える)
+    [InlineData("", false)]
+    [InlineData(" ", false)]
+    [InlineData("/etc/passwd", false)]       // 絶対パス
+    [InlineData("..", false)]
+    [InlineData("a/../../x", false)]         // 途中で外へ出る
+    [InlineData("./style.css", false)]
+    [InlineData("a//b", false)]              // 空の区切り
+    [InlineData("fonts\\a.woff2", false)]  // 区切りは "/" だけ
+    [InlineData("C:x", false)]               // ドライブ指定
+    public void distの中を指す名前だけを受け付ける(string name, bool expected)
+    {
+        Assert.Equal(expected, DistIntegrity.IsSafeRelativeName(name));
     }
 
     [Fact]
@@ -63,6 +135,15 @@ public class DistIntegrityTests
         expected.Add("manual.md");
 
         Assert.Equal(expected, new SortedSet<string>(DistIntegrity.RequiredFiles, StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void 一覧のファイル名がbuild_jsの書き出すものと一致する()
+    {
+        // 名前がずれると、Pane は一覧を見つけられず、正常な dist でも毎回「欠けている」と言い出す。
+        string buildJs = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "scripts", "build.js"));
+        Assert.Contains($"const DIST_FILE_LIST = \"{DistIntegrity.FileListName}\";", buildJs);
+        Assert.Contains($"format: {DistIntegrity.SupportedFileListFormat},", buildJs);
     }
 
     // ---- 文面 ------------------------------------------------------------

@@ -211,6 +211,42 @@ const patchLezerMarkdownTable = {
   },
 };
 
+// dist の全ファイルの一覧(dist/dist-files.json)。Pane は起動時にこれと突き合わせ、
+// 欠けているファイルがあれば最新版を取って直すかを尋ねる(Pane/DistIntegrity.cs・
+// Pane/DistRepairFlow.cs、仕様書 U-09)。
+//
+// 【なぜ一覧を作るか】実機で dist\style.css だけが欠け、画面が崩れたまま何も言わずに
+// 動き続けたことがある(docs/調査記録/修正-distの欠けを直せるようにする.md)。
+// Pane 側で名前を決め打ちして確かめられるのは、名前が変わらない主要ファイルだけ。
+// esbuild の分割ファイル(名前に英数字8文字のハッシュが付く、約200個)は版ごとに名前が
+// 変わるため、ビルドした本人が「何を置いたか」を書き残すしかない。
+//
+// esbuild の出力が確定したあと(onEnd)に書く。watch 中も差分ビルドのたびに書き直す
+// (書き直さないと、新しくできた分割ファイルが一覧に載らない)。
+// 一覧そのものは載せない。区切りは "/" に揃える(Windows でも同じ内容にするため)。
+const DIST_FILE_LIST = "dist-files.json";
+function writeDistFileList() {
+  const files = [];
+  (function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile()) files.push(path.relative("dist", full).split(path.sep).join("/"));
+    }
+  })("dist");
+  const listed = files.filter((f) => f !== DIST_FILE_LIST).sort();
+  fs.writeFileSync(path.join("dist", DIST_FILE_LIST), JSON.stringify({ format: 1, files: listed }, null, 1) + "\n");
+}
+const writeDistFileListPlugin = {
+  name: "write-dist-file-list",
+  setup(build) {
+    build.onEnd((result) => {
+      // 失敗したビルドの一覧は書かない(中途半端な dist を「正しい」と記録してしまうため)。
+      if (result.errors.length === 0) writeDistFileList();
+    });
+  },
+};
+
 const buildOptions = {
   // main.js: 本体ウィンドウ(index.html)。settings-entry.js: 設定専用ウィンドウ
   // (settings-window.html、Pane/SettingsWindow.cs)。help-entry.js: 取扱説明書専用ウィンドウ
@@ -253,7 +289,7 @@ const buildOptions = {
   minifySyntax: true,
   minifyIdentifiers: false,
   define: { PACKAGE_VERSION: JSON.stringify(mathjaxVersion) },
-  plugins: [patchLezerMarkdownTable],
+  plugins: [patchLezerMarkdownTable, writeDistFileListPlugin],
 };
 
 // esbuildの出力にはハッシュ付きの名前(chunk-XXXXXXXX.js)が混じるため、作り直すたびに
@@ -279,10 +315,13 @@ async function run() {
   if (watch) {
     const ctx = await esbuild.context(buildOptions);
     await ctx.watch();
+    // 静的ファイル・取扱説明書は esbuild を通らない(onEnd が呼ばれない)ので、書き直したら
+    // 一覧も作り直す。取扱説明書は後から作られることがあり(copyManualMarkdownの説明参照)、
+    // そのままでは一覧が dist の実際の中身とずれる。
     for (const f of staticFiles) {
-      fs.watchFile(path.join("src", f), () => copyStaticFiles());
+      fs.watchFile(path.join("src", f), () => { copyStaticFiles(); writeDistFileList(); });
     }
-    fs.watchFile(MANUAL_SOURCE, () => copyManualMarkdown());
+    fs.watchFile(MANUAL_SOURCE, () => { copyManualMarkdown(); writeDistFileList(); });
     fs.watchFile(FILE_TYPES_SOURCE, () => generateFileTypesCs());
     if (serve) {
       const { host, port } = await ctx.serve({ servedir: "dist", port: 8000 });

@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace Pane;
 
 /// <summary>
@@ -17,16 +19,32 @@ namespace Pane;
 /// 抜けたか、置いた後に外から消された(ウイルス対策の隔離など)と見ている。
 /// 経緯は docs/調査記録/修正-distの欠けを直せるようにする.md。
 ///
+/// 【何と突き合わせるか】ビルドが dist の全ファイルを書き出した一覧(<see cref="FileListName"/>、
+/// scripts/build.js)と、下の <see cref="RequiredFiles"/> の両方。一覧があれば分割ファイル
+/// (Mermaid等、名前にハッシュが付く約200個)の欠けにも気づける(利用者要望)。
+/// 一覧そのものが無い・読めないときは、それ自体を欠けとして扱ったうえで、
+/// <see cref="RequiredFiles"/> だけは確かめる(一覧が無ければ全部を確かめる手段が無く、
+/// 直せば一覧も戻るため)。
+///
 /// ファイルシステムにも Windows専用のAPIにも触れない判定だけをここへ切り出して、
 /// テストで固定する(Pane.Tests へソースごと取り込むため)。
 /// </summary>
 internal static class DistIntegrity
 {
     /// <summary>
-    /// dist に必ず置かれるファイル。scripts/build.js が置くものと一致させる
+    /// ビルドが書き出す、dist の全ファイルの一覧のファイル名(scripts/build.js の DIST_FILE_LIST)。
+    /// 形: {"format":1,"files":["index.html", ...]}。区切りは "/"、一覧そのものは載らない。
+    /// </summary>
+    public const string FileListName = "dist-files.json";
+
+    /// <summary>このPaneが読める一覧の形の版。</summary>
+    internal const int SupportedFileListFormat = 1;
+
+    /// <summary>
+    /// dist に必ず置かれる、名前の変わらないファイル。scripts/build.js が置くものと一致させる
     /// (ずれたら Pane.Tests の DistIntegrityTests が落ちる)。
-    /// 名前にハッシュが付く分割ファイル(Mermaid等、200個ほど)は、欠けても該当する機能が
-    /// 動かないだけで画面全体は崩れないうえ、版ごとに名前が変わるため対象にしない。
+    /// 一覧(<see cref="FileListName"/>)が読めればそちらに全部載っているが、一覧が欠けたり
+    /// 壊れたりしたときでも、画面を描くのに欠かせないこれらだけは確かめられるよう別に持つ。
     /// </summary>
     public static readonly IReadOnlyList<string> RequiredFiles = new[]
     {
@@ -45,10 +63,83 @@ internal static class DistIntegrity
     /// <summary>文面に並べるファイル名の上限。これを超えた分は「ほかN件」とまとめる。</summary>
     internal const int MaxListedNames = 5;
 
-    /// <summary>欠けているファイルを <see cref="RequiredFiles"/> の順で返す。</summary>
-    /// <param name="exists">dist 内の相対名(例: "style.css")を受け取り、実在すればtrueを返す。</param>
-    public static IReadOnlyList<string> FindMissing(Func<string, bool> exists)
-        => RequiredFiles.Where(name => !exists(name)).ToList();
+    /// <summary>
+    /// 欠けているファイルを返す。並びは <see cref="RequiredFiles"/> の順 → 一覧の順
+    /// → (一覧が無い・読めないとき)一覧そのもの、の順。
+    /// </summary>
+    /// <param name="fileListJson">一覧の中身。一覧のファイルが無ければnull。</param>
+    /// <param name="exists">dist 内の相対名("/"区切り。例: "style.css")を受け取り、実在すればtrueを返す。</param>
+    public static IReadOnlyList<string> FindMissing(string? fileListJson, Func<string, bool> exists)
+    {
+        IReadOnlyList<string>? listed = fileListJson is null ? null : ParseFileList(fileListJson);
+
+        var expected = new List<string>(RequiredFiles);
+        var seen = new HashSet<string>(RequiredFiles, StringComparer.OrdinalIgnoreCase);
+        if (listed is not null)
+        {
+            foreach (string name in listed)
+            {
+                if (seen.Add(name)) expected.Add(name);
+            }
+        }
+
+        var missing = expected.Where(name => !exists(name)).ToList();
+        // 一覧が無い・読めない: それ自体を欠けとして返す。直せば一覧も戻る。
+        if (listed is null) missing.Add(FileListName);
+        return missing;
+    }
+
+    /// <summary>
+    /// 一覧の中身を読む。形が違う・知らない版・dist の外を指す名前が混じる、のいずれかなら
+    /// null(壊れた一覧として扱う)。一部だけ読んで残りを信じる、ということはしない。
+    /// </summary>
+    internal static IReadOnlyList<string>? ParseFileList(string json)
+    {
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            JsonElement root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return null;
+            if (!root.TryGetProperty("format", out JsonElement format)
+                || format.ValueKind != JsonValueKind.Number
+                || !format.TryGetInt32(out int version)
+                || version != SupportedFileListFormat)
+            {
+                return null;
+            }
+            if (!root.TryGetProperty("files", out JsonElement files) || files.ValueKind != JsonValueKind.Array) return null;
+
+            var names = new List<string>();
+            foreach (JsonElement item in files.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.String) return null;
+                string name = item.GetString() ?? "";
+                if (!IsSafeRelativeName(name)) return null;
+                names.Add(name);
+            }
+            return names;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// dist の中を指す相対名か。一覧は dist の中のファイルで、書き換えられれば dist の外の
+    /// 有無を調べさせられる(存在を確かめるだけで読みはしないが、余計なことはさせない)。
+    /// </summary>
+    internal static bool IsSafeRelativeName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return false;
+        if (name.Contains('\\') || name.Contains(':')) return false;       // 区切りは "/" だけ。ドライブ指定も不可
+        if (name.StartsWith('/')) return false;                            // 絶対パス
+        foreach (string part in name.Split('/'))
+        {
+            if (part.Length == 0 || part == "." || part == "..") return false;
+        }
+        return true;
+    }
 
     /// <summary>
     /// 修復してよいかを尋ねる文面。押した先で何が起きるか(通信する・大きさ・再起動する)を
