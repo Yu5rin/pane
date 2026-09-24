@@ -73,6 +73,22 @@ internal static class UpdateService
     private const string BackupSuffix = ".pane-old";
 
     /// <summary>
+    /// ダウンロード〜入れ替え〜再起動が進行中か(1なら進行中)。
+    ///
+    /// 入口が2つある: 設定画面の「更新する」(SettingsBridge.HandleApplyUpdateRequestAsync)と、
+    /// 起動時の dist 修復(DistRepairFlow)。以前は設定画面側だけがこの印を持っていたため、
+    /// 入口が増えると他方が素通りする(docs/調査記録/README.md「繰り返し出てきた誤り」8)。
+    /// 実行する側のここに1つだけ置く。どちらもUIスレッドから呼ばれるが、念のためInterlockedで扱う。
+    /// </summary>
+    private static int _applyInProgress;
+
+    /// <summary>入れ替えを始めてよければtrueを返し、以後は<see cref="EndApply"/>まで他の要求を断る。</summary>
+    internal static bool TryBeginApply() => Interlocked.CompareExchange(ref _applyInProgress, 1, 0) == 0;
+
+    /// <summary><see cref="TryBeginApply"/>で立てた印を下ろす。必ずfinallyで呼ぶ。</summary>
+    internal static void EndApply() => Interlocked.Exchange(ref _applyInProgress, 0);
+
+    /// <summary>
     /// HttpClientはプロセスで1つだけ作って使い回す(都度newするとソケットを使い果たす)。
     /// GitHubのAPIはUser-Agentが無いと400を返すため必ず付ける。
     /// </summary>
@@ -95,7 +111,12 @@ internal static class UpdateService
     /// 通信に失敗しても例外は投げず、status="error" として理由を添えて返す。
     /// 更新の確認ができないことでアプリの動作を妨げてはいけないため。
     /// </summary>
-    public static async Task<UpdateCheckResult> CheckAsync(AppSettings settings)
+    /// <param name="forRepair">
+    /// dist の修復(DistRepairFlow)から呼ぶときtrue。同じ版でも配布物の場所を返す
+    /// (status="available")。配布元の方が古いときは断る(UpdateCheckLogic.IsOfferable)。
+    /// 通常の更新(設定画面の「更新を確認」)の動きは変えない。
+    /// </param>
+    public static async Task<UpdateCheckResult> CheckAsync(AppSettings settings, bool forRepair = false)
     {
         string currentVersionText = SettingsBridge.DetectAppVersion();
         string url = settings.UpdateCheckUrl?.Trim() ?? "";
@@ -163,13 +184,16 @@ internal static class UpdateService
                         Logger.Warn($"更新の確認: 配布元のバージョン表記を読み取れなかった: \"{tagFromAtom}\"");
                         return Error(currentVersionText, "配布元のバージョン表記を読み取れませんでした。");
                     }
-                    if (latestFromAtom <= current)
+                    if (!UpdateCheckLogic.IsOfferable(latestFromAtom, current, forRepair))
                     {
+                        if (forRepair) return NewerThanReleased(currentVersionText, tagFromAtom);
                         Logger.Write($"更新の確認: 最新版だった(現在={currentVersionText}, 配布元={tagFromAtom}, 問い合わせ先=Atom)");
                         return new UpdateCheckResult("latest", currentVersionText, tagFromAtom, "", "", 0,
                             UpdateCheckLogic.BuildReleasePageUrl(atomUrl, tagFromAtom), "お使いのPaneは最新版です。");
                     }
-                    Logger.Write($"更新の確認: 新しい版がある(現在={currentVersionText}, 配布元={tagFromAtom}, 問い合わせ先=Atom)。詳細をAPIへ問い合わせる");
+                    Logger.Write(forRepair
+                        ? $"更新の確認: 修復のため配布物を取り直す(現在={currentVersionText}, 配布元={tagFromAtom}, 問い合わせ先=Atom)。詳細をAPIへ問い合わせる"
+                        : $"更新の確認: 新しい版がある(現在={currentVersionText}, 配布元={tagFromAtom}, 問い合わせ先=Atom)。詳細をAPIへ問い合わせる");
                     knownNewerTag = tagFromAtom;
                     knownReleaseUrl = UpdateCheckLogic.BuildReleasePageUrl(atomUrl, tagFromAtom);
                 }
@@ -201,14 +225,15 @@ internal static class UpdateService
             }
 
             // 比較は必ずVersionで行う。文字列比較だと "1.0.10" < "1.0.9" と誤判定する。
-            if (latest <= current)
+            if (!UpdateCheckLogic.IsOfferable(latest, current, forRepair))
             {
+                if (forRepair) return NewerThanReleased(currentVersionText, tag);
                 Logger.Write($"更新の確認: 最新版だった(現在={currentVersionText}, 配布元={tag})");
                 return new UpdateCheckResult("latest", currentVersionText, tag, "", "", 0, releaseUrl,
                     "お使いのPaneは最新版です。");
             }
 
-            Logger.Write($"更新の確認: 新しい版がある(現在={currentVersionText}, 配布元={tag}, サイズ={size}バイト, SHA256={(string.IsNullOrEmpty(sha256) ? "(提供なし)" : "あり")})");
+            Logger.Write($"更新の確認: {(forRepair ? "修復のため取り直す版" : "新しい版がある")}(現在={currentVersionText}, 配布元={tag}, サイズ={size}バイト, SHA256={(string.IsNullOrEmpty(sha256) ? "(提供なし)" : "あり")})");
             if (string.IsNullOrEmpty(assetUrl))
             {
                 // 新しい版はあるが、自動で入れ替えられる配布物が見つからない。
@@ -243,6 +268,18 @@ internal static class UpdateService
             if (knownNewerTag is not null) return NewerButNoDetails(currentVersionText, knownNewerTag, knownReleaseUrl, knownAtomUrl);
             return Error(currentVersionText, $"更新を確認できませんでした。{ExceptionMessages.Describe(ex)}");
         }
+    }
+
+    /// <summary>
+    /// 修復しようとしたが、手元のPaneの方が配布されている最新版より新しかったときの結果。
+    /// 手元で作った開発版などを、配布版で上書きして古い版へ戻してしまわないよう断る
+    /// (UpdateCheckLogic.IsOfferable)。
+    /// </summary>
+    private static UpdateCheckResult NewerThanReleased(string currentVersion, string tag)
+    {
+        Logger.Warn($"更新の確認: 修復は行わない。手元の版の方が新しい(現在={currentVersion}, 配布元={tag})");
+        return Error(currentVersion,
+            $"お使いのPane({currentVersion})は、配布されている最新版({tag})より新しいため、自動では直せません。");
     }
 
     /// <summary>
