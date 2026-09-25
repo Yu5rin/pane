@@ -238,8 +238,9 @@ const FIELD_DEFS = {
   editorMaxWidthPx: { kind: "number", def: DEFAULT_FONT_SIZE * 42, min: 0, max: 5000 },
   // 左右個別に指定できる(ユーザー要望)。旧・editorPaddingX(左右共通1値)からの移行は
   // Pane/AppSettings.cs GetEffectiveEditorPaddingLeft/Rightが行う。
-  editorPaddingLeft: { kind: "number", def: 32, min: 0, max: 200 },
-  editorPaddingRight: { kind: "number", def: 32, min: 0, max: 200 },
+  // 既定は12(2026-09-25に32から変更。Pane/EditorPaddingDefaults.csのDefaultPxと揃えること)。
+  editorPaddingLeft: { kind: "number", def: 12, min: 0, max: 200 },
+  editorPaddingRight: { kind: "number", def: 12, min: 0, max: 200 },
   showWordCount: { kind: "bool", def: true },
 
   // ---- ファイルの関連付け ----
