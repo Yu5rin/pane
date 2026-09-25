@@ -91,6 +91,11 @@ jobs:
           Write-Host "$($zip.Name)  $sizeMb MB  SHA256=$hash"
 
       # 下書きのまま作る。本文はここで用意した骨組みに、変更点を書き足して公開する。
+      # 本文は「変更点」と「ダウンロード」だけにし、インストールや更新の方法は README に置く
+      # (CLAUDE.md「リリース本文とREADMEの分担」)。以前はここに展開方法と「更新を確認」の説明を
+      # 入れていたが、READMEと同じ説明が版の数だけ並ぶため外した。
+      # なお「更新を確認」が照合する SHA256 は本文ではなく、GitHub がファイルごとに持つ digest を
+      # 読んでいる(UpdateService.FindZipAsset)。本文の表は人が確かめるためのもの。
       - name: 下書きのリリースを作る
         shell: pwsh
         env:
@@ -107,9 +112,7 @@ jobs:
           | --- | --- | --- |
           | ${{ steps.hash.outputs.name }} | ${{ steps.hash.outputs.size }} MB | ``${{ steps.hash.outputs.sha256 }}`` |
 
-          Zip を展開し、``Pane.exe`` を実行してください。``Pane.exe`` と ``dist`` フォルダは同じ場所に置いたままにしてください。
-
-          設定「バージョン情報」の「更新を確認」からも更新できます(ダウンロードした Zip は上の SHA256 と照合されます)。
+          インストールと更新の方法は [README](${{ github.server_url }}/${{ github.repository }}#インストール) をご覧ください。
           "@
           $body | Out-File -FilePath release-notes.md -Encoding utf8
           gh release create "${{ steps.version.outputs.tag }}" `
