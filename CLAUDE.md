@@ -136,6 +136,7 @@ cd C:\Users\YUGO\pane; Get-Process Pane -ErrorAction SilentlyContinue | Stop-Pro
   README と重複する内容。書きたくなったら README の方を直す
 - **その版に上げるときだけ要る注意**（手で入れ替えるときの手順など）は、
   別の見出しにせず「## 変更点」の中の項目として書く
+- リリースのタイトルはタグと同じ表記（`v1.2.3`）。本文に「# Pane vX.Y.Z」のような題名は書かない
 - 下書きの骨組みは `.github/workflows/release.yml` が作る。形を変えるときはそちらを直す
 
 この分担は、利用者がリリースを見に来たときに「何が変わったか」だけをすぐ読めるようにするため。
