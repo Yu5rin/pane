@@ -88,7 +88,7 @@ const SEARCH_INDEX = {
   markdown: ["インライン数式", "数式", "上付き", "下付き", "ハイライト", "作図", "ダイアグラム", "自動リンク", "Callouts", "厳格モード", "見出しの記法", "箇条書き", "リスト記号", "番号付きリスト", "行番号", "自動採番", "アウトラインの階層", "コード言語", "空白", "改行", "スマート引用符", "スマートダッシュ", "句読点"],
   image: ["画像の挿入", "画像フォルダ", "ローカル画像", "オンライン画像", "相対パス", "URLエスケープ", "外部リソース", "外部画像", "埋め込み", "自動で読み込む", "トラッキングピクセル"],
   export: ["用紙サイズ", "余白", "マージン", "ヘッダー", "フッター", "ページ区切り", "アウトライン", "エクスポート先フォルダ", "エクスポート後", "保存ダイアログ", "数式のエクスポート", "YAML", "フロントマター", "印刷"],
-  appearance: ["テーマ", "ライトテーマ", "ダークテーマ", "本文フォント", "等幅フォント", "フォント", "文字サイズ", "行の高さ", "行間", "最大幅", "文字数カウント", "カスタムCSS"],
+  appearance: ["テーマ", "ライトテーマ", "ダークテーマ", "本文フォント", "等幅フォント", "フォント", "文字サイズ", "行の高さ", "行間", "最大幅", "文字数カウント", "カスタムCSS", "CSSを作る", "作成補助"],
   fileTypes: ["拡張子", "関連付け", "エクスプローラー", "新規作成メニュー", "既定のアプリ"],
   keyboard: ["キーバインド", "ショートカット", "キー割り当て"],
   advanced: ["デバッグ", "隠しファイル", "除外パターン", "設定ファイルの場所", "既定に戻す", "リセット", "履歴を消去", "編集モードの記憶", "既定のアプリ設定"],
@@ -586,6 +586,10 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
       const msg = e && e.data;
       if (!msg) return;
       if (msg.type === "browse-path-result") { handleBrowsePathResult(msg); return; }
+      // カスタムCSSの作成補助で保存した(仕様書 第2.10.1節 C-16)。設定ファイルには既に
+      // 書き込まれているので、編集中の下書きと入力欄だけを合わせる(未保存の印は付けない)。
+      // 合わせないと、この画面でそのまま「保存」を押したときに古いパスで上書きしてしまう。
+      if (msg.type === "custom-css-path-saved") { handleCustomCssPathSaved(msg); return; }
       // apply-settings(仕様書 第2.10節): 他ウィンドウでの変更や保存直後の再配布で届く。
       // main.js側は自分の初期化用にこれを処理するだけで本モジュールへは回してくれないため、
       // browse-path-resultと同じ仕組みで直接拾う。先読みキャッシュはもう古いかもしれないので
@@ -1108,6 +1112,14 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     markDirty();
     const input = contentEl?.querySelector(`input[type="text"][data-field="${field}"]`);
     if (input) input.value = draft[field] ?? "";
+  }
+
+  function handleCustomCssPathSaved(msg) {
+    settingsCache = null;
+    if (!draft || typeof msg.path !== "string") return;
+    draft.customCssPath = msg.path;
+    const input = contentEl?.querySelector('input[type="text"][data-field="customCssPath"]');
+    if (input) input.value = msg.path;
   }
 
   // ---- 検索欄(上部、全カテゴリ横断) ----
@@ -1670,6 +1682,10 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
         <div class="settings-group-title">カスタムCSS</div>
         ${fieldPath(ctx, "customCssPath", "file", "カスタムCSS", "(未設定)", "指定したCSSファイルを本文に追加で適用します")}
         <div class="settings-info-row">
+          <span class="settings-field-desc">見本を見ながら、色や書体を選んでカスタムCSSを作れます。保存するとこの欄に指定され、すぐに反映されます。</span>
+          <button type="button" class="btn tiny" data-action="open-css-editor"${ctx.bridge ? "" : " disabled"}>CSSを作る…</button>
+        </div>
+        <div class="settings-info-row">
           <span class="settings-field-desc">何もない状態から書くのは大変なので、参考になるサンプルCSSを用意しています。</span>
           <button type="button" class="btn tiny" data-action="open-theme-folder">サンプルのあるフォルダを開く</button>
         </div>
@@ -1683,6 +1699,11 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
     wireBrowseButtons(el);
     el.querySelector('[data-action="open-theme-folder"]')?.addEventListener("click", () => {
       ctx.bridge?.postMessage({ type: "open-theme-folder" });
+    });
+    // カスタムCSSの作成補助(仕様書 第2.10.1節 C-16)。別のウィンドウで開く(C#側の
+    // PaneApplicationContext.OpenCssEditorWindow)。保存すると custom-css-path-saved が届く。
+    el.querySelector('[data-action="open-css-editor"]')?.addEventListener("click", () => {
+      ctx.bridge?.postMessage({ type: "open-css-editor" });
     });
   }
 

@@ -9,7 +9,7 @@ const esbuild = require("esbuild");
 const serve = process.argv.includes("--serve");
 const watch = process.argv.includes("--watch") || serve;
 
-const staticFiles = ["index.html", "settings-window.html", "help-window.html", "style.css", "themes.css", "icon.svg"];
+const staticFiles = ["index.html", "settings-window.html", "help-window.html", "css-editor-window.html", "css-preview.html", "style.css", "themes.css", "icon.svg"];
 
 function copyStaticFiles() {
   fs.mkdirSync("dist", { recursive: true });
@@ -255,7 +255,10 @@ const buildOptions = {
   // (help-entry.jsはCodeMirrorのエディタ本体(@codemirror/view)は一切importしないため、
   // Markdown→HTML変換に必要な@codemirror/state・@codemirror/language・@codemirror/lang-markdown・
   // @lezer/markdownだけがバンドルに含まれる)。
-  entryPoints: ["src/main.js", "src/settings-entry.js", "src/help-entry.js"],
+  // css-editor-entry.js / css-preview-entry.js: カスタムCSSの作成補助(css-editor-window.html と、
+  // その中の iframe の css-preview.html。Pane/CssEditorWindow.cs、仕様書 第2.10.1節 C-16)。
+  // どちらも main.js からは import されないため、本文の初期ロードJS(第8.4節)には入らない。
+  entryPoints: ["src/main.js", "src/settings-entry.js", "src/help-entry.js", "src/css-editor-entry.js", "src/css-preview-entry.js"],
   bundle: true,
   format: "esm",
   splitting: true,

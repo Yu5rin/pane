@@ -95,17 +95,22 @@ internal sealed class SettingsWindow : Form
     /// </summary>
     private readonly Func<bool>? _hasUnsavedDocuments;
     private readonly Action? _shutdown;
+    /// <summary>カスタムCSSの作成補助を開く(仕様書 第2.10.1節 C-16)。実体は
+    /// <see cref="PaneApplicationContext.OpenCssEditorWindow"/>。</summary>
+    private readonly Action<Form>? _openCssEditor;
 
     public SettingsWindow(
         Form? owner,
         Action broadcastSettingsChanged,
         Func<bool>? hasUnsavedDocuments = null,
-        Action? shutdown = null)
+        Action? shutdown = null,
+        Action<Form>? openCssEditor = null)
     {
         Logger.Write("SettingsWindow: 生成開始");
         _broadcastSettingsChanged = broadcastSettingsChanged;
         _hasUnsavedDocuments = hasUnsavedDocuments;
         _shutdown = shutdown;
+        _openCssEditor = openCssEditor;
 
         Text = "Pane - 設定"; // ダイアログタイトルの区切り記法を統一(総点検)。他は"Pane - 復元の確認"(PaneApplicationContext.cs)
         MinimumSize = new Size(640, 480);
@@ -520,6 +525,10 @@ internal sealed class SettingsWindow : Form
             case "open-theme-folder":
                 SettingsBridge.OpenThemeFolderInExplorer();
                 break;
+            case "open-css-editor":
+                // 外観 > カスタムCSS の「CSSを作る…」(仕様書 第2.10.1節 C-16)。
+                _openCssEditor?.Invoke(this);
+                break;
             // 更新の確認と適用(仕様書 U-01・U-04)。利用者がボタンを押したときだけ通信する。
             // どちらも待ち時間があるため非同期で走らせ、結果は update-check-result /
             // update-progress として画面へ返す(ここでawaitするとUIが固まる)。
@@ -613,6 +622,13 @@ internal sealed class SettingsWindow : Form
             list.Add(new NativeMenu.MenuItemData(id, label, shortcut, enabled, isChecked, separatorAfter, note, submenu));
         }
         return list;
+    }
+
+    /// <summary>作成補助でカスタムCSSを保存したことを画面へ知らせ、入力欄と編集中の下書きを
+    /// 保存先に合わせてもらう(<see cref="PaneApplicationContext"/>から呼ばれる)。</summary>
+    public void NotifyCustomCssPathSaved(string path)
+    {
+        PostToWeb(new { type = "custom-css-path-saved", path });
     }
 
     private void PostToWeb(object message)

@@ -17,7 +17,7 @@ public class DistIntegrityTests
     private static string ListJson(params string[] files)
         => System.Text.Json.JsonSerializer.Serialize(new { format = 1, files });
 
-    /// <summary>必須10個と、分割ファイル2個が載った正しい一覧。</summary>
+    /// <summary>必須ファイルすべてと、分割ファイル2個が載った正しい一覧。</summary>
     private static readonly string[] Chunks = { "chunk-AAAAAAAA.js", "mermaid-BBBBBBBB.js" };
     private static string FullList() => ListJson(DistIntegrity.RequiredFiles.Concat(Chunks).ToArray());
 
@@ -75,10 +75,12 @@ public class DistIntegrityTests
         var missing = DistIntegrity.FindMissing(null, _ => false);
         Assert.Equal(DistIntegrity.RequiredFiles.Concat(new[] { DistIntegrity.FileListName }), missing);
 
-        // 確認の文面は先頭5件と「ほか6件」になる(11件すべてを並べて長くしない)。
+        // 確認の文面は先頭5件と「ほかN件」になる(すべてを並べて長くしない)。
+        // 件数は必須ファイルの数で変わるため、決め打ちせずに数える
+        // (以前は「ほか6件」と書いていたため、カスタムCSSの作成補助で必須ファイルが4つ増えたときに直す必要があった)。
         string prompt = DistIntegrity.BuildRepairPrompt(missing);
         Assert.Contains("・index.html", prompt);
-        Assert.Contains("・ほか6件", prompt);
+        Assert.Contains($"・ほか{missing.Count - DistIntegrity.MaxListedNames}件", prompt);
     }
 
     [Fact]
@@ -176,7 +178,7 @@ public class DistIntegrityTests
     [Fact]
     public void 欠けたファイルが多いときは先頭だけ並べて残りは件数にする()
     {
-        var many = DistIntegrity.RequiredFiles.ToList();   // 10件
+        var many = DistIntegrity.RequiredFiles.ToList();   // 上限(5件)より多い
         string names = DistIntegrity.FormatNames(many);
         string[] lines = names.Split('\n');
         Assert.Equal(DistIntegrity.MaxListedNames + 1, lines.Length);

@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="referrer" content="no-referrer">
+<title>Pane - カスタムCSSの見本</title>
+<script>
+  // カスタムCSSの作成補助(仕様書 第2.10.1節 C-16)の見本。css-editor-window.html の iframe の中で
+  // 動く。テーマ(data-theme 等)と編集中のCSSは親の画面(css-editor-entry.js)から postMessage で
+  // 受け取る。受け取るまでの仮のテーマは親と同じ決め方(C#側が親に注入した値→OS設定)。
+  try {
+    var parentTheme = window.parent && window.parent !== window ? window.parent.document.documentElement.dataset.theme : "";
+    document.documentElement.dataset.theme = parentTheme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  } catch (e) {}
+</script>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="themes.css">
+<style>
+  /* 本文ウィンドウ(index.html)と同じく #cm-host を画面いっぱいに置く。エディタ用のCSSの
+     多くが #cm-host 前提のため、この id でなければ本物と同じ見た目にならない。 */
+  html, body { height: 100%; margin: 0; }
+  body { display: flex; flex-direction: column; background: var(--paper); color: var(--ink); font-family: var(--font-body); }
+  #cm-host { flex: 1; min-height: 0; overflow: hidden; position: relative; }
+</style>
+<!-- 編集中のカスタムCSS。本文ウィンドウ(main.js applyCustomCss)と同じく最後に読み込む。 -->
+<style id="custom-css"></style>
+</head>
+<body>
+  <div id="cm-host"></div>
+  <script type="module" src="css-preview-entry.js"></script>
+</body>
+</html>
