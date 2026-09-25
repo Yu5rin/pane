@@ -11,21 +11,23 @@
 //
 // C#とのやり取り(Pane/CssEditorWindow.cs):
 //   JS→C#: initial-render-ready / css-editor-save {css} / css-editor-dirty {value} /
-//          close-css-editor-window / open-theme-folder / log
+//          close-css-editor-window / open-theme-folder / open-context-menu {x, y, items} / log
 //   C#→JS: css-editor-init {css, source, sourcePath, targetPath, targetExists, theme, lightTheme, darkTheme}
-//          css-editor-saved {ok, targetPath | message} / confirm-close
+//          css-editor-saved {ok, targetPath | message} / confirm-close /
+//          menu-command {id} / menu-closed {menu}
 //
 // 初期ロードJS(仕様書 第8.4節)を増やさないよう、main.js からは一切 import されない
 // 独立したエントリにしている。editor.js(本文のエディタ一式)も import しない(見本の iframe 側だけが使う)。
 import { EditorState } from "@codemirror/state";
 import { EditorView, keymap, lineNumbers, drawSelection, highlightActiveLine } from "@codemirror/view";
-import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
+import { defaultKeymap, history, historyKeymap, indentWithTab, undo, redo, selectAll } from "@codemirror/commands";
 import { syntaxHighlighting, bracketMatching, indentOnInput } from "@codemirror/language";
 import { css as cssLanguage } from "@codemirror/lang-css";
 import { codeHighlightStyle } from "./code-highlight-style.js";
 import { readVars, setVar, removeVar, minimalChange, hasLegacyVars } from "./css-vars.js";
 import { parseColorLiteral } from "./color-picker.js";
 import { paneConfirm } from "./dialog.js";
+import { initContextMenu, routeNativeMenuCommand, routeNativeMenuClosed } from "./commands.js";
 
 const bridge = window.chrome?.webview ?? null;
 
@@ -291,6 +293,35 @@ const view = new EditorView({
     ],
   }),
 });
+
+// ---- 右クリックメニュー ----
+// ブラウザ既定のメニューは最外周(上の document の capture)で止め、入力欄とCSSの編集欄にだけ
+// 設定画面と同じネイティブのメニューを出す(commands.js initContextMenu。入力欄は
+// buildInputMenuTree が受け持つ)。
+// 最初の版は既定のメニューを止めただけで代わりを出しておらず、右クリックでは値をコピーできなかった
+// (Ctrl+C は効いていたが、それに気づけない。2026-09-25 実機で指摘)。
+function buildCodeMenuTree() {
+  const hasSelection = view.state.selection.ranges.some((r) => !r.empty);
+  const exec = (cmd) => () => { view.focus(); document.execCommand(cmd); };
+  return [
+    { label: "元に戻す", run: () => { view.focus(); undo(view); } },
+    { label: "やり直す", run: () => { view.focus(); redo(view); }, separatorAfter: true },
+    { label: "切り取り", enabled: hasSelection, run: exec("cut") },
+    { label: "コピー", enabled: hasSelection, run: exec("copy") },
+    { label: "貼り付け", run: pasteIntoCode, separatorAfter: true },
+    { label: "すべて選択", run: () => { view.focus(); selectAll(view); } },
+  ];
+}
+// 貼り付けは execCommand("paste") が CodeMirror の中では効かないため、クリップボードの文字を
+// 読んで選択範囲へ入れる(本文の「文字だけ貼り付け」main.js pasteAsPlainText と同じ作法)。
+async function pasteIntoCode() {
+  view.focus();
+  try {
+    const text = await navigator.clipboard.readText();
+    if (text) view.dispatch(view.state.replaceSelection(text), { scrollIntoView: true, userEvent: "input.paste" });
+  } catch { /* クリップボードを読めなければ何もしない */ }
+}
+initContextMenu(document, { bridge }, (_ctx, e) => (view.dom.contains(e.target) ? buildCodeMenuTree() : null));
 
 function currentCss() {
   return view.state.doc.toString();
@@ -569,6 +600,8 @@ if (bridge) {
     if (msg.type === "css-editor-init") loadInitial(msg);
     else if (msg.type === "css-editor-saved") handleSaved(msg);
     else if (msg.type === "confirm-close") requestClose();
+    else if (msg.type === "menu-command") routeNativeMenuCommand(msg.id);
+    else if (msg.type === "menu-closed") routeNativeMenuClosed(msg.menu);
   });
 }
 

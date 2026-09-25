@@ -603,8 +603,8 @@ internal sealed class SettingsWindow : Form
 
     /// <summary>"open-context-menu"のitems配列(入れ子のsubmenuを含む)をJSONから
     /// <see cref="NativeMenu.MenuItemData"/>へ変換する(MainForm.ParseMenuItemsと同一のロジック。
-    /// 別クラスのprivateメソッドのため重複定義になる)。</summary>
-    private static List<NativeMenu.MenuItemData> ParseMenuItems(JsonElement arrayElement)
+    /// 別クラスのprivateメソッドのため重複定義になる)。<see cref="CssEditorWindow"/>もこれを使う。</summary>
+    internal static List<NativeMenu.MenuItemData> ParseMenuItems(JsonElement arrayElement)
     {
         var list = new List<NativeMenu.MenuItemData>();
         foreach (JsonElement el in arrayElement.EnumerateArray())

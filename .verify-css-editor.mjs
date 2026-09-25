@@ -232,6 +232,127 @@ for (const [theme, preset, presetKey] of [["dark", "night", "darkTheme"], ["dark
   await p3.close();
 }
 
+// ---- 右クリックでコピーできる(2026-09-25 実機で指摘) ----
+// 最初の版はブラウザ既定のメニューを止めただけで代わりを出しておらず、入力欄の値もCSSも
+// 右クリックでは写せなかった。設定画面と同じネイティブのメニュー(open-context-menu)を出す。
+// カラーピッカーの色の表示も、ドラッグの取っ手のため文字を選べず、写す手段が無かった。
+{
+  const p4 = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+  p4.on("pageerror", (e) => errors.push(String(e.stack || e)));
+  await p4.addInitScript(installBridge);
+  await p4.addInitScript(() => {
+    window.__clipboard = [];
+    window.__clipText = "";
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: (t) => { window.__clipboard.push(t); return Promise.resolve(); },
+        readText: () => Promise.resolve(window.__clipText),
+      },
+    });
+    // CodeMirror は copy イベントで clipboardData に書く。それを横で読む。
+    window.__copied = [];
+    window.addEventListener("copy", (e) => { window.__copied.push(e.clipboardData.getData("text/plain")); });
+  });
+  await p4.goto(`http://localhost:${PORT}/css-editor-window.html`);
+  await p4.waitForFunction(() => window.__sent.some((m) => m.type === "initial-render-ready"));
+  await p4.evaluate(() => window.__reply({
+    type: "css-editor-init", css: ":root {\n  --accent: #AA3355;\n}\n", source: "file", sourcePath: "C:\\x\\my.css",
+    targetPath: "C:\\x\\my.css", targetExists: true, theme: "light", lightTheme: "default", darkTheme: "default",
+  }));
+  await p4.waitForTimeout(500);
+  const lastMenu = () => p4.evaluate(() => [...window.__sent].reverse().find((m) => m.type === "open-context-menu") ?? null);
+  const clearSent = () => p4.evaluate(() => { window.__sent.length = 0; });
+  const choose = async (label) => {
+    const menu = await lastMenu();
+    const item = menu?.items.find((i) => i.label === label);
+    await p4.evaluate((id) => {
+      window.__reply({ type: "menu-command", id });
+      window.__reply({ type: "menu-closed", menu: "__context__" });
+    }, item?.id);
+    await p4.waitForTimeout(150);
+    return item;
+  };
+
+  // 入力欄
+  await clearSent();
+  const input = '.ce-row[data-name="--accent"] input';
+  await p4.click(input);
+  await p4.evaluate((sel) => document.querySelector(sel).select(), input);
+  await p4.click(input, { button: "right" });
+  await p4.waitForTimeout(100);
+  let menu = await lastMenu();
+  const labels = (m) => (m?.items ?? []).map((i) => i.label);
+  ok("入力欄の右クリックで切り取り・コピー・貼り付け・すべて選択のメニューを出す",
+    ["切り取り", "コピー", "貼り付け", "すべて選択"].every((l) => labels(menu).includes(l)), menu);
+  ok("値を選んでいればコピーを押せる", menu?.items.find((i) => i.label === "コピー")?.enabled !== false, menu?.items);
+
+  // CSSの編集欄
+  await clearSent();
+  const content = "#ce-code .cm-content";
+  await p4.click(content);
+  await p4.keyboard.press("Control+a");
+  await p4.click(`${content} .cm-line >> nth=1`, { button: "right" });
+  await p4.waitForTimeout(100);
+  menu = await lastMenu();
+  ok("CSSの編集欄の右クリックでもメニューを出す",
+    ["元に戻す", "切り取り", "コピー", "貼り付け", "すべて選択"].every((l) => labels(menu).includes(l)), menu);
+  ok("CSSを選んでいればコピーを押せる", menu?.items.find((i) => i.label === "コピー")?.enabled !== false, menu?.items);
+  await choose("コピー");
+  const copied = await p4.evaluate(() => window.__copied.slice());
+  ok("メニューのコピーで選んだCSSが写る", copied.some((t) => t.includes("--accent: #AA3355;")), copied);
+
+  await p4.evaluate(() => { window.__clipText = "/* 貼り付けた */\n"; });
+  await p4.click(content, { button: "right" });
+  await p4.waitForTimeout(100);
+  await choose("貼り付け");
+  let doc = await p4.evaluate(() => document.querySelector("#ce-code .cm-content").innerText);
+  ok("メニューの貼り付けでクリップボードの文字が入る(選んでいた範囲を置き換える)", doc.includes("/* 貼り付けた */") && !doc.includes("--accent"), doc);
+  await p4.click(content, { button: "right" });
+  await p4.waitForTimeout(100);
+  await choose("元に戻す");
+  doc = await p4.evaluate(() => document.querySelector("#ce-code .cm-content").innerText);
+  ok("メニューの元に戻すで貼り付ける前に戻る", doc.includes("--accent: #AA3355;") && !doc.includes("貼り付けた"), doc);
+
+  // 入力欄とCSSの編集欄以外ではメニューを出さず、ブラウザ既定のメニューも出さない
+  await clearSent();
+  const prevented = await p4.evaluate(() => {
+    const el = document.querySelector(".ce-row .ce-label, .ce-row label, .ce-row span") ?? document.body;
+    const ev = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 5, clientY: 5, button: 2 });
+    el.dispatchEvent(ev);
+    return ev.defaultPrevented;
+  });
+  ok("それ以外の場所では何も出さない(既定のメニューも止める)", prevented && !(await lastMenu()), { prevented, menu: await lastMenu() });
+
+  // カラーピッカーの色の表示
+  await p4.click('.ce-row[data-name="--accent"] .ce-swatch');
+  await p4.waitForSelector(".color-picker-panel .cp-primary");
+  await p4.waitForTimeout(200);
+  await p4.evaluate(() => { window.__clipboard.length = 0; });
+  const primary = await p4.$eval(".cp-primary", (e) => e.textContent);
+  await p4.click(".cp-primary", { button: "right" });
+  await p4.waitForTimeout(100);
+  let clip = await p4.evaluate(() => window.__clipboard.slice());
+  ok("カラーピッカーの色の表示を右クリックすると、その色番号が写る", clip.at(-1) === primary, { clip, primary });
+  const toast = await p4.evaluate(() => {
+    const t = document.querySelector(".cp-preview .cp-copy-toast");
+    const panel = document.querySelector(".color-picker-panel").getBoundingClientRect();
+    if (!t) return null;
+    const r = t.getBoundingClientRect();
+    return { text: t.textContent, inside: r.top >= panel.top && r.bottom <= panel.bottom && r.left >= panel.left && r.right <= panel.right };
+  });
+  ok("「コピーしました」を出し、パネルの外にはみ出さない", toast?.text === "コピーしました" && toast.inside, toast);
+  const alts = await p4.$$eval(".cp-secondary .cp-alt", (els) => els.map((e) => e.textContent));
+  const secondaryText = await p4.$eval(".cp-secondary", (e) => e.textContent);
+  ok("補助表記は表記ごとに分かれ、つなげた文字は前と同じ", alts.length === 2 && secondaryText === alts.join(" ・ "), { alts, secondaryText });
+  await p4.click(".cp-secondary .cp-alt >> nth=1", { button: "right" });
+  await p4.waitForTimeout(100);
+  clip = await p4.evaluate(() => window.__clipboard.slice());
+  ok("補助表記を右クリックすると、押した表記だけが写る", clip.at(-1) === alts[1], { clip, alts });
+  ok("右クリックではパネルは閉じない", (await p4.$$eval(".color-picker-panel", (e) => e.length)) === 1);
+  await p4.close();
+}
+
 ok(`ページのエラーが無い(${errors.length}件)`, errors.length === 0, errors.slice(0, 5));
 await browser.close();
 console.log(`\nNG=${ng}`);
