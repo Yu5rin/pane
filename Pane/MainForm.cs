@@ -849,16 +849,34 @@ internal sealed class MainForm : Form
         // エラーとして残す。
         if (distExists && indexExists) Logger.Write(distLine);
         else Logger.Error($"{distLine} ← dist/が見つからないため画面を表示できない。Pane.exeとdistフォルダは同じ場所に置く必要がある");
-        _webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
-            VirtualHostName, distPath, CoreWebView2HostResourceAccessKind.Allow);
-        _webView.CoreWebView2.Navigate($"https://{VirtualHostName}/index.html");
-        Logger.Write("Navigate呼び出し完了");
 
         // distに必要なファイルが欠けていれば、最新版を取って直すかを尋ねる(利用者要望)。
         // 上のindex.htmlの確認だけでは、style.cssだけが欠けたPCで画面が崩れたまま
         // 何も言わずに動き続けていた(DistIntegrity・DistRepairFlow参照)。
         // プロセスで1回だけ。尋ねるのはウィンドウが見えてから。
+        //
+        // 【下の割り当てより先に呼ぶ理由】distフォルダがまるごと無いとき、WebView2の
+        // SetVirtualHostNameToFolderMappingが例外を投げるのか、読み込み時に失敗するだけなのかは、
+        // 公式の説明に書かれていない。例外を投げた場合、この起動処理はそこで止まる
+        // (UIスレッドの例外はProgram.csで記録して続行する設定なので、アプリは落ちないが
+        // 後ろの行は実行されない)。確認を後ろに置くと、まさに直すべき「distが丸ごと無い」
+        // ときに確認が出ない。先に始めておけば、どちらの動きでも確認は出る。
         DistRepairFlow.CheckOnce(this, distPath, _hasUnsavedDocuments ?? (() => IsDirty), _shutdownForUpdate ?? (() => { }));
+
+        try
+        {
+            _webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
+                VirtualHostName, distPath, CoreWebView2HostResourceAccessKind.Allow);
+            _webView.CoreWebView2.Navigate($"https://{VirtualHostName}/index.html");
+            Logger.Write("Navigate呼び出し完了");
+        }
+        catch (Exception ex) when (!distExists)
+        {
+            // distが無いときだけここで受け止める(あるのに失敗したのなら別の問題なので、
+            // 従来どおり外へ出してProgram.csの記録に任せる)。何が起きたかをログで区別できるように
+            // 書き分けておく。修復の確認は上で始めてあるので、ここでは何もしない。
+            Logger.WriteException("distが無いため画面を読み込めなかった(修復の確認は別に出す)", ex);
+        }
     }
 
     /// <summary>

@@ -68,6 +68,20 @@ public class DistIntegrityTests
     }
 
     [Fact]
+    public void distフォルダがまるごと無ければ必須ファイルと一覧をすべて欠けとして返す()
+    {
+        // フォルダごと消された場合。一覧も読めないので、確かめられるのは必須ファイルだけ。
+        // 空の結果にならないこと(=修復の確認が出ること)が要点。
+        var missing = DistIntegrity.FindMissing(null, _ => false);
+        Assert.Equal(DistIntegrity.RequiredFiles.Concat(new[] { DistIntegrity.FileListName }), missing);
+
+        // 確認の文面は先頭5件と「ほか6件」になる(11件すべてを並べて長くしない)。
+        string prompt = DistIntegrity.BuildRepairPrompt(missing);
+        Assert.Contains("・index.html", prompt);
+        Assert.Contains("・ほか6件", prompt);
+    }
+
+    [Fact]
     public void 一覧が無くても他が全部あれば欠けは一覧だけ()
     {
         Assert.Equal(new[] { DistIntegrity.FileListName }, DistIntegrity.FindMissing(null, _ => true));
