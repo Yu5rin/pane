@@ -66,15 +66,38 @@ const ok = (label, cond, detail) => {
   if (!cond) ng++;
 };
 
+// 撮るときは、色の移り変わり(transition)やアニメーションを最後まで進めた状態で撮る。
+// マウスを外した直後のボタンの色の戻り(.btn は 0.15 秒かけて戻る)を途中で撮ると、
+// 変数と関係なく画面が変わって見える。CI(2026-09-25)で、見本のどこにも使われていない
+// --font-heading が一度だけ「画面全体で変化あり」になったため入れた。
+const shotOptions = { animations: "disabled" };
 async function stableShot(page) {
-  let prev = await page.screenshot();
+  let prev = await page.screenshot(shotOptions);
   for (let i = 0; i < 15; i++) {
     await page.waitForTimeout(80);
-    const cur = await page.screenshot();
+    const cur = await page.screenshot(shotOptions);
     if (cur.equals(prev)) return cur;
     prev = cur;
   }
   return prev;
+}
+
+// 変数 name を変えたら画面が変わるか。変わったときはもう一度測り直し、2回とも変わったときだけ
+// 「変わる」とする(1回だけの揺れを、効いていると数えないため)。
+async function changesWith(page, name) {
+  const setProbe = (on) => page.evaluate(([n, v, on]) => {
+    let s = document.getElementById("coverage-probe");
+    if (!s) { s = document.createElement("style"); s.id = "coverage-probe"; document.head.appendChild(s); }
+    s.textContent = on ? `html, html[data-theme][data-theme], :root:root:root { ${n}: ${v} !important; }` : "";
+  }, [name, probeValue(name), on]);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const base = await stableShot(page);
+    await setProbe(true);
+    const shot = await stableShot(page);
+    await setProbe(false);
+    if (shot.equals(base)) return false;
+  }
+  return true;
 }
 
 const browser = await pw.chromium.launch();
@@ -93,18 +116,10 @@ for (const view of VIEWS) {
     const hover = HOVER[name];
     if (hover && hover.view === view) await page.hover(hover.selector);
     else await page.mouse.move(999, 2599);
-    const base = await stableShot(page);
-    await page.evaluate(([n, v]) => {
-      let s = document.getElementById("coverage-probe");
-      if (!s) { s = document.createElement("style"); s.id = "coverage-probe"; document.head.appendChild(s); }
-      s.textContent = `html, html[data-theme][data-theme], :root:root:root { ${n}: ${v} !important; }`;
-    }, [name, probeValue(name)]);
-    const shot = await stableShot(page);
-    if (!shot.equals(base)) {
+    if (await changesWith(page, name)) {
       if (!seen.has(name)) seen.set(name, new Set());
       seen.get(name).add(view);
     }
-    await page.evaluate(() => { document.getElementById("coverage-probe").textContent = ""; });
   }
   await page.close();
 }
