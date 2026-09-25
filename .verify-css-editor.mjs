@@ -61,9 +61,9 @@ const previewInfo = await frame.evaluate(() => ({
   h1: !!document.querySelector("#cm-host .cm-content .tok-h1, #cm-host .cm-content [class*='h1']"),
   table: !!document.querySelector("#cm-host table, #cm-host .cm-table-widget, #cm-host [class*='table']"),
   editable: document.querySelector("#cm-host .cm-content").getAttribute("contenteditable"),
-  text: document.querySelector("#cm-host .cm-content").innerText.slice(0, 40),
+  text: document.querySelector("#cm-host .cm-content").innerText,
 }));
-ok("見本に見本の文書が出る", previewInfo.text.includes("見出し1"), previewInfo);
+ok("見本に見本の文書が出る(Front Matter を含む。Callout 等は .verify-css-preview-coverage.mjs が見る)", ["見出し1", "title: 見本"].every((t) => previewInfo.text.includes(t)), previewInfo.text.slice(0, 200));
 ok("見本は読み取り専用", previewInfo.editable === "false", previewInfo.editable);
 ok("見本に開いたCSSが効いている(--accent)", (await previewVar("--accent")).toUpperCase() === "#AA3355", await previewVar("--accent"));
 
@@ -142,6 +142,44 @@ ok("保存していない変更があると、閉じる前に確認が出る", t
 await page.click(".pane-dialog-overlay .pane-dialog-actions button:last-child");
 await page.waitForTimeout(200);
 ok("確認して閉じると close-css-editor-window を送る", await page.evaluate(() => window.__sent.some((m) => m.type === "close-css-editor-window")));
+
+// ---- 見本の画面の切り替え(利用者の指摘「コードモードの確認ができない」への対応) ----
+await page.click('#ce-views button[data-view="code"]');
+await frame.waitForFunction(() => document.body.classList.contains("view-code"), null, { timeout: 5000 });
+const codeInfo = await frame.evaluate(() => ({
+  modeCode: document.getElementById("cm-host").classList.contains("mode-code"),
+  gutters: !!document.querySelector("#cm-host .cm-gutters"),
+  activeLine: !!document.querySelector("#cm-host .cm-line.cm-active-line"),
+}));
+ok("「コード」でコードモードの見本になる(行番号・今の行)", codeInfo.modeCode && codeInfo.gutters && codeInfo.activeLine, codeInfo);
+await page.click('#ce-views button[data-view="chrome"]');
+await frame.waitForFunction(() => document.body.classList.contains("view-chrome"), null, { timeout: 5000 });
+const chromeInfo = await frame.evaluate(() => ["#menubar", "#sidebar", "#statusbar", ".mock-titlebar", ".palette", ".pane-dialog-box"].map((sel) => {
+  const el = document.querySelector(sel);
+  return !!el && el.getBoundingClientRect().height > 0;
+}));
+ok("「画面全体」でタイトルバー・メニューバー・サイドバー・ステータスバー・パレット・ダイアログが出る", chromeInfo.every(Boolean), chromeInfo);
+await page.click('#ce-views button[data-view="markdown"]');
+await frame.waitForFunction(() => document.body.classList.contains("view-markdown"), null, { timeout: 5000 });
+ok("「Markdown」では画面の周りの部品を隠す", await frame.evaluate(() => getComputedStyle(document.getElementById("menubar")).display === "none"));
+// 入力欄を触ると、見本がその項目の見える画面へ切り替わる
+await page.focus('.ce-row[data-name="--code-kw"] input');
+await frame.waitForFunction(() => document.body.classList.contains("view-code"), null, { timeout: 5000 });
+ok("コードの色分けの入力欄を触ると、見本がコードに切り替わる", (await page.$eval('#ce-views button[data-view="code"]', (b) => b.getAttribute("aria-pressed"))) === "true");
+await page.focus('.ce-row[data-name="--sidebar-bg"] input');
+await frame.waitForFunction(() => document.body.classList.contains("view-chrome"), null, { timeout: 5000 });
+ok("画面の入力欄を触ると、見本が画面全体に切り替わる", true);
+// 入力欄に効かない変数を出していないこと(最初の版の誤り)
+ok("効かない変数(--pre-bg・--font-heading)を入力欄に出さない", !(await page.$('.ce-row[data-name="--pre-bg"], .ce-row[data-name="--font-heading"]')));
+
+// ---- 見本のステータスバーの指定が本物(index.html)と同じ ----
+{
+  const fs = await import("node:fs");
+  const rules = (file) => fs.readFileSync(file, "utf8").split("\n").map((l) => l.trim()).filter((l) => l.startsWith("#statusbar"));
+  const real = rules("src/index.html");
+  const copy = rules("src/css-preview.html");
+  ok("見本の #statusbar の指定が index.html と同じ(写しがずれていない)", real.length > 0 && JSON.stringify(real) === JSON.stringify(copy), { real, copy });
+}
 
 // ---- 雛形で始める ----
 const page2 = await browser.newPage({ viewport: { width: 1200, height: 800 } });

@@ -1,5 +1,4 @@
 :root {
-  --bar-h: 48px;
   --paper: #EEF1F0;
   --surface: #FFFFFF;
   --ink: #1F2428;
@@ -8,8 +7,6 @@
   --accent: #0F6E69;
   --accent-hover: #0A5A56;
   --accent-soft: #E1EFED;
-  --topbar: #0F6E69;
-  --topbar-ink: #EAF4F3;
   --input-bg: #FAFBFB;
   /* コードブロック背景(ライト既定): 真っ黒にすると白系の紙面から浮く(GitHub/Typora/
      VS Codeもライトのコードブロックは黒ではなく、本文よりわずかに沈んだニュートラルな
@@ -17,14 +14,8 @@
      VS Code Light+のウィジェット背景も同系統)。それに倣い、彩度の低いグレーを採用
      (旧値#E7ECEAはやや緑寄りだったため、色味を抜いてニュートラルにした)。 */
   --code-bg: #EEF1F3;
-  --pre-bg: #262C31;
-  --pre-ink: #E8EAED;
   --danger-soft: #F9ECEA;
-  --pending: #B7791F;
   --danger: #B03A2E;
-  --status-ok: #8FDAD2;
-  --status-off: #AFC4C0;
-  --status-pend: #F2C368;
   /* UI点検第2弾 指摘12の修正: 仕様書10.1節「角丸は控えめに。コントロールは6px、
      ウィンドウ枠は8px、本文領域は角丸なし」に沿って揃える。以前は10px(.btn)・
      14px(.palette/.settings-modal/.settings)・12px(.pane-dialog-box/.extlink-box)・
@@ -39,7 +30,6 @@
      なるはずだが、それを適用するとコードブロック等の見た目が大きく変わるため、
      指摘に無い箇所まで広げるのは今回は見送った)。 */
   --radius: 6px;
-  --shadow-card: 0 1px 2px rgba(16,24,32,.05), 0 10px 30px rgba(16,24,32,.08);
   --shadow-pop: 0 6px 24px rgba(16,24,32,.14);
   --font-body: "IBM Plex Sans JP", system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, monospace;
@@ -53,20 +43,14 @@ html[data-theme="dark"] {
   --accent: #35B3AA;
   --accent-hover: #4CC5BC;
   --accent-soft: #17332F;
-  --topbar: #0C2A27;
-  --topbar-ink: #D9EAE7;
   --input-bg: #171C20;
   /* コードブロック背景(ダーク既定): 修正前は#262E33で、本文(最終的な--paper #14171A)より
      明るい青緑寄りの色になっており、「コードブロックが黒っぽく見えない」という指摘の
      原因の一つだった。本文よりはっきり暗く、かつ青緑に寄せないニュートラルな黒系に
      変更する。 */
   --code-bg: #0B0D0F;
-  --pre-bg: #10151A;
-  --pre-ink: #DDE3E7;
   --danger-soft: #3A2320;
-  --pending: #D9A24A;
   --danger: #E07B6E;
-  --shadow-card: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.35);
   --shadow-pop: 0 6px 24px rgba(0,0,0,.5);
 }
 
@@ -388,12 +372,6 @@ input, textarea { font-family: inherit; color: var(--ink); }
 *::-webkit-scrollbar-corner { background: transparent; }
 kbd { font-family: var(--font-mono); font-size: 11px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 1px 5px; background: var(--surface); }
 
-/* ロゴ */
-.logo-mark { display: inline-block; width: 22px; height: 22px; border-radius: 6px; background: var(--accent); position: relative; vertical-align: -4px; margin-right: 8px; }
-.logo-mark::after { content: ""; position: absolute; left: 5px; right: 5px; top: 7px; height: 2px; background: var(--surface); box-shadow: 0 5px 0 var(--surface); border-radius: 1px; }
-.logo-mark.small { width: 18px; height: 18px; background: #fff; }
-.logo-mark.small::after { top: 5px; background: var(--topbar); box-shadow: 0 5px 0 var(--topbar); }
-
 /* ボタン */
 .btn { border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: var(--radius); padding: 9px 16px; font-size: 14px; font-weight: 500; transition: background .15s, border-color .15s, color .15s; }
 .btn.primary { background: var(--accent-ink); border-color: var(--accent-ink); color: #fff; }
@@ -403,12 +381,6 @@ html[data-theme="dark"] .btn.primary { color: #0E1513; }
 .btn.block { width: 100%; }
 .icon-btn { display: inline-flex; align-items: center; justify-content: center; gap: 4px; }
 .icon-btn svg { display: block; }
-
-/* ヘッダー(濃色・PWAタイトルバーと統一) */
-.topbar { display: flex; justify-content: space-between; align-items: center; padding: 9px 16px; background: var(--topbar); color: var(--topbar-ink); position: sticky; top: 0; z-index: 10; }
-.app-name { font-weight: 600; letter-spacing: .01em; }
-.topbar-left, .topbar-right { display: flex; align-items: center; gap: 10px; }
-.topbar .btn { background: transparent; border-color: rgba(255,255,255,.28); color: var(--topbar-ink); }
 
 /* レイアウト */
 .layout { display: grid; grid-template-columns: var(--list-w, 320px) 6px 1fr; height: calc(var(--vvh, 100dvh) - 45px); }
@@ -429,8 +401,6 @@ html[data-theme="dark"] .btn.primary { color: #0E1513; }
 .editor:not(.live) .memo-content { flex: none; overflow: hidden; min-height: 55dvh; }
 .editor-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .editor-head-right { display: flex; align-items: center; gap: 8px; margin-left: auto; }
-.save-status { color: var(--ink-sub); }
-.save-status.pending { color: var(--pending); }
 .memo-title { border: none; background: transparent; font-size: 28px; font-weight: 700; letter-spacing: -.01em; padding: 4px 0 8px; width: 100%; line-height: 1.4; flex: none; min-height: calc(1.4em + 12px); text-overflow: ellipsis; }
 .memo-title:focus, .memo-content:focus { outline: none; }
 .memo-content { flex: 1; border: none; background: transparent; resize: none; font-size: 15px; line-height: 1.85; padding: 8px 0; width: 100%; min-height: 0; }
@@ -445,7 +415,6 @@ html[data-theme="dark"] .btn.primary { color: #0E1513; }
 .md-toolbar button { border: 1px solid transparent; background: transparent; border-radius: 6px; min-width: 30px; height: 28px; padding: 0 9px; font-family: var(--font-mono); font-size: 12px; color: var(--ink-sub); flex: none; transition: background .12s, color .12s; }
 .md-toolbar .md-sep { width: 1px; height: 18px; background: var(--line); margin: 0 6px; flex: none; }
 .md-toolbar.disabled button:not(#btn-preview) { opacity: .35; pointer-events: none; }
-.mobile-bar.disabled .mobile-bar-scroll { opacity: .35; pointer-events: none; }
 #btn-preview.on { background: var(--accent-ink); color: #fff; }
 html[data-theme="dark"] #btn-preview.on { color: #0E1513; }
 
@@ -825,25 +794,6 @@ body.export-layout .cm-scroller { overflow: visible !important; }
 #cm-host.mode-code .cm-line.cm-active-line { background: var(--active-line-bg); }
 #cm-host.mode-code .cm-gutterElement.cm-active-line-gutter { background: var(--active-line-bg); }
 
-/* モバイル: キーボード上部ツールバー */
-.mobile-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; height: var(--bar-h, 48px); box-sizing: border-box; display: flex; align-items: center; background: var(--surface); border-top: 1px solid var(--line); box-shadow: 0 -2px 10px rgba(16,24,32,.08); }
-.mobile-bar[hidden] { display: none !important; } /* display:flexがhidden属性に勝たないように */
-/* PCでは下部バーの分だけ本文領域の下に余白を確保し、キーボードを隠すボタンは不要 */
-@media (min-width: 721px) {
-  /* Mdツールバー表示中は本文が潜らないよう下端に余白 */
-  .layout.editing .editor { margin-bottom: var(--bar-h, 48px); padding-bottom: 12px; }
-  /* PCではMdツールバーをエディタ領域のみに重ねる(サイドバー下部のボタンを覆わない) */
-  .mobile-bar { left: calc(var(--list-w, 320px) + 6px); }
-  body:has(.layout.collapsed) .mobile-bar { left: 0; }
-
-  .mobile-bar { padding: 2px 0; }
-  .mobile-bar-kb { display: none; }
-  .layout.editing .editor { margin-bottom: calc(var(--bar-h, 48px) + env(safe-area-inset-bottom)); padding-bottom: 8px; }
-}
-.mobile-bar-scroll { flex: 1; display: flex; gap: 2px; overflow-x: auto; padding: 6px 8px; -webkit-overflow-scrolling: touch; }
-.mobile-bar-scroll button { border: none; background: transparent; border-radius: 8px; min-width: 40px; height: calc(var(--bar-h, 48px) - 12px); padding: 0 10px; font-family: var(--font-mono); font-size: 13px; color: var(--ink); flex: none; }
-.mobile-bar-scroll button:active { background: var(--accent-soft); color: var(--accent-ink); }
-.mobile-bar-kb { border: none; border-left: 1px solid var(--line); background: transparent; color: var(--ink-sub); padding: 0 14px; height: var(--bar-h, 48px); flex: none; }
 .hl-icon { background: #F6E27A; color: #333; border-radius: 3px; padding: 0 3px; }
 html[data-theme="dark"] .hl-icon { background: #8A7A2E; color: #F2EFDF; }
 mark { background: #F6E27A; color: inherit; border-radius: 3px; padding: 0 2px; }
@@ -912,7 +862,6 @@ html[data-theme="dark"] mark { background: #8A7A2E; }
   body.kb-open .layout { height: calc(var(--vvh, 100dvh) - 45px - 49px); } /* キーボード上ツールバーの分 */
   .editor-head { position: fixed; top: 51px; left: 10px; right: 10px; height: 36px; z-index: 30; background: transparent; border: none; margin: 0; padding: 0; pointer-events: none; }
   .editor-head .btn { pointer-events: auto; background: var(--surface); box-shadow: 0 1px 5px rgba(0,0,0,.18); width: 36px; height: 36px; padding: 0; }
-  .editor-head .save-status { display: none; } /* 固定枠内の非表示テキストが1行目に被らないよう明示的に消す */
   .memo-content { padding-bottom: 16px; }
 
   .editor { padding: 8px 16px calc(12px + env(safe-area-inset-bottom)); margin-top: 96px; } /* 上marginはJSがツールバー実下端に補正 */
@@ -1089,7 +1038,6 @@ html[data-theme="dark"] .tok-mark { background: #8A7A2E; color: #F2EFDF; }
 .btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 .btn.ghost:hover { background: var(--accent-soft); border-color: var(--accent-soft); color: var(--accent-ink); }
 .btn.danger:hover { background: var(--danger-soft); border-color: var(--danger-soft); }
-.topbar .btn:hover { background: rgba(255,255,255,.14); border-color: rgba(255,255,255,.4); color: #fff; }
 .md-toolbar button:hover { background: var(--accent-soft); color: var(--accent-ink); }
 /* UI点検第2弾 指摘8の修正: 背景をvar(--surface)からvar(--paper)への「入れ替え」に
    していたが、両者が近い既定ライト(#FFFFFF vs #FBFBFA、実測コントラスト比1.04)・
@@ -1106,8 +1054,6 @@ html[data-theme="dark"] .tok-mark { background: #8A7A2E; color: #F2EFDF; }
 .resize-handle:hover { background: var(--accent-soft); }
 }
 
-/* ドロワー表示中はMdツールバーを重ねない(下部ボタンが隠れる) */
-body:has(.list-pane.drawer-open) .mobile-bar { display: none !important; }
 
 /* 検索ジャンプ */
 .search-row { display: flex; gap: 4px; align-items: stretch; }
@@ -1300,7 +1246,7 @@ html[data-theme="dark"] .cm-search-ruler-mark.is-active {
 
 /* アーカイブ閲覧モード: 編集UIを隠して読み取り専用を明示 */
 .layout.readonly .memo-title { pointer-events: none; }
-.layout.readonly #btn-delete, .layout.readonly #btn-save-template, .layout.readonly .mobile-bar { display: none !important; }
+.layout.readonly #btn-delete, .layout.readonly #btn-save-template { display: none !important; }
 /* UI点検第2弾(自主点検で追加発見。指摘5と同根): 文字色はvar(--ink-sub)決め打ちでは
    なく、var(--ink)を15%だけcolor-mix()で混ぜた値を使う(.extlink-urlと同じ考え方)。
    --ink-subは本文(--paper)向けに調整された値で、この帯の背景(--accent-soft)に対しては

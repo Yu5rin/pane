@@ -18,14 +18,11 @@
    var(--danger)(このテーマ独自の値を持たない場合は既定ライト/ダーク値のまま)を
    各テーマのvar(--paper)へ薄く混ぜたcolor-mix()にする(ライト系8%・ダーク系15%。
    既定ライト/ダークの実測値から近似した混合率)。
-   --pre-bg/--pre-ink(フェンスコードブロックの背景・文字色)も指摘13の対象だが、
-   実際にはstyle.css側のどのセレクタからも参照されていない(現在の実装は
-   var(--code-bg)を使っており、--pre-bg/--pre-inkは使われないまま残っている
-   死んだトークンだった。ユーザー向けのサンプルカスタムCSS
-   (Pane/ThemeFolderService.cs)にだけ「フェンスコードブロックの背景色」として
-   案内されている)。実害(見た目への影響)は無いが、ユーザーがこの変数名を見て
-   カスタムCSSに使った場合に備え、実際に効いているvar(--code-bg)/var(--ink)へ
-   一致させておく。
+   --pre-bg/--pre-ink(フェンスコードブロックの背景・文字色)は、どのセレクタからも
+   参照されていない死んだトークンだった(コードブロックの背景は var(--code-bg))。
+   以前は利用者がカスタムCSSで使った場合に備えて各テーマで定義していたが、定義しても
+   何も変わらないため、2026-09-25 にカスタムCSSの作成補助(仕様書 C-16)で実測して
+   style.css・sample.css(Pane/ThemeFolderService.cs)とあわせて消した。
 
    適用の仕組み: main.jsがapply-settings受信時にdocument.documentElement(=html)へ
    data-light-theme="<id>" / data-dark-theme="<id>" を付与する(既定値は"default")。
@@ -150,8 +147,6 @@ html[data-theme="light"][data-light-theme="sepia"] {
   /* UI点検第2弾 指摘13の修正で追加(根拠はファイル冒頭のコメント参照)。 */
   --input-bg: var(--paper);
   --danger-soft: color-mix(in srgb, var(--danger) 8%, var(--paper));
-  --pre-bg: var(--code-bg);
-  --pre-ink: var(--ink);
 }
 
 /* github: GitHub風。白背景+青系アクセント。
@@ -228,8 +223,6 @@ html[data-theme="light"][data-light-theme="github"] {
   /* UI点検第2弾 指摘13の修正で追加(根拠はファイル冒頭のコメント参照)。 */
   --input-bg: var(--paper);
   --danger-soft: color-mix(in srgb, var(--danger) 8%, var(--paper));
-  --pre-bg: var(--code-bg);
-  --pre-ink: var(--ink);
 }
 
 /* solarized-light: Solarized(Ethan Schoonover配色)のライト側。
@@ -324,8 +317,6 @@ html[data-theme="light"][data-light-theme="solarized-light"] {
   /* UI点検第2弾 指摘13の修正で追加(根拠はファイル冒頭のコメント参照)。 */
   --input-bg: var(--paper);
   --danger-soft: color-mix(in srgb, var(--danger) 8%, var(--paper));
-  --pre-bg: var(--code-bg);
-  --pre-ink: var(--ink);
 }
 
 /* ---- ダーク用プリセット ---- */
@@ -412,8 +403,6 @@ html[data-theme="dark"][data-dark-theme="nord"] {
   /* UI点検第2弾 指摘13の修正で追加(根拠はファイル冒頭のコメント参照)。 */
   --input-bg: var(--paper);
   --danger-soft: color-mix(in srgb, var(--danger) 15%, var(--paper));
-  --pre-bg: var(--code-bg);
-  --pre-ink: var(--ink);
 }
 
 /* dracula: Dracula配色。
@@ -504,8 +493,6 @@ html[data-theme="dark"][data-dark-theme="dracula"] {
   /* UI点検第2弾 指摘13の修正で追加(根拠はファイル冒頭のコメント参照)。 */
   --input-bg: var(--paper);
   --danger-soft: color-mix(in srgb, var(--danger) 15%, var(--paper));
-  --pre-bg: var(--code-bg);
-  --pre-ink: var(--ink);
 }
 
 /* solarized-dark: Solarizedのダーク側。
@@ -610,8 +597,6 @@ html[data-theme="dark"][data-dark-theme="solarized-dark"] {
   /* UI点検第2弾 指摘13の修正で追加(根拠はファイル冒頭のコメント参照)。 */
   --input-bg: var(--paper);
   --danger-soft: color-mix(in srgb, var(--danger) 15%, var(--paper));
-  --pre-bg: var(--code-bg);
-  --pre-ink: var(--ink);
 }
 
 /* night: Typoraの「Night」テーマ移植(ユーザー要望、id/ラベルは実機フィードバックで
@@ -837,6 +822,4 @@ html[data-theme="dark"][data-dark-theme="night"] {
   /* UI点検第2弾 指摘13の修正で追加(根拠はファイル冒頭のコメント参照)。 */
   --input-bg: var(--paper);
   --danger-soft: color-mix(in srgb, var(--danger) 15%, var(--paper));
-  --pre-bg: var(--code-bg);
-  --pre-ink: var(--ink);
 }

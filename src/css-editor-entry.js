@@ -39,25 +39,102 @@ window.addEventListener("error", (e) => logToHost("error", `JS未処理エラー
 window.addEventListener("unhandledrejection", (e) => logToHost("error", `JS未処理のPromise拒否: ${e.reason}`));
 
 // ---- 入力欄に出す項目 ----
-// 色は第10.2節の配色トークン6つと、コードの背景2つ。ライト用とダーク用を別々に持つ
-// (見本の「ライト/ダーク」の切り替えに合わせて、書き込む先のブロックも切り替わる)。
-// 本文の余白・行の高さ・最大幅は設定画面の項目の値が常に優先されてCSSからは効かないため
-// (main.js applyEditorPaddingSetting 等が要素に直接書き込む)、ここには出さない。
-const COLOR_FIELDS = [
-  { name: "--paper", label: "紙面(背景)" },
-  { name: "--ink", label: "本文の文字" },
-  { name: "--ink-mute", label: "補助の文字" },
-  { name: "--rule", label: "罫線" },
-  { name: "--accent", label: "アクセント" },
-  { name: "--accent-soft", label: "アクセントの面" },
-  { name: "--code-bg", label: "インラインコードの背景" },
-  { name: "--pre-bg", label: "コードブロックの背景" },
-];
-// フォントはライト/ダークで変えることがまず無いため、ライト用(:root)にだけ書く。
-const FONT_FIELDS = [
-  { name: "--font-body", label: "本文の書体" },
-  { name: "--font-heading", label: "見出しの書体" },
-  { name: "--font-mono", label: "等幅の書体" },
+// 見本の画面(view)ごとにまとめる。入力欄を触ると、見本がその項目の見える画面へ切り替わる
+// (コードの色分けを触ればコードモード、メニューバーの色を触れば画面全体)。
+// 色はライト用とダーク用を別々に持つ(見本の「ライト/ダーク」の切り替えに合わせて、書き込む先の
+// ブロックも切り替わる)。書体は共通(ライト用の :root にだけ書く)。
+//
+// 入力欄に出さないもの:
+//   ・本文の余白・行の高さ・最大幅: 設定画面の項目の値が常に優先され、CSSからは効かない
+//     (main.js applyEditorPaddingSetting 等が要素に直接書き込む)
+//   ・見出しの書体(--font-heading): 本文の見出しには効かず、取扱説明書の見出しにしか使われない
+//     (最初の版では入力欄に出していたが、変えても本文が変わらなかった。2026-09-25 に実測して外した)
+// どの変数がどの見本で確かめられるかは .verify-css-preview-coverage.mjs が実測で見張っている。
+const FIELD_GROUPS = [
+  {
+    title: "本文",
+    view: "markdown",
+    kind: "color",
+    fields: [
+      { name: "--paper", label: "紙面(背景)" },
+      { name: "--ink", label: "本文の文字" },
+      { name: "--ink-sub", label: "補助の文字" },
+      { name: "--ink-mute", label: "控えめな文字(記号など)" },
+      { name: "--accent", label: "アクセント(リンクなど)" },
+      { name: "--accent-ink", label: "アクセントの面の上の文字" },
+      { name: "--accent-soft", label: "アクセントの面(選択範囲・今いる所など)" },
+      { name: "--line", label: "枠線" },
+      { name: "--rule", label: "区切り線" },
+      // インラインコードとコードブロックの両方の背景(style.css .cm-codeblock-line も --code-bg)。
+      { name: "--code-bg", label: "コードの背景" },
+      // Markdown のコードブロックの行番号。コードモードの行番号は --ink-mute で描かれる。
+      { name: "--code-linenum-fg", label: "コードブロックの行番号" },
+      { name: "--panel-bg", label: "表の見出し行の背景" },
+      { name: "--frontmatter-bg", label: "Front Matter の背景" },
+    ],
+  },
+  {
+    title: "Callout",
+    view: "markdown",
+    kind: "color",
+    fields: [
+      { name: "--callout-note", label: "NOTE の色" },
+      { name: "--callout-note-bg", label: "NOTE の背景" },
+      { name: "--callout-tip", label: "TIP の色" },
+      { name: "--callout-tip-bg", label: "TIP の背景" },
+      { name: "--callout-important", label: "IMPORTANT の色" },
+      { name: "--callout-important-bg", label: "IMPORTANT の背景" },
+      { name: "--callout-warning", label: "WARNING の色" },
+      { name: "--callout-warning-bg", label: "WARNING の背景" },
+      { name: "--callout-caution", label: "CAUTION の色" },
+      { name: "--callout-caution-bg", label: "CAUTION の背景" },
+    ],
+  },
+  {
+    title: "コード",
+    view: "code",
+    kind: "color",
+    fields: [
+      { name: "--code-kw", label: "キーワード" },
+      { name: "--code-kw2", label: "制御構文(if・return など)" },
+      { name: "--code-var", label: "変数" },
+      { name: "--code-fn", label: "関数" },
+      { name: "--code-str", label: "文字列" },
+      { name: "--code-num", label: "数値" },
+      { name: "--code-cmt", label: "コメント" },
+      { name: "--code-type", label: "型・クラス" },
+      { name: "--code-prop", label: "プロパティ" },
+      { name: "--code-op", label: "演算子・記号" },
+      { name: "--code-regex", label: "正規表現" },
+      { name: "--active-line-bg", label: "今の行の背景" },
+      { name: "--fold-guide-hover", label: "折りたたみの範囲(マウスを乗せたとき)" },
+    ],
+  },
+  {
+    title: "画面",
+    view: "chrome",
+    kind: "color",
+    fields: [
+      { name: "--titlebar-bg", label: "タイトルバーの背景" },
+      { name: "--titlebar-fg", label: "タイトルバーの文字" },
+      { name: "--chrome-bg", label: "メニューバー・ステータスバーの背景" },
+      { name: "--chrome-fg", label: "ステータスバーの文字" },
+      { name: "--menu-hover-fg", label: "メニューバーのボタン(押したとき)" },
+      { name: "--sidebar-bg", label: "サイドバーの背景" },
+      { name: "--surface", label: "パレット・ダイアログの背景" },
+      { name: "--input-bg", label: "入力欄の背景" },
+      { name: "--accent-hover", label: "主なボタン(マウスを乗せたとき)" },
+    ],
+  },
+  {
+    title: "書体",
+    view: "",
+    kind: "font",
+    fields: [
+      { name: "--font-body", label: "本文と画面の書体" },
+      { name: "--font-mono", label: "等幅の書体(コード)" },
+    ],
+  },
 ];
 
 // 設定のカスタムCSSが未指定のときの雛形。ブロックだけを用意し、中身は入力欄で足していく。
@@ -84,7 +161,12 @@ document.body.innerHTML = `
   <div class="ce-bar">
     <span class="ce-title">カスタムCSSを作る</span>
     <span class="ce-target" id="ce-target"></span>
-    <span class="ce-seg" role="group" aria-label="見本の配色">
+    <span class="ce-seg" role="group" aria-label="見本の画面" id="ce-views">
+      <button type="button" data-view="markdown" aria-pressed="true">Markdown</button>
+      <button type="button" data-view="code" aria-pressed="false">コード</button>
+      <button type="button" data-view="chrome" aria-pressed="false">画面全体</button>
+    </span>
+    <span class="ce-seg" role="group" aria-label="見本の配色" id="ce-scopes">
       <button type="button" data-scope="light" aria-pressed="true">ライト</button>
       <button type="button" data-scope="dark" aria-pressed="false">ダーク</button>
     </span>
@@ -120,26 +202,27 @@ let previewReady = false;
 
 function renderForm() {
   const scopeLabel = scope === "dark" ? "ダーク" : "ライト";
-  const colorRows = COLOR_FIELDS.map((f) => `
-      <div class="ce-row" data-name="${f.name}" data-kind="color">
+  const resetBtn = (label) => `<button type="button" class="ce-reset" aria-label="${escapeHtml(label)}をテーマの値に戻す" title="テーマの値に戻す">${ICON_RESET}</button>`;
+  const groups = FIELD_GROUPS.map((g) => {
+    const rows = g.fields.map((f) => g.kind === "color" ? `
+      <div class="ce-row" data-name="${f.name}" data-kind="color" data-view="${g.view}">
         <label for="ce-${f.name}" title="${f.name}">${escapeHtml(f.label)}</label>
         <button type="button" class="ce-swatch" aria-label="${escapeHtml(f.label)}の色を選ぶ"><span></span></button>
         <input type="text" id="ce-${f.name}" spellcheck="false" autocomplete="off">
-        <button type="button" class="ce-reset" aria-label="${escapeHtml(f.label)}をテーマの値に戻す" title="テーマの値に戻す">${ICON_RESET}</button>
-      </div>`).join("");
-  const fontRows = FONT_FIELDS.map((f) => `
-      <div class="ce-row font" data-name="${f.name}" data-kind="font">
+        ${resetBtn(f.label)}
+      </div>` : `
+      <div class="ce-row font" data-name="${f.name}" data-kind="font" data-view="${g.view}">
         <label for="ce-${f.name}" title="${f.name}">${escapeHtml(f.label)}</label>
         <input type="text" id="ce-${f.name}" spellcheck="false" autocomplete="off">
-        <button type="button" class="ce-reset" aria-label="${escapeHtml(f.label)}をテーマの値に戻す" title="テーマの値に戻す">${ICON_RESET}</button>
+        ${resetBtn(f.label)}
       </div>`).join("");
+    const suffix = g.kind === "font" ? "(ライト・ダーク共通)" : `(${scopeLabel})`;
+    return `<div class="ce-group-title">${escapeHtml(g.title)}${suffix}</div>${rows}`;
+  }).join("");
   formEl.innerHTML = `
-    <div class="ce-group-title">配色(${scopeLabel})</div>
-    ${colorRows}
-    <div class="ce-group-title">書体(ライト・ダーク共通)</div>
-    ${fontRows}
+    ${groups}
     <div class="ce-help">
-      <span>空欄の項目は、今のテーマの値(薄い文字)のままです。ほかの指定は下のCSSに直接書けます。</span>
+      <span>空欄の項目は、今のテーマの値(薄い文字)のままです。項目を触ると、右の見本がその項目の見える画面に切り替わります。ほかの指定は下のCSSに直接書けます。</span>
       <button type="button" class="btn tiny" id="ce-open-folder">sample.css のあるフォルダを開く</button>
     </div>`;
   for (const row of formEl.querySelectorAll(".ce-row")) wireRow(row);
@@ -155,6 +238,8 @@ function wireRow(row) {
   const name = row.dataset.name;
   const input = row.querySelector("input");
   let inputTimer = 0;
+  // 項目を触ったら、見本をその項目が見える画面へ切り替える。
+  if (row.dataset.view) row.addEventListener("focusin", () => setView(row.dataset.view));
   input.addEventListener("input", () => {
     clearTimeout(inputTimer);
     inputTimer = setTimeout(() => writeVar(rowScope(row), name, input.value), 250);
@@ -232,6 +317,16 @@ function sendCssToPreview() {
   postToPreview({ type: "css", css: currentCss() });
 }
 
+let previewView = "markdown"; // 見本に出している画面(markdown / code / chrome)
+function setView(next) {
+  if (!next || next === previewView) return;
+  previewView = next;
+  for (const btn of document.querySelectorAll("#ce-views button")) {
+    btn.setAttribute("aria-pressed", String(btn.dataset.view === previewView));
+  }
+  postToPreview({ type: "view", view: previewView });
+}
+
 function sendThemeToPreview() {
   postToPreview({ type: "theme", theme: scope, lightTheme: themeInfo.lightTheme, darkTheme: themeInfo.darkTheme });
 }
@@ -241,6 +336,7 @@ window.addEventListener("message", (e) => {
   const msg = e.data;
   if (msg?.type === "preview-ready") {
     previewReady = true;
+    postToPreview({ type: "view", view: previewView });
     sendThemeToPreview();
     sendCssToPreview();
   } else if (msg?.type === "preview-applied") {
@@ -391,8 +487,11 @@ async function requestClose() {
 
 saveBtn.addEventListener("click", save);
 closeBtn.addEventListener("click", requestClose);
-for (const btn of document.querySelectorAll(".ce-seg button")) {
+for (const btn of document.querySelectorAll("#ce-scopes button")) {
   btn.addEventListener("click", () => setScope(btn.dataset.scope));
+}
+for (const btn of document.querySelectorAll("#ce-views button")) {
+  btn.addEventListener("click", () => setView(btn.dataset.view));
 }
 document.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "s") {
@@ -409,7 +508,7 @@ document.addEventListener("keydown", (e) => {
 
 function setScope(next) {
   scope = next === "dark" ? "dark" : "light";
-  for (const btn of document.querySelectorAll(".ce-seg button")) {
+  for (const btn of document.querySelectorAll("#ce-scopes button")) {
     btn.setAttribute("aria-pressed", String(btn.dataset.scope === scope));
   }
   renderForm();
