@@ -626,9 +626,9 @@ function applyFontSetting(rootStyle, cssVar, rawName, label) {
 }
 
 // 本文の左右余白(仕様書 editorPaddingLeft/editorPaddingRight)用。数値として解釈できない
-// (未設定・欠落)場合だけCSS変数を消して既定値(32px)に戻し、"0"は有効な値として
+// (未設定・欠落)場合だけCSS変数を消して既定値(12px)に戻し、"0"は有効な値として
 // そのまま反映する(不具合修正: 従来は数値が0以下かどうかで「未設定」を判定しており、
-// 明示的に0を指定してもnullと区別できず既定の32pxのままになっていた)。
+// 明示的に0を指定してもnullと区別できず、当時の既定の32pxのままになっていた)。
 function applyEditorPaddingSetting(rootStyle, cssVar, rawValue) {
   const value = Number(rawValue);
   if (!Number.isFinite(value)) {
@@ -2884,11 +2884,11 @@ async function handleHostMessage(msg) {
       const lineHeight = Number(msg.editorLineHeight);
       if (Number.isFinite(lineHeight) && lineHeight > 0) rootStyle.setProperty("--editor-line-height", String(lineHeight));
       else rootStyle.removeProperty("--editor-line-height");
-      // 本文の左右余白(仕様書 editorPaddingLeft/editorPaddingRight、既定どちらも32)。
-      // style.css側が var(--editor-padding-left, 32px) / var(--editor-padding-right, 32px) を
-      // 参照する想定。未指定(値自体が届いていない・数値でない)なら変数を消してCSS既定(32px)に
+      // 本文の左右余白(仕様書 editorPaddingLeft/editorPaddingRight、既定どちらも12)。
+      // style.css側が var(--editor-padding-left, 12px) / var(--editor-padding-right, 12px) を
+      // 参照する想定。未指定(値自体が届いていない・数値でない)なら変数を消してCSS既定(12px)に
       // 戻すが、"0"は有効な値として扱う(不具合修正: 従来はeditorPaddingXが0のときも
-      // "0以下や未指定"とまとめて判定していたため、余白を0にする設定が効かず既定の32pxのまま
+      // "0以下や未指定"とまとめて判定していたため、余白を0にする設定が効かず当時の既定の32pxのまま
       // だった。設定画面では最小値0を選べるため、この2つは区別する必要がある。「未設定」は
       // 「値自体が届いていない/数値として解釈できない」ことで判定し、0という値そのものは
       // 未設定と見なさない)。

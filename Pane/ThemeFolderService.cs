@@ -236,8 +236,8 @@ internal static class ThemeFolderService
              指定している間は、その値がJS側から直接書き込まれるため、ここで指定
              してもそちらが優先されます。設定側を既定のまま(未指定)にしている
              ときだけ、ここに書いた値が有効になります。 */
-          --editor-padding-left: 32px;   /* 本文エリアの左余白(Markdownモード) */
-          --editor-padding-right: 32px;  /* 本文エリアの右余白(Markdownモード) */
+          --editor-padding-left: 12px;   /* 本文エリアの左余白(Markdownモード) */
+          --editor-padding-right: 12px;  /* 本文エリアの右余白(Markdownモード) */
           --editor-line-height: 1.95;    /* 本文の行の高さ */
           --editor-max-width: none;      /* 本文エリアの最大幅(Markdownモードのみ有効。既定は無制限) */
           --editor-font-body: var(--font-body); /* 編集領域(地の文)だけ別フォントにしたいとき。既定は --font-body と同じ */

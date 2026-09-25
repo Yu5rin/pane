@@ -25,6 +25,7 @@
     <Compile Include="../Pane/UpdateCheckLogic.cs" Link="取り込み/UpdateCheckLogic.cs" />
     <Compile Include="../Pane/LogReviewLogic.cs" Link="取り込み/LogReviewLogic.cs" />
     <Compile Include="../Pane/LargeFileGuard.cs" Link="取り込み/LargeFileGuard.cs" />
+    <Compile Include="../Pane/EditorPaddingDefaults.cs" Link="取り込み/EditorPaddingDefaults.cs" />
     <Compile Include="../Pane/UpdateLeftoverPolicy.cs" Link="取り込み/UpdateLeftoverPolicy.cs" />
     <Compile Include="../Pane/UpdateProcessWaitPolicy.cs" Link="取り込み/UpdateProcessWaitPolicy.cs" />
     <Compile Include="../Pane/TimedCache.cs" Link="取り込み/TimedCache.cs" />

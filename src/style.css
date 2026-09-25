@@ -1591,7 +1591,7 @@ html[data-theme="dark"] .cm-search-ruler-mark.is-active {
 /* ===== 本文の余白・最大幅・行の高さ(仕様書 C-08・第10.3節) =====
    本文が左端にぴったり付いて読みにくかったため、左右に余白を入れる。
    --editor-padding-left / --editor-padding-right(設定 editorPaddingLeft/editorPaddingRight、
-   既定どちらも32px)がその余白の幅。左右を個別に指定できるようにした(ユーザー要望。
+   既定どちらも12px。2026-09-25に32pxから変更)がその余白の幅。左右を個別に指定できるようにした(ユーザー要望。
    旧・editorPaddingXは左右共通の1値しか持てなかった。移行はPane/AppSettings.cs
    GetEffectiveEditorPaddingLeft/Right参照)。
    --editor-line-height(設定 editorLineHeight)は行の高さ。未設定なら既定のまま。
@@ -1600,8 +1600,8 @@ html[data-theme="dark"] .cm-search-ruler-mark.is-active {
    下のMarkdownモード限定ルールでだけ有効にする(コードモード・プレーンテキストモードで
    幅を制限すると、横に長いコード行やログが折り返されて読みにくくなるため対象外にする)。 */
 #cm-host .cm-content {
-  padding-left: var(--editor-padding-left, 32px) !important;
-  padding-right: var(--editor-padding-right, 32px) !important;
+  padding-left: var(--editor-padding-left, 12px) !important;
+  padding-right: var(--editor-padding-right, 12px) !important;
   box-sizing: border-box;
   max-width: none;
   margin-left: auto;

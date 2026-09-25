@@ -769,16 +769,17 @@ internal sealed class AppSettings
     /// <see cref="GetEffectiveEditorPaddingLeft"/>/<see cref="GetEffectiveEditorPaddingRight"/>経由で
     /// 行うこと。
     /// </summary>
-    private int _editorPaddingX = 32;
+    private int _editorPaddingX = EditorPaddingDefaults.LegacyPaddingXDefaultPx;
     public int EditorPaddingX
     {
         get => _editorPaddingX;
         set => _editorPaddingX = Math.Clamp(value, 0, 200);
     }
 
-    private int _editorPaddingLeft = 32;
+    private int _editorPaddingLeft = EditorPaddingDefaults.DefaultPx;
 
-    /// <summary>本文の左余白(px)。0〜200の範囲でクランプする。既定32。
+    /// <summary>本文の左余白(px)。0〜200の範囲でクランプする。既定12
+    /// (2026-09-25に32から変更。<see cref="EditorPaddingDefaults"/>参照)。
     /// CSS変数 --editor-padding-left として src/style.css の #cm-host .cm-content へ反映される
     /// (実際にCSS変数へ設定する処理はJS側main.jsが担当。ここでは値の保持と検証のみ)。
     /// 旧バージョンからの移行は<see cref="GetEffectiveEditorPaddingLeft"/>を参照。</summary>
@@ -788,9 +789,10 @@ internal sealed class AppSettings
         set => _editorPaddingLeft = Math.Clamp(value, 0, 200);
     }
 
-    private int _editorPaddingRight = 32;
+    private int _editorPaddingRight = EditorPaddingDefaults.DefaultPx;
 
-    /// <summary>本文の右余白(px)。0〜200の範囲でクランプする。既定32。
+    /// <summary>本文の右余白(px)。0〜200の範囲でクランプする。既定12
+    /// (2026-09-25に32から変更。<see cref="EditorPaddingDefaults"/>参照)。
     /// CSS変数 --editor-padding-right として src/style.css の #cm-host .cm-content へ反映される。
     /// 旧バージョンからの移行は<see cref="GetEffectiveEditorPaddingRight"/>を参照。</summary>
     public int EditorPaddingRight
@@ -826,18 +828,22 @@ internal sealed class AppSettings
     ///   B: Aの後、ユーザーがLeft/Rightを明示的に32/32へ保存(この時点でX=32のまま) →
     ///      移行を挟んでも32/32のまま(50には戻らない)
     ///   C: 新規ユーザー(X=32, Left=32, Right=32) → 32/32のまま
+    /// (上のA〜Cは既定値が32だった当時のもの。2026-09-25に左右の既定値を12へ変えたため、
+    /// 「左右が既定値のまま」の判定は<see cref="EditorPaddingDefaults.DecideMigratedPadding"/>へ
+    /// 切り出し、12/12と32/32の両方を既定値のままとして扱うようにした。Pane.Testsで固定している)
     /// </summary>
     public void MigrateEditorPadding()
     {
-        if (EditorPaddingX != 32 && EditorPaddingLeft == 32 && EditorPaddingRight == 32)
+        int? migrated = EditorPaddingDefaults.DecideMigratedPadding(EditorPaddingX, EditorPaddingLeft, EditorPaddingRight);
+        if (migrated is int value)
         {
-            EditorPaddingLeft = EditorPaddingX;
-            EditorPaddingRight = EditorPaddingX;
+            EditorPaddingLeft = value;
+            EditorPaddingRight = value;
         }
         // 上の条件が成立してもしなくても、ここに到達した時点で移行は完了したものとして扱う。
         // 以後「EditorPaddingX != 32」が常にfalseになるため、この判定が二度と成立しなくなる
         // (=ユーザーが後から明示的に32/32を選んでも、旧いXの値で上書きされることはない)。
-        EditorPaddingX = 32;
+        EditorPaddingX = EditorPaddingDefaults.LegacyPaddingXDefaultPx;
     }
 
     /// <summary>文字数カウントの常時表示(仕様書 C-09)。既定ON。</summary>
