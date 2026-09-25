@@ -32,10 +32,31 @@ const fieldVars = [...entry.matchAll(/\{ name: "(--[a-z0-9-]+)", label:/g)].map(
 const vars = [...new Set([...sampleVars, ...fieldVars])];
 
 // 見本では確かめられないと分かっていて、理由を画面・sample.css に書いてあるもの。
+// 値は「その変数を使ってよいセレクタに必ず含まれる文字列」。
+//
+// これらは撮り比べでは確かめない。撮り比べで確かめられるのは「変わる」ことだけで、
+// 「変わらない」ことは確かめられない。変数と関係なく画面が描き直されると「変わった」と
+// 数えてしまうからである。実際、CI(2026-09-25)で --font-heading が「画面全体で変化あり」
+// 「コードで変化あり」と2回続けて誤って判定された(手元では16回回して一度も出なかった)。
+// 「変わる」ことの確認はこの揺れで間違えない(揺れは変化を増やす方向にしか働かない)が、
+// 「変わらない」ことの確認は必ず揺れに負ける。そこで、見本の外でしか使われないことは
+// CSS の中身で確かめる(下の checkUsedOnlyIn)。
 const KNOWN_ELSEWHERE = {
   // 取扱説明書の見出しにだけ使われる(本文の見出しは --font-body)。sample.css にそう書いてある。
-  "--font-heading": "取扱説明書の見出しだけ",
+  "--font-heading": { where: "取扱説明書の見出しだけ", selectorMustInclude: ".help-article" },
 };
+
+// 変数 name を参照している指定(style.css・themes.css・見本のページ)のセレクタを集める。
+function selectorsUsing(name) {
+  const out = [];
+  for (const file of ["src/style.css", "src/themes.css", "src/css-preview.html"]) {
+    const text = fs.readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    for (const m of text.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      if (m[2].includes(`var(${name}`)) out.push(`${file}: ${m[1].trim()}`);
+    }
+  }
+  return out;
+}
 // マウスを乗せたときだけ使われる変数と、乗せる場所。
 const HOVER = {
   "--fold-guide-hover": { view: "code", selector: ".cm-fold-marker2" },
@@ -112,6 +133,7 @@ for (const view of VIEWS) {
   await page.waitForFunction((v) => document.body.classList.contains(`view-${v}`), view);
   await page.waitForTimeout(800);
   for (const name of vars) {
+    if (KNOWN_ELSEWHERE[name]) continue; // 撮り比べでは確かめない(上の説明)
     if (seen.has(name) && !REQUIRED_IN_VIEW[view]?.includes(name)) continue;
     const hover = HOVER[name];
     if (hover && hover.view === view) await page.hover(hover.selector);
@@ -129,7 +151,9 @@ ok(`sample.css の変数を読み取れた(${sampleVars.length}個)`, sampleVars
 ok(`入力欄の変数を読み取れた(${fieldVars.length}個)`, fieldVars.length > 30, fieldVars.length);
 for (const name of vars) {
   if (KNOWN_ELSEWHERE[name]) {
-    ok(`${name} は見本の外(${KNOWN_ELSEWHERE[name]})で使われるもの`, !seen.has(name), [...(seen.get(name) ?? [])]);
+    const known = KNOWN_ELSEWHERE[name];
+    const users = selectorsUsing(name);
+    ok(`${name} は見本の外(${known.where})でしか使われない`, users.length > 0 && users.every((u) => u.includes(known.selectorMustInclude)), users);
     continue;
   }
   ok(`${name} を見本で確かめられる(${[...(seen.get(name) ?? [])].join("・") || "どの画面でも変化なし"})`, seen.has(name));
