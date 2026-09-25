@@ -221,6 +221,7 @@ export function openColorPickerPanel(opts) {
   const previewSwatch = $(".cp-preview-swatch");
   const primaryEl = $(".cp-primary");
   const secondaryEl = $(".cp-secondary");
+  const previewTextEl = $(".cp-preview-text");
   const slBox = $(".cp-sl-box");
   const slHandle = $(".cp-sl-handle");
   const hueSlider = $(".cp-hue-slider");
@@ -291,11 +292,11 @@ export function openColorPickerPanel(opts) {
       });
     }
   }
-  function showCopyToast(anchorEl) {
+  function showCopyToast(anchorEl, extraClass = "") {
     const existing = anchorEl.querySelector(".cp-copy-toast");
     if (existing) existing.remove();
     const toast = document.createElement("span");
-    toast.className = "cp-copy-toast";
+    toast.className = extraClass ? `cp-copy-toast ${extraClass}` : "cp-copy-toast";
     toast.textContent = "コピーしました";
     anchorEl.appendChild(toast);
     setTimeout(() => toast.remove(), 1200);
@@ -313,7 +314,16 @@ export function openColorPickerPanel(opts) {
     if (notationKind !== "hex") others.push(toHexDisplay(rgba, { withAlpha: rgba.a < 1 }));
     if (notationKind !== "rgb") others.push(toRgbDisplay(rgba));
     if (notationKind !== "hsl") others.push(toHslDisplay(rgba));
-    secondaryEl.textContent = others.join(" ・ ");
+    // 表記ごとに span へ分ける(右クリックで、押した表記だけをコピーするため)。
+    // 区切りは文字のまま挟むので、secondaryEl.textContent は分ける前と同じになる。
+    secondaryEl.replaceChildren();
+    others.forEach((text, i) => {
+      if (i > 0) secondaryEl.append(" ・ ");
+      const span = document.createElement("span");
+      span.className = "cp-alt";
+      span.textContent = text;
+      secondaryEl.append(span);
+    });
 
     slBox.style.setProperty("--cp-hue", String(hsl.h));
     slHandle.style.left = `${hsl.s}%`;
@@ -509,6 +519,17 @@ export function openColorPickerPanel(opts) {
     // 反映する目的で持つ)。
     root.dataset.cpUserPositioned = "true";
   }
+  // 色の表示(主表記・補助表記)は、パレットの見本と同じく右クリックでコピーする。
+  // この行はドラッグで動かすための取っ手で、pointerdown の preventDefault により文字を選択できない。
+  // そのため色の値を写す手段が無かった(2026-09-25 実機で指摘)。
+  // 補助表記は押した表記だけ、それ以外(主表記・見本の色)は主表記を写す。
+  // 知らせはパネルの外へはみ出すと切れる(overflow-y: auto)ため、文字の下に出す。
+  previewEl.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    const alt = e.target instanceof Element ? e.target.closest(".cp-alt") : null;
+    copyText((alt ?? primaryEl).textContent);
+    showCopyToast(previewTextEl, "cp-copy-toast-below");
+  });
   previewEl.style.touchAction = "none";
   previewEl.addEventListener("pointerdown", (e) => {
     if (e.button !== 0) return; // 右クリック等では開始しない(既存コードの流儀に合わせる)

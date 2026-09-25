@@ -265,12 +265,43 @@ internal sealed class CssEditorWindow : Form
                 _closeConfirmed = true;
                 Close();
                 break;
+            case "open-context-menu":
+                // 入力欄とCSSの編集欄の右クリックメニュー(切り取り・コピー・貼り付け等)。
+                // ブラウザ既定のメニューは画面側で止めているため、代わりにこれを出す。
+                HandleOpenContextMenuRequest(root);
+                break;
             case "log":
                 string level = root.TryGetProperty("level", out JsonElement levelProp) ? levelProp.GetString() ?? "log" : "log";
                 string logMessage = root.TryGetProperty("message", out JsonElement msgProp) ? msgProp.GetString() ?? "" : "";
                 Logger.WriteFromWeb("カスタムCSSの作成補助 JS", level, logMessage);
                 break;
         }
+    }
+
+    /// <summary>{ type: "open-context-menu", x, y, items } を受け取り、クリック位置にネイティブの
+    /// メニューを出す。座標変換・NativeMenuの使い方は<see cref="SettingsWindow"/>の同名メソッドと同じ。</summary>
+    private void HandleOpenContextMenuRequest(JsonElement root)
+    {
+        double cssX = root.TryGetProperty("x", out JsonElement xProp) && xProp.ValueKind == JsonValueKind.Number ? xProp.GetDouble() : 0;
+        double cssY = root.TryGetProperty("y", out JsonElement yProp) && yProp.ValueKind == JsonValueKind.Number ? yProp.GetDouble() : 0;
+        List<NativeMenu.MenuItemData> items = root.TryGetProperty("items", out JsonElement itemsProp) && itemsProp.ValueKind == JsonValueKind.Array
+            ? SettingsWindow.ParseMenuItems(itemsProp)
+            : new List<NativeMenu.MenuItemData>();
+
+        double dpiScale = DeviceDpi / 96.0;
+        var clientPoint = new Point((int)Math.Round(cssX * dpiScale), (int)Math.Round(cssY * dpiScale));
+        Point screenPoint = _webView.PointToScreen(clientPoint);
+
+        AppSettings settings = SettingsService.Load();
+        bool isDark = MainForm.ResolveIsDarkTheme(settings.Theme);
+        string themeId = MainForm.ResolveThemeId(settings, isDark);
+        NativeMenu.Show(
+            screenPoint,
+            isDark,
+            themeId,
+            items,
+            onCommand: id => PostToWeb(new { type = "menu-command", id }),
+            onClosed: () => PostToWeb(new { type = "menu-closed", menu = "__context__" }));
     }
 
     private void PostToWeb(object message)
