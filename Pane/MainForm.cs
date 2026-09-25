@@ -856,11 +856,12 @@ internal sealed class MainForm : Form
         // プロセスで1回だけ。尋ねるのはウィンドウが見えてから。
         //
         // 【下の割り当てより先に呼ぶ理由】distフォルダがまるごと無いとき、WebView2の
-        // SetVirtualHostNameToFolderMappingが例外を投げるのか、読み込み時に失敗するだけなのかは、
-        // 公式の説明に書かれていない。例外を投げた場合、この起動処理はそこで止まる
-        // (UIスレッドの例外はProgram.csで記録して続行する設定なので、アプリは落ちないが
-        // 後ろの行は実行されない)。確認を後ろに置くと、まさに直すべき「distが丸ごと無い」
-        // ときに確認が出ない。先に始めておけば、どちらの動きでも確認は出る。
+        // SetVirtualHostNameToFolderMappingは例外を投げる。公式の説明には書かれていないが、
+        // 実機で確かめたところ DirectoryNotFoundException(0x80070003)だった(2026-09-25)。
+        // この起動処理はそこで止まる(UIスレッドの例外はProgram.csで記録して続行する設定なので、
+        // アプリは落ちないが後ろの行は実行されない)。v1.2.2では確認をこの割り当ての後ろに
+        // 置いていたため、まさに直すべき「distが丸ごと無い」ときに確認が出ず、空の画面のまま
+        // だった。先に始めておけば、割り当てが失敗しても確認は出る。
         DistRepairFlow.CheckOnce(this, distPath, _hasUnsavedDocuments ?? (() => IsDirty), _shutdownForUpdate ?? (() => { }));
 
         try
