@@ -23,7 +23,7 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirro
 import { syntaxHighlighting, bracketMatching, indentOnInput } from "@codemirror/language";
 import { css as cssLanguage } from "@codemirror/lang-css";
 import { codeHighlightStyle } from "./code-highlight-style.js";
-import { readVars, setVar, removeVar, minimalChange } from "./css-vars.js";
+import { readVars, setVar, removeVar, minimalChange, hasLegacyVars } from "./css-vars.js";
 import { parseColorLiteral } from "./color-picker.js";
 import { paneConfirm } from "./dialog.js";
 
@@ -140,12 +140,17 @@ const FIELD_GROUPS = [
 // 設定のカスタムCSSが未指定のときの雛形。ブロックだけを用意し、中身は入力欄で足していく。
 const TEMPLATE = `/* Pane カスタムCSS
    「カスタムCSSを作る」で作成しました。左の入力欄で変えた値が、下のブロックに書き込まれます。
+   ライト用・ダーク用のブロックは、設定でテーマ(セピア・Nord など)を選んでいても効くよう、
+   テーマと同じ強さの書き方にしてあります。書体はライト・ダーク共通の :root に書きます。
    書き方の詳しい説明と、使える変数の一覧は、カスタムCSSフォルダの sample.css にあります。 */
 
 :root {
 }
 
-html[data-theme="dark"] {
+html[data-theme="light"][data-light-theme] {
+}
+
+html[data-theme="dark"][data-dark-theme] {
 }
 `;
 
@@ -231,7 +236,7 @@ function renderForm() {
 }
 
 function rowScope(row) {
-  return row.dataset.kind === "font" ? "light" : scope;
+  return row.dataset.kind === "font" ? "common" : scope;
 }
 
 function wireRow(row) {
@@ -303,6 +308,7 @@ function writeVar(targetScope, name, value) {
 // ---- 見本への反映 ----
 let previewTimer = 0;
 function onCssChanged() {
+  transientNotice = false; // 保存のあとで書き換え始めたら、保存の知らせは役目を終えている
   clearTimeout(previewTimer);
   previewTimer = setTimeout(sendCssToPreview, 120);
   updateDirty();
@@ -371,7 +377,7 @@ function resolvedColor(name) {
 
 function refreshForm() {
   const css = currentCss();
-  const own = { light: readVars(css, "light"), dark: readVars(css, "dark") };
+  const own = { light: readVars(css, "light"), dark: readVars(css, "dark"), common: readVars(css, "common") };
   const style = previewRootStyle();
   for (const row of formEl.querySelectorAll(".ce-row")) {
     const name = row.dataset.name;
@@ -385,6 +391,8 @@ function refreshForm() {
     const swatchColor = row.querySelector(".ce-swatch span");
     if (swatchColor) swatchColor.style.background = resolvedColor(name);
   }
+  // CSSが変わると、以前の書き方の値が残っているかも変わる。
+  if (!transientNotice) showNotice(presetNote(), false);
 }
 
 // ---- カラーピッカー ----
@@ -422,17 +430,25 @@ function updateDirty(force = false) {
   bridge?.postMessage({ type: "css-editor-dirty", value: dirty });
 }
 
-function showNotice(text, isError) {
+// 保存の結果など、その場限りの知らせを出している間は、案内(presetNote)で上書きしない。
+let transientNotice = false;
+function showNotice(text, isError, transient = false) {
+  transientNotice = transient;
   const full = [text, sourceNote].filter(Boolean).join(" ");
   noticeEl.textContent = full;
   noticeEl.hidden = !full;
   noticeEl.classList.toggle("error", !!isError);
 }
 
+// 入力欄は、テーマ(sepia・night など)を選んでいても効く書き方で書き込む(css-vars.js の
+// LIGHT_SELECTOR / DARK_SELECTOR)。ただし以前の書き方(:root / html[data-theme="dark"])で
+// 書かれた値はテーマに負けるため、テーマを選んでいてその書き方の値があるときだけ知らせる。
 function presetNote() {
   const preset = scope === "dark" ? themeInfo.darkTheme : themeInfo.lightTheme;
   if (!preset || preset === "default") return "";
-  return `設定で「${preset}」のテーマを選んでいるため、ここで変えた色がそのテーマの色に負けて効かないことがあります。確実に効かせるには、設定 > 外観 のテーマを「既定」にしてください。`;
+  if (!hasLegacyVars(currentCss(), scope)) return "";
+  const block = scope === "dark" ? 'html[data-theme="dark"]' : ":root";
+  return `設定で「${preset}」のテーマを選んでいるため、CSSの ${block} のブロックに書いた色はテーマの色に負けて効きません。入力欄で入れ直すと、テーマを選んでいても効く書き方で書き込みます。`;
 }
 
 function fileName(path) {
@@ -460,7 +476,7 @@ function handleSaved(msg) {
   saving = false;
   saveBtn.disabled = false;
   if (!msg.ok) {
-    showNotice(`保存できませんでした。${msg.message ?? ""}`, true);
+    showNotice(`保存できませんでした。${msg.message ?? ""}`, true, true);
     return;
   }
   baseline = currentCss();
@@ -468,7 +484,7 @@ function handleSaved(msg) {
   overwriteConfirmed = true;
   sourceNote = "";
   updateDirty(true);
-  showNotice(`保存しました。開いているウィンドウに反映しました(${fileName(msg.targetPath ?? targetPath)})。 ${presetNote()}`.trim(), false);
+  showNotice(`保存しました。開いているウィンドウに反映しました(${fileName(msg.targetPath ?? targetPath)})。 ${presetNote()}`.trim(), false, true);
 }
 
 async function requestClose() {

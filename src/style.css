@@ -1391,7 +1391,9 @@ html[data-theme="dark"] .cm-search-ruler-mark.is-active {
    既存の設定画面用クラス(.settings-*)の接頭辞をそのまま使い、フォームの外観は
    settings-select-row/settings-text-rowと揃える。 */
 /* UI点検第2弾 指摘12の修正: 角丸9px→6px(仕様書10.1節「コントロールは6px」。検索入力欄)。 */
-.settings-search-row { flex: none; display: flex; align-items: center; gap: 8px; margin: 10px 20px 0; padding: 7px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); color: var(--ink-sub); }
+/* 上下の余白をそろえる。以前は margin の下が0で、すぐ下のカテゴリ一覧・本文の枠に
+   貼り付き、欄全体が下に寄って見えた(2026-09-25、利用者の指摘)。 */
+.settings-search-row { flex: none; display: flex; align-items: center; gap: 8px; margin: 10px 20px; padding: 7px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); color: var(--ink-sub); }
 .settings-search-row svg { flex: none; }
 .settings-search-input { flex: 1; min-width: 0; border: none; background: transparent; color: var(--ink); font: inherit; font-size: 13px; outline: none; }
 .settings-search-input::placeholder { color: var(--ink-mute); }

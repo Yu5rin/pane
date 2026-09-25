@@ -77,7 +77,7 @@ await page.fill('.ce-row[data-name="--paper"] input', "#FFF8E7");
 await page.dispatchEvent('.ce-row[data-name="--paper"] input', "change");
 await page.waitForTimeout(400);
 let css = await cssText();
-ok("入力欄の値がライトのブロックに書き込まれる", /:root \{[^}]*--paper: #FFF8E7;/.test(css), css);
+ok("入力欄の値がライトのブロックに書き込まれる", /html\[data-theme="light"\]\[data-light-theme\] \{[^}]*--paper: #FFF8E7;/.test(css), css);
 ok("自分で書いたメモとセレクタはそのまま残る", css.includes("/* 自分で書いたメモ */") && css.includes(".cm-content blockquote { font-style: italic; }"), css);
 ok("見本にすぐ効く(--paper)", (await previewVar("--paper")).toUpperCase() === "#FFF8E7", await previewVar("--paper"));
 const selfPaper = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--paper").trim());
@@ -91,15 +91,15 @@ await page.fill('.ce-row[data-name="--ink"] input', "#EEEEEE");
 await page.dispatchEvent('.ce-row[data-name="--ink"] input', "change");
 await page.waitForTimeout(400);
 css = await cssText();
-ok("ダークでの値はダークのブロックに書き込まれる", /html\[data-theme="dark"\] \{\s*--ink: #EEEEEE;\s*\}/.test(css), css);
-ok("ライトのブロックには書き込まない", !/:root \{[^}]*--ink:/.test(css), css);
+ok("ダークでの値はダークのブロックに書き込まれる", /html\[data-theme="dark"\]\[data-dark-theme\] \{\s*--ink: #EEEEEE;\s*\}/.test(css), css);
+ok("ライトのブロックには書き込まない", !/(:root|data-light-theme\]) \{[^}]*--ink:/.test(css), css);
 
 // 書体はライト・ダーク共通(:root)
 await page.fill('.ce-row[data-name="--font-body"] input', '"Meiryo", sans-serif');
 await page.dispatchEvent('.ce-row[data-name="--font-body"] input', "change");
 await page.waitForTimeout(300);
 css = await cssText();
-ok("書体はダーク表示中でもライトのブロック(共通)に書く", /:root \{[^}]*--font-body: "Meiryo", sans-serif;/.test(css), css);
+ok("書体はダーク表示中でも共通のブロック(:root)に書く", /:root \{[^}]*--font-body: "Meiryo", sans-serif;/.test(css), css);
 
 // 戻すボタン
 await page.click('.ce-row[data-name="--ink"] .ce-reset');
@@ -190,15 +190,47 @@ await page2.waitForFunction(() => window.__sent.some((m) => m.type === "initial-
 await page2.evaluate(() => window.__reply({ type: "css-editor-init", css: "", source: "template", sourcePath: "", targetPath: "C:\\t\\custom.css", targetExists: false, theme: "dark", lightTheme: "default", darkTheme: "nord" }));
 await page2.waitForTimeout(500);
 const tpl = await page2.evaluate(() => document.querySelector("#ce-code .cm-content").innerText);
-ok("未指定なら雛形(:root とダークのブロック)で始める", tpl.includes(":root {") && tpl.includes('html[data-theme="dark"] {'), tpl);
+ok("未指定なら雛形(共通・ライト・ダークのブロック)で始める", tpl.includes(":root {") && tpl.includes('html[data-theme="light"][data-light-theme] {') && tpl.includes('html[data-theme="dark"][data-dark-theme] {'), tpl);
 ok("雛形のままなら「変更なし」", (await page2.evaluate(() => window.__sent.filter((m) => m.type === "css-editor-dirty").at(-1)?.value)) === false);
 ok("保存先を表示する", (await page2.$eval("#ce-target", (e) => e.textContent)).includes("custom.css"));
 ok("テーマに合わせてダークで始める", (await page2.$eval('.ce-seg button[data-scope="dark"]', (b) => b.getAttribute("aria-pressed"))) === "true");
 const presetNotice = await page2.$eval("#ce-notice", (n) => n.textContent);
-ok("プリセットのテーマを選んでいると、色が効かないことがあると知らせる", presetNotice.includes("nord"), presetNotice);
+ok("テーマを選んでいても、雛形(テーマに負けない書き方)なら注意は出さない", !presetNotice.includes("nord"), presetNotice);
 await page2.click("#ce-save");
 await page2.waitForTimeout(300);
 ok("新しいファイルへの保存では上書きの確認を出さない", !(await page2.$(".pane-dialog-overlay")) && (await page2.evaluate(() => window.__sent.some((m) => m.type === "css-editor-save"))));
+
+// ---- テーマ(night など)を選んでいても、入力欄で変えた色が効く ----
+// 実機の報告(2026-09-25): テーマに「night」を選んだ状態で「アクセント」を変えても、見本も
+// 色見本も変わらなかった。最初の版は html[data-theme="dark"] に書いていて、テーマの
+// html[data-theme="dark"][data-dark-theme="night"] より弱く、負けていた。
+for (const [theme, preset, presetKey] of [["dark", "night", "darkTheme"], ["dark", "nord", "darkTheme"], ["light", "sepia", "lightTheme"]]) {
+  const p3 = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+  p3.on("pageerror", (e) => errors.push(String(e.stack || e)));
+  await p3.addInitScript(installBridge);
+  await p3.goto(`http://localhost:${PORT}/css-editor-window.html`);
+  await p3.waitForFunction(() => window.__sent.some((m) => m.type === "initial-render-ready"));
+  const legacyBlock = theme === "dark" ? 'html[data-theme="dark"]' : ":root";
+  const legacyCss = `${legacyBlock} {\n  --accent: #0d059c;\n}\n`;
+  await p3.evaluate(([css, theme, presetKey, preset]) => window.__reply({
+    type: "css-editor-init", css, source: "file", sourcePath: "C:\\x\\my.css", targetPath: "C:\\x\\my.css", targetExists: true,
+    theme, lightTheme: "default", darkTheme: "default", [presetKey]: preset,
+  }), [legacyCss, theme, presetKey, preset]);
+  const f3 = await (await p3.waitForSelector("#ce-preview")).contentFrame();
+  await f3.waitForSelector("#cm-host .cm-content", { timeout: 15000 });
+  await p3.waitForTimeout(700);
+  const accent = () => f3.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--accent").trim().toLowerCase());
+  ok(`[${preset}] 以前の書き方(${legacyBlock})の色はテーマに負ける(再現の確認)`, (await accent()) !== "#0d059c", await accent());
+  const note = await p3.$eval("#ce-notice", (n) => n.textContent);
+  ok(`[${preset}] 以前の書き方の色が負けていることを知らせる`, note.includes(preset) && note.includes(legacyBlock), note);
+  await p3.fill('.ce-row[data-name="--accent"] input', "#0d059c");
+  await p3.dispatchEvent('.ce-row[data-name="--accent"] input', "change");
+  await p3.waitForTimeout(600);
+  ok(`[${preset}] 入力欄で入れ直すと、テーマを選んでいても見本に効く`, (await accent()) === "#0d059c", await accent());
+  const swatch = await p3.$eval('.ce-row[data-name="--accent"] .ce-swatch span', (e) => getComputedStyle(e).backgroundColor);
+  ok(`[${preset}] 色見本もその色になる`, swatch === "rgb(13, 5, 156)", swatch);
+  await p3.close();
+}
 
 ok(`ページのエラーが無い(${errors.length}件)`, errors.length === 0, errors.slice(0, 5));
 await browser.close();

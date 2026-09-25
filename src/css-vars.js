@@ -1,7 +1,7 @@
 // カスタムCSSの作成補助(仕様書 第2.10.1節 C-16)で、CSSの中のCSS変数を読み書きする。
 //
 // 作成補助の画面は「CSSがただ1つの原本」という作り(仕様書)。フォームで色を変えたときは、
-// CSSの本文のうち `:root { ... }`(ライト)または `html[data-theme="dark"] { ... }`(ダーク)の
+// CSSの本文のうち、ライト用・ダーク用・共通のブロック(下の *_SELECTOR)の
 // 中の宣言だけを書き換え、それ以外(利用者がセレクタを直接書いたもの・コメント)には触れない。
 // 画面側はここで作った新しいCSSとの差分だけをエディタへ流し込む(minimalChange)。
 //
@@ -9,10 +9,29 @@
 // 本格的なCSSパーサーは持たない。コメント・文字列・括弧の入れ子を読み飛ばしながら、
 // 最上位のルールの「セレクタ { 本文 }」の位置と、本文の中の宣言の位置を拾うだけで足りる。
 
-/** ライト用の変数を書くブロック。sample.css(Pane/ThemeFolderService.cs)と同じ書き方。 */
-export const LIGHT_SELECTOR = ":root";
-/** ダーク用の変数を書くブロック。ライトと同じ値でよい変数はここに書かなくてよい。 */
-export const DARK_SELECTOR = 'html[data-theme="dark"]';
+// 変数を書くブロック。scope は "light"(ライトのときだけ)・"dark"(ダークのときだけ)・
+// "common"(ライト・ダーク共通)の3つ。
+//
+// ライト用・ダーク用を :root / html[data-theme="dark"] ではなく、属性をもう1つ足した形にしている。
+// 設定でテーマ(sepia・nord・night など、src/themes.css)を選ぶと、テーマの色は
+// html[data-theme="dark"][data-dark-theme="night"] のような形で指定されており、
+// html[data-theme="dark"] より強い(詳細度が高い)。最初の版はこの形で書いていたため、
+// テーマを選んでいる利用者には入力欄で変えた色がまったく効かなかった(2026-09-25、
+// 実機で「アクセントの色を変えても見本も色見本も変わらない」と報告された)。
+// [data-dark-theme] を足すとテーマと同じ強さになり、カスタムCSSは最後に読み込まれるので勝つ。
+// data-light-theme / data-dark-theme はテーマが「既定」のときも必ず付いている(main.js)。
+// 書体はテーマ側が指定していないため、共通の :root に書く。
+export const COMMON_SELECTOR = ":root";
+export const LIGHT_SELECTOR = 'html[data-theme="light"][data-light-theme]';
+export const DARK_SELECTOR = 'html[data-theme="dark"][data-dark-theme]';
+
+// 以前の書き方(sample.css もこの形)。読むときだけ見る。ここに書かれた値はテーマに負けるが、
+// 入力欄には出す(消すときはここからも消す)。
+const LEGACY_SELECTORS = {
+  light: [":root"],
+  dark: ['html[data-theme="dark"]'],
+  common: [],
+};
 
 // セレクタの比較用に正規化する(空白を除き、引用符を " に揃える)。
 function normalizeSelector(sel) {
@@ -20,7 +39,9 @@ function normalizeSelector(sel) {
 }
 
 function selectorFor(scope) {
-  return scope === "dark" ? DARK_SELECTOR : LIGHT_SELECTOR;
+  if (scope === "dark") return DARK_SELECTOR;
+  if (scope === "common") return COMMON_SELECTOR;
+  return LIGHT_SELECTOR;
 }
 
 // css[i] から始まるコメント・文字列を読み飛ばした位置を返す。どちらでもなければ i のまま。
@@ -139,9 +160,23 @@ export function findDeclarations(css, bodyStart, bodyEnd) {
   return decls;
 }
 
+function rulesMatching(css, selectors) {
+  const want = new Set(selectors.map(normalizeSelector));
+  return findTopLevelRules(css).filter((r) => want.has(normalizeSelector(r.selector)));
+}
+
 function findScopeRules(css, scope) {
-  const want = normalizeSelector(selectorFor(scope));
-  return findTopLevelRules(css).filter((r) => normalizeSelector(r.selector) === want);
+  return rulesMatching(css, [selectorFor(scope)]);
+}
+
+function findLegacyRules(css, scope) {
+  return rulesMatching(css, LEGACY_SELECTORS[scope] ?? []);
+}
+
+/** scope の以前の書き方のブロック(テーマに負ける)に、変数が1つでも書かれているか。 */
+export function hasLegacyVars(css, scope) {
+  return findLegacyRules(css, scope).some((rule) =>
+    findDeclarations(css, rule.bodyStart, rule.bodyEnd).some((d) => d.name.startsWith("--")));
 }
 
 /**
@@ -150,7 +185,8 @@ function findScopeRules(css, scope) {
  */
 export function readVars(css, scope) {
   const out = new Map();
-  for (const rule of findScopeRules(css, scope)) {
+  // 以前の書き方を先に読み、今の書き方で上書きする(実際の効き方も、強い今の書き方が勝つ)。
+  for (const rule of [...findLegacyRules(css, scope), ...findScopeRules(css, scope)]) {
     for (const d of findDeclarations(css, rule.bodyStart, rule.bodyEnd)) {
       if (d.name.startsWith("--")) out.set(d.name, d.value);
     }
@@ -190,11 +226,13 @@ export function setVar(css, scope, name, value) {
   return `${css}${sep}${selectorFor(scope)} {\n  ${name}: ${v};\n}\n`;
 }
 
-/** scope のブロックから変数 name の宣言をすべて取り除いた新しいCSSを返す(行ごと消す)。 */
+/** scope のブロック(以前の書き方のブロックを含む)から変数 name の宣言をすべて取り除いた
+ *  新しいCSSを返す(行ごと消す)。以前の書き方の方を残すと、「戻す」を押しても入力欄に
+ *  値が残って見えるため、一緒に消す。 */
 export function removeVar(css, scope, name) {
   let out = css;
   // 後ろから消すと、前の位置がずれない。
-  const rules = findScopeRules(out, scope).reverse();
+  const rules = [...findScopeRules(out, scope), ...findLegacyRules(out, scope)].sort((a, b) => b.start - a.start);
   for (const rule of rules) {
     const decls = findDeclarations(out, rule.bodyStart, rule.bodyEnd).filter((d) => d.name === name).reverse();
     for (const d of decls) {
