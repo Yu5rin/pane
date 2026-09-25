@@ -92,6 +92,9 @@ internal sealed class MainForm : Form
     /// <summary>取扱説明書ウィンドウ(F1)を開く要求。<see cref="_requestOpenSettingsWindow"/>と
     /// 全く同じ流儀(<see cref="PaneApplicationContext.OpenHelpWindow"/>参照)。</summary>
     private readonly Action<MainForm>? _requestOpenHelpWindow;
+    /// <summary>カスタムCSSの作成補助を開く要求(仕様書 第2.10.1節 C-16)。
+    /// 実体は<see cref="PaneApplicationContext.OpenCssEditorWindow"/>。</summary>
+    private readonly Action<MainForm>? _requestOpenCssEditorWindow;
     private readonly System.Windows.Forms.Timer _autoSaveTimer;
     private readonly System.Windows.Forms.Timer _externalChangeDebounceTimer;
     /// <summary>起動時の白フラッシュ対策(新方式)のフォールバックタイマー。<see cref="RevealWebView"/>参照。</summary>
@@ -301,6 +304,7 @@ internal sealed class MainForm : Form
         Action? requestBroadcastSettings = null,
         Action<MainForm, string?>? requestOpenSettingsWindow = null,
         Action<MainForm>? requestOpenHelpWindow = null,
+        Action<MainForm>? requestOpenCssEditorWindow = null,
         DroppedFileContent? droppedFile = null,
         string? initialFolderPath = null,
         Func<bool>? hasUnsavedDocuments = null,
@@ -322,6 +326,7 @@ internal sealed class MainForm : Form
         _requestBroadcastSettings = requestBroadcastSettings;
         _requestOpenSettingsWindow = requestOpenSettingsWindow;
         _requestOpenHelpWindow = requestOpenHelpWindow;
+        _requestOpenCssEditorWindow = requestOpenCssEditorWindow;
         _hasUnsavedDocuments = hasUnsavedDocuments;
         _shutdownForUpdate = shutdownForUpdate;
         Logger.Write($"MainForm生成: initialPath={initialPath ?? "(なし)"}, recoverFrom={(recoverFrom is null ? "なし" : recoverFrom.OriginalPath ?? "無題")}, droppedFile={droppedFile?.Name ?? "なし"}");
@@ -1741,6 +1746,11 @@ internal sealed class MainForm : Form
                 // 設定画面「外観」「バージョン情報」カテゴリ: カスタムCSSのサンプルが
                 // 置いてあるフォルダ(ThemeFolderService.FolderPath)をエクスプローラーで開く。
                 SettingsBridge.OpenThemeFolderInExplorer();
+                break;
+            case "open-css-editor":
+                // 設定画面「外観」の「CSSを作る…」(仕様書 第2.10.1節 C-16)。設定画面を
+                // 本体ウィンドウの中に出している場合の受け口(独立ウィンドウ側はSettingsWindow)。
+                _requestOpenCssEditorWindow?.Invoke(this);
                 break;
             case "reset-settings":
                 SettingsBridge.HandleResetSettingsRequest(PostToWeb, BroadcastOrRefreshSelf);
@@ -3903,7 +3913,7 @@ internal sealed class MainForm : Form
     /// パス未設定・ファイルが存在しない・読み取り不可・サイズ上限超過の場合は例外を投げず
     /// 空文字を返し、理由をLogger.Writeに記録する。
     /// </summary>
-    private static string ReadCustomCss(string? path)
+    internal static string ReadCustomCss(string? path)
     {
         if (string.IsNullOrWhiteSpace(path)) return "";
         try

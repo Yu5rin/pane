@@ -166,18 +166,14 @@ internal static class ThemeFolderService
           --frontmatter-bg: var(--panel-bg); /* Front Matter(先頭の ---で囲むメタ情報)の背景色(省略時は --panel-bg と同じ) */
           --input-bg: #FAFBFB;      /* ダイアログ・カラーピッカー等、入力欄(input)の背景色 */
 
-          /* ---- メニューバー・タイトルバー・ヘッダー ---- */
+          /* ---- メニューバー・タイトルバー ---- */
           --chrome-bg: #EFF1F0;     /* メニューバー(Altキーで表示/非表示)の背景色 */
           --titlebar-bg: #EFF1F0;   /* ウィンドウのタイトルバーの背景色(OS側のタイトルバーにも反映されます) */
           --titlebar-fg: var(--ink); /* タイトルバーの文字・アイコンの色(省略時は --ink と同じ) */
           --menu-hover-fg: var(--accent); /* メニュー項目をホバー/選択したときの文字色(省略時は --accent と同じ) */
-          --topbar: #0F6E69;        /* 濃色ヘッダーバーの背景色 */
-          --topbar-ink: #EAF4F3;    /* 濃色ヘッダーバーの文字色 */
 
           /* ---- コードブロック ---- */
-          --code-bg: #EEF1F3;       /* インラインコード・表の中身の背景色 */
-          --pre-bg: #262C31;        /* フェンスコードブロック(```で囲む部分)の背景色 */
-          --pre-ink: #E8EAED;       /* フェンスコードブロックの文字色(色分けされないプレーンな文字) */
+          --code-bg: #EEF1F3;       /* インラインコードとコードブロック(```で囲む部分)の背景色 */
 
           /* ---- コードの色分け(シンタックスハイライト) ----
              「本文と同じ色だと種類が見分けられない」ときに使う11個の変数です。
@@ -212,24 +208,18 @@ internal static class ThemeFolderService
           /* ---- 状態表示・警告色 ---- */
           --danger: #B03A2E;        /* 削除・エラー等、警告を表す文字色 */
           --danger-soft: #F9ECEA;   /* 警告の背景色(危険な操作の確認バナー等) */
-          --pending: #B7791F;       /* 保存待ち(自動保存が終わるまでの間)のステータス表示の文字色 */
-          --status-ok: #8FDAD2;     /* 状態インジケータ「正常」を表す色 */
-          --status-off: #AFC4C0;    /* 状態インジケータ「オフ/無効」を表す色 */
-          --status-pend: #F2C368;   /* 状態インジケータ「保留」を表す色(--pendingとは別の変数) */
 
           /* ---- カラーピッカー ---- */
           --cp-checker: color-mix(in srgb, var(--ink) 16%, transparent); /* 半透明の色をプレビューするときに敷く市松模様の色 */
 
           /* ---- フォント ---- */
-          --font-heading: "Source Serif 4", "Noto Serif JP", serif;    /* 見出しの書体 */
+          --font-heading: "Source Serif 4", "Noto Serif JP", serif;    /* 取扱説明書の見出しの書体(本文の見出しには効きません。本文は --font-body) */
           --font-body: "Inter", "Noto Sans JP", system-ui, sans-serif; /* 本文の書体 */
           --font-mono: "JetBrains Mono", "BIZ UDゴシック", ui-monospace, monospace; /* コード・等幅表示の書体 */
 
           /* ---- 影・角丸・寸法(色ではない変数) ---- */
           --radius: 10px;           /* ボタン等の角丸の半径 */
-          --shadow-card: 0 1px 2px rgba(16,24,32,.05), 0 10px 30px rgba(16,24,32,.08); /* カード状の要素に付ける影 */
           --shadow-pop: 0 6px 24px rgba(16,24,32,.14); /* ダイアログ・ドロップダウン等、浮いた要素に付ける影 */
-          --bar-h: 48px;             /* モバイル用キーボード上部ツールバーの高さ */
 
           /* ---- 本文の余白・行間・編集領域だけのフォント(色ではない変数) ----
              設定 > 編集 の対応する項目(本文の余白・行の高さ・本文/等幅フォント)を
@@ -245,7 +235,7 @@ internal static class ThemeFolderService
         }
 
         /* ダーク既定: ここに書いた変数だけがライトの値から上書きされます。
-           (--radius や --font-*、--callout-*、--status-* 等、ここに出てこない
+           (--radius や --font-*、--callout-* 等、ここに出てこない
            変数はライトと同じ値がそのまま使われます) */
         html[data-theme="dark"] {
           /* ---- 本文エリア ---- */
@@ -263,16 +253,12 @@ internal static class ThemeFolderService
           --surface: #1C2226;
           --input-bg: #171C20;
 
-          /* ---- メニューバー・タイトルバー・ヘッダー ---- */
+          /* ---- メニューバー・タイトルバー ---- */
           --chrome-bg: #0E1012;
           --titlebar-bg: #0E1012;
-          --topbar: #0C2A27;
-          --topbar-ink: #D9EAE7;
 
           /* ---- コードブロック ---- */
           --code-bg: #0B0D0F;
-          --pre-bg: #10151A;
-          --pre-ink: #DDE3E7;
 
           /* ---- コードの色分け(シンタックスハイライト) ---- */
           --code-kw: #569CD6;
@@ -289,10 +275,8 @@ internal static class ThemeFolderService
           /* ---- 状態表示・警告色 ---- */
           --danger: #E07B6E;
           --danger-soft: #3A2320;
-          --pending: #D9A24A;
 
           /* ---- 影(ダークは黒の不透明度を上げた別の値を使用) ---- */
-          --shadow-card: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.35);
           --shadow-pop: 0 6px 24px rgba(0,0,0,.5);
         }
 
@@ -426,7 +410,7 @@ internal static class ThemeFolderService
 
         /* ---- フェンスコードブロック(```で囲む部分)本体 ---- */
         /*
-        .cm-line.cm-codeblock-line { background: var(--pre-bg); color: var(--pre-ink); }
+        .cm-line.cm-codeblock-line { background: #262C31; color: #E8EAED; }
         .cm-line.cm-cb-first { border-radius: 4px 4px 0 0; }
         .cm-line.cm-cb-last { border-radius: 0 0 4px 4px; }
         */

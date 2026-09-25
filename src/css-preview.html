@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="referrer" content="no-referrer">
+<title>Pane - カスタムCSSの見本</title>
+<script>
+  // カスタムCSSの作成補助(仕様書 第2.10.1節 C-16)の見本。css-editor-window.html の iframe の中で
+  // 動く。テーマ(data-theme 等)・編集中のCSS・見せる画面(Markdown / コード / 画面全体)は、
+  // 親の画面(css-editor-entry.js)から postMessage で受け取る。受け取るまでの仮のテーマは
+  // 親と同じ決め方(C#側が親に注入した値→OS設定)。
+  try {
+    var parentTheme = window.parent && window.parent !== window ? window.parent.document.documentElement.dataset.theme : "";
+    document.documentElement.dataset.theme = parentTheme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  } catch (e) {}
+</script>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="themes.css">
+<style>
+  /* 本文ウィンドウ(index.html)と同じ骨組みにする。エディタ用のCSSの多くが #cm-host 前提で、
+     メニューバー・サイドバーも #menubar・#sidebar 前提のため、同じ id でなければ本物と
+     同じ見た目にならない。 */
+  html, body { height: 100%; margin: 0; }
+  body { display: flex; flex-direction: column; background: var(--paper); color: var(--ink); font-family: var(--font-body); position: relative; }
+  #main-area { flex: 1; min-height: 0; display: flex; }
+  #cm-host { flex: 1; min-height: 0; overflow: hidden; position: relative; }
+  /* ここから4行は index.html の <style> にある #statusbar の指定の写し。本物のステータスバーは
+     style.css ではなく index.html に書かれているため、同じものをここにも置く
+     (.verify-css-editor.mjs が index.html と同じかを確かめている)。 */
+  #statusbar { display: flex; gap: 16px; padding: 0 10px; height: 24px; align-items: center; border-top: 1px solid var(--rule); font-size: 11px; color: var(--chrome-fg); flex: none; font-family: var(--font-body); overflow: hidden; background: var(--chrome-bg); }
+  #statusbar > * { white-space: nowrap; flex: none; }
+  #statusbar button { border: none; background: transparent; color: inherit; font: inherit; cursor: pointer; padding: 0 4px; min-height: 20px; }
+  #statusbar button:hover { color: var(--ink); }
+
+  /* 「画面全体」でだけ見せる部品。Markdown・コードの見本では隠す。 */
+  body:not(.view-chrome) .chrome-only { display: none !important; }
+  /* タイトルバーは Windows が描く(Pane/MainForm.cs が --titlebar-bg / --titlebar-fg を読んで
+     塗る)。ここでは同じ色で塗った帯で代わりに見せる。 */
+  .mock-titlebar { height: 30px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 12px; font-size: 12px; background: var(--titlebar-bg, var(--paper)); color: var(--titlebar-fg, var(--ink)); }
+  .mock-titlebar .mock-caption-buttons { margin-left: auto; display: inline-flex; gap: 22px; }
+  /* パレットとダイアログは本物では画面に重ねて出すが、見本では下に並べて置く(重ねると本文が隠れるため)。 */
+  .mock-popups { flex: none; display: flex; gap: 16px; align-items: flex-start; padding: 14px 16px; border-top: 1px solid var(--rule); background: var(--paper); }
+  .mock-popups .palette { width: 300px; }
+  .mock-popups .pane-dialog-box { width: 300px; }
+  .mock-note { flex: none; padding: 6px 16px 10px; font-size: 11.5px; color: var(--ink-sub); background: var(--paper); }
+</style>
+<!-- 編集中のカスタムCSS。本文ウィンドウ(main.js applyCustomCss)と同じく最後に読み込む。 -->
+<style id="custom-css"></style>
+</head>
+<body class="view-markdown">
+  <div class="mock-titlebar chrome-only"><span>見本.md - Pane</span><span class="mock-caption-buttons" aria-hidden="true">
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M6 12h12"/></svg>
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12"/></svg>
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
+  </span></div>
+  <div id="menubar" class="chrome-only">
+    <span style="flex:1"></span>
+    <button class="menu-theme-btn" type="button" aria-pressed="true" title="サイドバーの表示切替">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M9.5 4.5v15"/></svg>
+    </button>
+    <button class="menu-theme-btn" type="button" aria-pressed="false" title="記法を隠さない表示">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m9 8-4 4 4 4M15 8l4 4-4 4"/></svg>
+    </button>
+    <span class="menubar-sep" aria-hidden="true"></span>
+    <button class="menu-theme-btn" type="button" title="設定">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 13a7.5 7.5 0 0 0 0-2l1.9-1.4-2-3.4-2.2.6a7.6 7.6 0 0 0-1.7-1L14.9 3.5h-4l-.5 2.3a7.6 7.6 0 0 0-1.7 1l-2.2-.6-2 3.4L6.4 11a7.5 7.5 0 0 0 0 2l-1.9 1.4 2 3.4 2.2-.6a7.6 7.6 0 0 0 1.7 1l.5 2.3h4l.5-2.3a7.6 7.6 0 0 0 1.7-1l2.2.6 2-3.4z"/></svg>
+    </button>
+  </div>
+  <div id="main-area">
+    <div id="sidebar" class="chrome-only" style="--sidebar-w: 200px">
+      <div class="sidebar-tabs">
+        <button type="button" class="sidebar-tab active" title="アウトライン">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h10M4 18h13"/></svg>
+        </button>
+        <button type="button" class="sidebar-tab" title="ファイルリスト">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>
+        </button>
+      </div>
+      <div class="sidebar-body">
+        <button type="button" class="outline-item" data-level="1">見出し1</button>
+        <button type="button" class="outline-item current" data-level="2">見出し2(今いる所)</button>
+        <button type="button" class="outline-item" data-level="3">見出し3</button>
+        <button type="button" class="outline-item" data-level="4">見出し4</button>
+      </div>
+    </div>
+    <div id="cm-host"></div>
+  </div>
+  <div id="statusbar" class="chrome-only">
+    <button type="button">Markdown</button>
+    <span>行 1, 列 1</span>
+    <button type="button">UTF-8</button>
+    <button type="button">CRLF</button>
+    <button type="button">123文字</button>
+  </div>
+  <div class="mock-popups chrome-only">
+    <div class="palette" role="presentation">
+      <input id="palette-input" placeholder="コマンドを検索…" autocomplete="off" tabindex="-1">
+      <ul id="palette-list">
+        <li class="sel"><span>ファイル: <mark>保存</mark></span><span class="palette-shortcut">Ctrl+S</span></li>
+        <li><span>ファイル: 名前を付けて<mark>保存</mark></span><span class="palette-shortcut">Ctrl+Shift+S</span></li>
+      </ul>
+    </div>
+    <div class="pane-dialog-box" role="presentation">
+      <div class="pane-dialog-title">ダイアログ</div>
+      <div class="pane-dialog-message">確認や入力を求める画面です。</div>
+      <input class="pane-dialog-input" value="入力欄" tabindex="-1">
+      <div class="pane-dialog-actions" style="margin-top: 12px">
+        <button type="button" class="pane-dialog-btn pane-dialog-btn-danger">削除</button>
+        <button type="button" class="pane-dialog-btn">キャンセル</button>
+        <button type="button" class="pane-dialog-btn pane-dialog-btn-primary">OK</button>
+      </div>
+    </div>
+    <div>
+      <div style="font-size: 11.5px; color: var(--ink-sub); margin-bottom: 6px">設定画面などのボタン</div>
+      <button type="button" class="btn">ボタン</button>
+      <button type="button" class="btn primary">主なボタン</button>
+      <button type="button" class="btn danger">削除</button>
+    </div>
+  </div>
+  <div class="mock-note chrome-only">右クリックのメニューと、メニューバーから開くメニューは Windows が描くため、カスタムCSSでは変わりません。ボタンやメニューにマウスを乗せると、そのときの色を確かめられます。</div>
+  <script type="module" src="css-preview-entry.js"></script>
+</body>
+</html>

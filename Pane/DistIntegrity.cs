@@ -56,6 +56,10 @@ internal static class DistIntegrity
         "settings-entry.js",
         "help-window.html",
         "help-entry.js",
+        "css-editor-window.html",
+        "css-editor-entry.js",
+        "css-preview.html",
+        "css-preview-entry.js",
         "icon.svg",
         "manual.md",
     };

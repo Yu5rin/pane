@@ -64,6 +64,10 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// <see cref="OnWindowClosed"/>を参照。</summary>
     private HelpWindow? _helpWindow;
 
+    /// <summary>カスタムCSSの作成補助(仕様書 第2.10.1節 C-16)。同時に1つしか開かない。
+    /// 設定・取扱説明書と違い事前生成せず、閉じたら破棄する(<see cref="CssEditorWindow"/>参照)。</summary>
+    private CssEditorWindow? _cssEditorWindow;
+
     /// <summary>設定ウィンドウの事前生成を1回だけ・遅延して行うためのワンショットタイマー。
     /// Timerのコールバックはメッセージループ経由でこのオブジェクトを作ったスレッド(UIスレッド)
     /// 上で発火するため、Application.Run()より前(コンストラクタ内)にStartしても安全。
@@ -399,6 +403,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
             requestBroadcastSettings: BroadcastSettingsChanged,
             requestOpenSettingsWindow: (form, category) => OpenSettingsWindow(form, category),
             requestOpenHelpWindow: OpenHelpWindow,
+            requestOpenCssEditorWindow: OpenCssEditorWindow,
             droppedFile: droppedFile,
             initialFolderPath: initialFolderPath,
             hasUnsavedDocuments: HasUnsavedDocuments,
@@ -660,6 +665,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
         // 新しいPaneが立ち上がったあとも古い側の窓が画面に居座って見える。
         try { _settingsWindow?.Dispose(); } catch (Exception ex) { Logger.WriteException("更新: 設定ウィンドウの終了に失敗", ex); }
         try { _helpWindow?.Dispose(); } catch (Exception ex) { Logger.WriteException("更新: 取扱説明書ウィンドウの終了に失敗", ex); }
+        try { _cssEditorWindow?.Dispose(); } catch (Exception ex) { Logger.WriteException("更新: カスタムCSSの作成補助の終了に失敗", ex); }
         Logger.Shutdown();
         ExitThread();
     }
@@ -886,6 +892,31 @@ internal sealed class PaneApplicationContext : ApplicationContext
     }
 
     /// <summary>
+    /// カスタムCSSの作成補助(仕様書 第2.10.1節 C-16)を開く。既に開いていれば前面に出すだけ。
+    /// 設定画面の「CSSを作る…」から呼ばれる。
+    /// </summary>
+    public void OpenCssEditorWindow(Form owner)
+    {
+        if (_cssEditorWindow is not { IsDisposed: false })
+        {
+            _cssEditorWindow = new CssEditorWindow(owner, OnCustomCssSavedFromEditor);
+            _cssEditorWindow.FormClosed += (_, _) => _cssEditorWindow = null;
+            Logger.Write("OpenCssEditorWindow: 新規に開いた");
+        }
+        _cssEditorWindow.Reveal();
+    }
+
+    /// <summary>作成補助でカスタムCSSを保存したあと。設定ファイルには保存先が書き込まれて
+    /// いるので、開いている全ウィンドウへ配り直す。設定画面が開いていれば、その入力欄
+    /// (編集中の下書き)も合わせる。合わせないと、設定画面でそのまま「保存」を押したときに
+    /// 古いパスで上書きしてしまう。</summary>
+    private void OnCustomCssSavedFromEditor(string path)
+    {
+        BroadcastSettingsChanged();
+        _settingsWindow?.NotifyCustomCssPathSaved(path);
+    }
+
+    /// <summary>
     /// 設定画面(独立ウィンドウ)を開く。<paramref name="owner"/>(呼び出し元のウィンドウ)の
     /// 中央に表示する。既に開いていれば新しく作らず前面に出してフォーカスするだけにする
     /// (同時に1つしか開かない)。
@@ -900,7 +931,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
         if (isNew)
         {
             _settingsWindow = new SettingsWindow(
-                owner, BroadcastSettingsChanged, HasUnsavedDocuments, ShutdownForUpdate);
+                owner, BroadcastSettingsChanged, HasUnsavedDocuments, ShutdownForUpdate, OpenCssEditorWindow);
             _settingsWindow.FormClosed += (_, _) => _settingsWindow = null;
         }
         // 不具合修正(事前生成が効いていなかった件と合わせて整理): 新規作成直後の初回表示も、
@@ -999,7 +1030,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
         {
             Form? owner = _windows.Count > 0 ? _windows[0] : null;
             window = new SettingsWindow(
-                owner, BroadcastSettingsChanged, HasUnsavedDocuments, ShutdownForUpdate);
+                owner, BroadcastSettingsChanged, HasUnsavedDocuments, ShutdownForUpdate, OpenCssEditorWindow);
             window.FormClosed += (_, _) => _settingsWindow = null;
             _settingsWindow = window;
             window.Prewarm();
@@ -1131,6 +1162,9 @@ internal sealed class PaneApplicationContext : ApplicationContext
                 _helpPregenerateTimer.Dispose();
                 _settingsWindow?.CloseForReal();
                 _helpWindow?.CloseForReal();
+                // 作成補助は保存していない変更があっても確かめずに閉じる。最後の本体ウィンドウを
+                // 閉じたのは利用者の操作で、確認のために見えないウィンドウを残すことはできないため。
+                _cssEditorWindow?.Dispose();
                 ExitThread();
             }
         }
