@@ -58,6 +58,15 @@
          測ったうえで判断する。切り替えは scripts\release.ps1 の -ReadyToRun スイッチ、
          または `dotnet publish -p:PublishReadyToRun=true` で行う。 -->
     <PublishReadyToRun>false</PublishReadyToRun>
+
+    <!-- 単一exeの圧縮(EnableCompressionInSingleFile)は、測ったうえで入れていない。
+         exeは180MB→75MBになるが、配布Zipの大きさはほぼ変わらない(71.4MB→71.6MB。Zipの時点で
+         すでに圧縮されているため)。一方で実機では、圧縮した中身を起動のたびにメモリへ展開する
+         ため、Pane.exeのメモリが常に+42MB(107MB→149MB。Paneは常駐するのでずっと効く)、
+         初回起動が+552ms(1,656ms→2,208msで仕様書8.4の2秒を超えた)だった。
+         詳細と測り方は docs/調査記録/調査-exeの圧縮.md。
+         なお圧縮はself-containedのときだけの機能で、無条件に書くといつもの実機確認の手順
+         (self-containedをfalseにして作る形)のpublishがNETSDK1176で失敗する。 -->
   </PropertyGroup>
 
   <ItemGroup>
