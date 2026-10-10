@@ -173,6 +173,7 @@ internal static class SettingsBridge
             enableDebug = settings.EnableDebug,
             verboseLogging = settings.VerboseLogging,
             checkUpdateOnStartup = settings.CheckUpdateOnStartup,
+            autoUpdate = settings.AutoUpdate,
             updateCheckUrl = settings.UpdateCheckUrl,
             showHiddenFilesInTree = settings.ShowHiddenFilesInTree,
             fileTreePatterns = settings.FileTreePatterns,
@@ -279,7 +280,7 @@ internal static class SettingsBridge
     // (UpdateService.TryBeginApply参照)。
 
     public static async Task HandleApplyUpdateRequestAsync(
-        Action<object> postToWeb, Func<bool> hasUnsavedDocuments, Action shutdown)
+        Action<object> postToWeb, Func<bool> hasUnsavedDocuments, Action<string> restartIntoNewVersion)
     {
         void Report(string stage, string message, int percent = -1)
             => postToWeb(new { type = "update-progress", stage, message, percent });
@@ -319,8 +320,9 @@ internal static class SettingsBridge
             string newExe = UpdateService.ApplyUpdate(zipPath);
 
             Report("restarting", "更新しました。Paneを再起動します。");
-            UpdateService.StartNewVersion(newExe);
-            shutdown();
+            // 新しい版を起動して自分は終わる。開いていた資料は新しい側で開き直す
+            // (PaneApplicationContext.RestartIntoNewVersion。仕様書 U-04b)。
+            restartIntoNewVersion(newExe);
         }
         catch (Exception ex)
         {
@@ -640,6 +642,8 @@ internal static class SettingsBridge
             {
                 settings.CheckUpdateOnStartup = checkUpdateOnStartup;
             }
+            // 自動更新(U-10)。次に新しい版が見つかったときから効く(この場では通信しない)。
+            if (TryGetBool(s, "autoUpdate", out bool autoUpdate)) settings.AutoUpdate = autoUpdate;
             if (TryGetBool(s, "showHiddenFilesInTree", out bool showHiddenFilesInTree)) settings.ShowHiddenFilesInTree = showHiddenFilesInTree;
             List<string>? fileTreePatterns = TryGetStringList(s, "fileTreePatterns");
             if (fileTreePatterns is not null) settings.FileTreePatterns = fileTreePatterns;

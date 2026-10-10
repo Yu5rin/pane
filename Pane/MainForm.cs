@@ -88,7 +88,8 @@ internal sealed class MainForm : Form
     /// <summary>更新の適用(U-04)の前提確認・後始末。実体はPaneApplicationContextが持つ
     /// (未保存の有無・終了処理はアプリ全体の話で、1ウィンドウでは判断できないため)。</summary>
     private readonly Func<bool>? _hasUnsavedDocuments;
-    private readonly Action? _shutdownForUpdate;
+    /// <summary>新しい版を起動して自分を終える(開いていた資料は新しい側で開き直す。仕様書 U-04b)。</summary>
+    private readonly Action<string>? _restartIntoNewVersion;
     /// <summary>取扱説明書ウィンドウ(F1)を開く要求。<see cref="_requestOpenSettingsWindow"/>と
     /// 全く同じ流儀(<see cref="PaneApplicationContext.OpenHelpWindow"/>参照)。</summary>
     private readonly Action<MainForm>? _requestOpenHelpWindow;
@@ -308,7 +309,7 @@ internal sealed class MainForm : Form
         DroppedFileContent? droppedFile = null,
         string? initialFolderPath = null,
         Func<bool>? hasUnsavedDocuments = null,
-        Action? shutdownForUpdate = null,
+        Action<string>? restartIntoNewVersion = null,
         Guid? windowId = null)
     {
         // 不具合修正: 復元「はい」直後の空白(docs/調査記録/点検-機能と動作.md参照)を無くすため、
@@ -328,7 +329,7 @@ internal sealed class MainForm : Form
         _requestOpenHelpWindow = requestOpenHelpWindow;
         _requestOpenCssEditorWindow = requestOpenCssEditorWindow;
         _hasUnsavedDocuments = hasUnsavedDocuments;
-        _shutdownForUpdate = shutdownForUpdate;
+        _restartIntoNewVersion = restartIntoNewVersion;
         Logger.Write($"MainForm生成: initialPath={initialPath ?? "(なし)"}, recoverFrom={(recoverFrom is null ? "なし" : recoverFrom.OriginalPath ?? "無題")}, droppedFile={droppedFile?.Name ?? "なし"}");
         // カスタムCSSの参考サンプルを既定フォルダへ用意しておく(無ければ作るだけで、
         // 既にあれば何もしない。ThemeFolderService.EnsureSampleCss参照)。
@@ -867,7 +868,7 @@ internal sealed class MainForm : Form
         // アプリは落ちないが後ろの行は実行されない)。v1.2.2では確認をこの割り当ての後ろに
         // 置いていたため、まさに直すべき「distが丸ごと無い」ときに確認が出ず、空の画面のまま
         // だった。先に始めておけば、割り当てが失敗しても確認は出る。
-        DistRepairFlow.CheckOnce(this, distPath, _hasUnsavedDocuments ?? (() => IsDirty), _shutdownForUpdate ?? (() => { }));
+        DistRepairFlow.CheckOnce(this, distPath, _hasUnsavedDocuments ?? (() => IsDirty), _restartIntoNewVersion ?? (newExe => UpdateService.StartNewVersion(newExe, UpdateRestartLogic.BuildArguments(Environment.ProcessId, stayResident: false, openWindows: true))));
 
         try
         {
@@ -1766,7 +1767,7 @@ internal sealed class MainForm : Form
                 _ = SettingsBridge.HandleApplyUpdateRequestAsync(
                     PostToWeb,
                     _hasUnsavedDocuments ?? (() => IsDirty),
-                    _shutdownForUpdate ?? (() => { }));
+                    _restartIntoNewVersion ?? (newExe => UpdateService.StartNewVersion(newExe, UpdateRestartLogic.BuildArguments(Environment.ProcessId, stayResident: false, openWindows: true))));
                 break;
             case "open-release-page":
                 // 開くURLはC#側が直前の確認で受け取った値だけを使う
@@ -3755,6 +3756,11 @@ internal sealed class MainForm : Form
     /// </summary>
     internal void PostUpdateAvailable(string latestVersion, string message)
         => PostToWeb(new { type = "update-available", latestVersion, message });
+
+    /// <summary>ウィンドウを閉じている間に自動で入れ替えたことを知らせる(仕様書 U-10)。
+    /// <see cref="PostUpdateAvailable"/>と同じく、使える状態のウィンドウにだけ送ること。</summary>
+    internal void PostUpdateApplied(string message)
+        => PostToWeb(new { type = "update-applied", message });
 
     /// <summary>
     /// 設定のうちJS側(main.js / editor.js / sidebar.js等)で効かせる項目をまとめて伝える

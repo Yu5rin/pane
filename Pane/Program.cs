@@ -46,6 +46,9 @@ internal static class Program
         // ファイルパスではなくフラグとして別扱いにし、それ以外の最初の引数をファイル/フォルダの
         // パスとして扱う。
         bool preload = false;
+        // "--stay-resident"(更新で入れ替わった常駐プロセスの後継。UpdateRestartLogic.StayResidentArg)は、
+        // 常駐は続けるが、起動時のウィンドウ(開き直す資料)は普通に開く。
+        bool stayResident = false;
         string? initialPath = null;
         int? afterUpdatePid = null;
         for (int i = 0; i < args.Length; i++)
@@ -54,6 +57,10 @@ internal static class Program
             if (string.Equals(arg, "--preload", StringComparison.OrdinalIgnoreCase))
             {
                 preload = true;
+            }
+            else if (string.Equals(arg, UpdateRestartLogic.StayResidentArg, StringComparison.OrdinalIgnoreCase))
+            {
+                stayResident = true;
             }
             else if (string.Equals(arg, "--after-update", StringComparison.OrdinalIgnoreCase))
             {
@@ -145,7 +152,7 @@ internal static class Program
         // 設定ウィンドウが必要とする重い情報を、要求される前に用意しておく。
         Task.Run(WarmUpForSettingsWindow);
 
-        var context = new PaneApplicationContext(initialPath, preload);
+        var context = new PaneApplicationContext(initialPath, preload, stayResident);
 
         var server = new SingleInstanceServer(SynchronizationContext.Current!);
         server.FileRequested += path => context.OpenWindowFromPipeRequest(path);
