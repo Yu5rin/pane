@@ -110,14 +110,45 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// 一度trueになったらプロセスの生存期間中ずっとtrueのまま(常駐プロセスとしての性質)。</summary>
     private readonly bool _preload;
 
+    /// <summary>最後のウィンドウを閉じても終わらずに常駐するか。preload起動(B-1)と、常駐していた
+    /// Paneを更新で入れ替えた後継(--stay-resident。<see cref="UpdateRestartLogic.StayResidentArg"/>)で
+    /// true。後継はpreloadと違って起動時のウィンドウを普通に開くので、<see cref="_preload"/>とは分ける。</summary>
+    private readonly bool _stayResident;
+
+    /// <summary>UIスレッドの同期コンテキスト。補助ウィンドウが隠れた直後など、イベントの最中では
+    /// なく一呼吸おいてから自動の入れ替え(U-10)を判断するために使う。</summary>
+    private readonly SynchronizationContext? _ui;
+
+    /// <summary>自動の入れ替え(U-10)のために、ダウンロードと照合を済ませた新しい版。</summary>
+    private sealed record PreparedUpdate(string Tag, string ZipPath);
+
+    /// <summary>用意できた新しい版。まだ無ければnull。</summary>
+    private PreparedUpdate? _preparedUpdate;
+
+    /// <summary>新しい版を裏でダウンロードしている最中か(二重に取りに行かないため)。</summary>
+    private bool _preparingUpdate;
+
+    /// <summary>自動の入れ替えの最中か。この間に届いたファイルを開く要求は、入れ替えたあとの
+    /// 新しいPaneで開く(<see cref="_requestsDuringAutoApply"/>)。</summary>
+    private bool _autoApplying;
+
+    /// <summary>自動の入れ替えの最中に届いた、ファイルを開く要求(nullは空の文書)。
+    /// 頼んだ側のプロセスはもう終わっているため、ここで受け止めないと開かれないまま消える。</summary>
+    private readonly List<string?> _requestsDuringAutoApply = new();
+
+    /// <summary>「更新しました」(U-10)の控えを、この起動で見終えたか。</summary>
+    private bool _autoUpdatedNoticeChecked;
+
     /// <summary>preload起動直後、まだ一度もウィンドウを見せていない(復元確認・セッション復元が
     /// 未実施の)間だけtrue。名前付きパイプ経由で最初の要求が来た時点でfalseになる。</summary>
     private bool _initialOpenPending;
 
-    public PaneApplicationContext(string? cliInitialPath, bool preload = false)
+    public PaneApplicationContext(string? cliInitialPath, bool preload = false, bool stayResident = false)
     {
         _settings = SettingsService.Load();
         _preload = preload;
+        _stayResident = preload || stayResident;
+        _ui = SynchronizationContext.Current;
 
         // 設定ウィンドウの事前生成(体感速度対策)。本来の合図は最初の本体ウィンドウが使える
         // 状態になったこと(OpenWindowでReadyToUseを購読する)で、このタイマーはそれが来なかった
@@ -242,7 +273,22 @@ internal sealed class PaneApplicationContext : ApplicationContext
             AutoSaveService.DeleteSnapshot(windowId);
         }
 
-        // 2. コマンドライン引数 > セッション復元 > カスタムフォルダ > 空文書、の優先順位で
+        // 2. 更新で再起動した直後なら、更新の直前に開いていた資料を開き直す(仕様書 U-04b)。
+        //    控えがある間は、前回のセッションの復元やカスタムフォルダには進まない(それらは
+        //    最後に全部閉じたときの状態で、更新の直前に開いていたものとは別物のため)。
+        List<string>? reopenAfterUpdate = TakeReopenAfterUpdateRecord();
+        if (reopenAfterUpdate is not null)
+        {
+            Logger.Write($"更新の前に開いていた資料を開き直す: {reopenAfterUpdate.Count}件");
+            foreach (string path in reopenAfterUpdate)
+            {
+                if (!openedPaths.Add(path)) continue;
+                OpenWindow(path, forceActivate: forceActivate);
+                openedAny = true;
+            }
+        }
+
+        // 3. コマンドライン引数 > セッション復元 > カスタムフォルダ > 空文書、の優先順位で
         //    起動時のウィンドウを開く。
         if (cliInitialPath is not null)
         {
@@ -252,7 +298,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
                 openedAny = true;
             }
         }
-        else if (_settings.StartupBehavior == "restoreSession" && _settings.OpenFilePaths.Count > 0)
+        else if (reopenAfterUpdate is null && _settings.StartupBehavior == "restoreSession" && _settings.OpenFilePaths.Count > 0)
         {
             // タブ形式(仕様書 第2.10節 C-14、隠し設定)のときは、前回終了時に開いていた
             // 全パスを1つのウィンドウへまとめてタブとして復元する(ウィンドウ形式では
@@ -267,7 +313,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
                 openedAny = true;
             }
         }
-        else if (_settings.StartupBehavior == "customFolder")
+        else if (reopenAfterUpdate is null && _settings.StartupBehavior == "customFolder")
         {
             string? folder = _settings.StartupFolderPath;
             if (!string.IsNullOrWhiteSpace(folder) && Directory.Exists(folder))
@@ -407,7 +453,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
             droppedFile: droppedFile,
             initialFolderPath: initialFolderPath,
             hasUnsavedDocuments: HasUnsavedDocuments,
-            shutdownForUpdate: ShutdownForUpdate,
+            restartIntoNewVersion: RestartIntoNewVersion,
             windowId: windowId);
 
         int width = _settings.WindowWidth ?? DefaultWidth;
@@ -478,6 +524,8 @@ internal sealed class PaneApplicationContext : ApplicationContext
         // 更新の案内(U-06)は、このウィンドウが使える状態になってからでないと届かない。
         // まだ控えが残っていれば、その時点で出す(TryShowPendingUpdateNotice参照)。
         form.ReadyToUse += TryShowPendingUpdateNotice;
+        // 閉じている間に自動で入れ替えていたら(U-10)、そのことを知らせる。
+        form.ReadyToUse += TryShowAutoUpdatedNotice;
 
         // 設定・取扱説明書の事前生成は、本体ウィンドウが落ち着いてから始める
         // (SchedulePregenerationAfterFirstWindow参照)。
@@ -656,6 +704,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
     private void ShutdownForUpdate()
     {
         Logger.Write("更新: 新しいPaneを起動したので、このプロセスを終了する");
+        DeletePreparedUpdateFiles();
         // 各ウィンドウのFormClosingで未保存確認が走らないよう、Disposeで直接閉じる。
         foreach (MainForm window in _windows.ToList())
         {
@@ -670,8 +719,265 @@ internal sealed class PaneApplicationContext : ApplicationContext
         ExitThread();
     }
 
+    /// <summary>
+    /// 入れ替えの済んだ新しい版を起動して、自分は終わる(「更新する」・配布物の修復から呼ばれる)。
+    ///
+    /// 更新の直前に開いていたファイルを控えておき、新しい側の起動時に開き直してもらう(仕様書 U-04b)。
+    /// 以前は再起動すると空のウィンドウで立ち上がり、開いていた資料を開き直す手間がかかっていた。
+    /// 常駐していたなら、新しい側も常駐を続ける(常駐を外して起動すると、最後のウィンドウを
+    /// 閉じたときに終わってしまい、ログオン時の起動からの常駐が更新を境に途切れていた)。
+    /// </summary>
+    private void RestartIntoNewVersion(string newExe)
+    {
+        List<string> reopen = UpdateRestartLogic.CollectReopenPaths(
+            _windows.Where(w => !w.IsDisposed).SelectMany(w => w.GetOpenFilePaths()),
+            Array.Empty<string?>());
+        SaveReopenAfterUpdateRecord(reopen);
+        // 利用者が自分で更新を始めたので、新しい側では必ずウィンドウを出す(開き直す資料が無ければ空の文書)。
+        // 何も出ないと、更新が済んだのかどうか分からない。
+        UpdateService.StartNewVersion(newExe, UpdateRestartLogic.BuildArguments(Environment.ProcessId, IsResident(), openWindows: true));
+        ShutdownForUpdate();
+    }
+
+    /// <summary>最後のウィンドウを閉じても常駐するか(B-1、設定 quitOnLastWindowClosed)。</summary>
+    private bool IsResident() => _stayResident || !SettingsService.Load().QuitOnLastWindowClosed;
+
+    /// <summary>更新のあとに開き直すファイルの一覧を設定ファイルへ控える(新しい側が読む)。</summary>
+    private static void SaveReopenAfterUpdateRecord(List<string> paths)
+    {
+        try
+        {
+            SettingsService.Update(s => s.ReopenAfterUpdatePaths = paths);
+            Logger.Write($"更新: 再起動のあとに開き直すファイルを控えた({paths.Count}件)");
+        }
+        catch (Exception ex)
+        {
+            // 控えられなくても更新そのものは進める。開き直されないだけで、ファイルは失われない。
+            Logger.WriteException("更新: 開き直すファイルの控えに失敗(再起動後は通常の起動になる)", ex);
+        }
+    }
+
+    /// <summary>
+    /// 更新の前に控えた一覧を読み、控えは消す(1回きり)。控えが無ければnull。
+    /// 消えたファイルは除く(<see cref="UpdateRestartLogic.DecideReopenOnStartup"/>)。
+    /// </summary>
+    private static List<string>? TakeReopenAfterUpdateRecord()
+    {
+        List<string>? record = null;
+        try
+        {
+            SettingsService.Update(s =>
+            {
+                record = s.ReopenAfterUpdatePaths;
+                s.ReopenAfterUpdatePaths = null;
+            });
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException("更新の前に開いていた資料の控えを読めなかった(通常の起動にする)", ex);
+            return null;
+        }
+        return UpdateRestartLogic.DecideReopenOnStartup(record, File.Exists);
+    }
+
+    // ---- 自動の入れ替え(仕様書 U-10) ----
+
+    /// <summary>
+    /// 新しい版が見つかったとき、設定でオンにしている人だけ、裏でダウンロードと照合を済ませておく。
+    /// 入れ替えはここではせず、本体のウィンドウをすべて閉じたときに行う(<see cref="AutoApplyAsync"/>)。
+    /// </summary>
+    private async Task PrepareAutoUpdateAsync(UpdateCheckResult result)
+    {
+        if (!SettingsService.Load().AutoUpdate) return;
+        if (_preparingUpdate) return;
+        if (_preparedUpdate is { } prepared && prepared.Tag == result.LatestVersion && File.Exists(prepared.ZipPath)) return;
+        if (string.IsNullOrEmpty(result.DownloadUrl))
+        {
+            Logger.Write($"自動更新: {result.LatestVersion} のダウンロード先が分からないため用意しない(知らせるだけにする)");
+            return;
+        }
+        if (!UpdateService.CanWriteToInstallFolder(out string folder))
+        {
+            Logger.Write($"自動更新: 置き場所へ書き込めないため用意しない({PrivacyLogFormatter.ShortenPath(folder)})");
+            return;
+        }
+
+        _preparingUpdate = true;
+        try
+        {
+            Logger.Write($"自動更新: {result.LatestVersion} を裏でダウンロードする");
+            string zipPath = await UpdateService.DownloadAsync(result, progress: null, CancellationToken.None);
+            DeletePreparedUpdateFiles(); // 前に用意した古い版があれば捨てる
+            _preparedUpdate = new PreparedUpdate(result.LatestVersion, zipPath);
+            Logger.Write($"自動更新: {result.LatestVersion} を用意した。本体のウィンドウをすべて閉じたときに入れ替える");
+            ScheduleAutoApplyCheck();
+        }
+        catch (Exception ex)
+        {
+            // 用意できなくても、知らせる帯は出ているので「更新する」で手動で上げられる。
+            Logger.WriteException("自動更新: 新しい版の用意に失敗", ex);
+        }
+        finally
+        {
+            _preparingUpdate = false;
+        }
+    }
+
+    private void OnAuxiliaryWindowVisibleChanged(object? sender, EventArgs e)
+    {
+        if (sender is Form { Visible: false }) ScheduleAutoApplyCheck();
+    }
+
+    /// <summary>
+    /// 自動の入れ替えを始めてよいかを、一呼吸おいてから判断する。ウィンドウを閉じる・隠す
+    /// イベントの最中に入れ替えを始めると、その後始末と重なるため。
+    /// </summary>
+    private void ScheduleAutoApplyCheck()
+    {
+        if (_preparedUpdate is null) return;
+        if (_ui is null) { TryAutoApplyWhenIdle(); return; }
+        _ui.Post(_ => TryAutoApplyWhenIdle(), null);
+    }
+
+    /// <summary>常駐している状態で、条件がそろっていれば入れ替える。</summary>
+    private void TryAutoApplyWhenIdle()
+    {
+        if (_autoApplying) return;
+        // 常駐していないなら、最後のウィンドウを閉じた時点でプロセスごと終わる。その場合の入れ替えは
+        // OnWindowClosed の終了の分岐で行う(ここで再起動すると、終わったはずのPaneが常駐してしまう)。
+        if (!IsResident()) return;
+        if (DecideAutoApply(IsAuxiliaryWindowShown()) != UpdateRestartLogic.AutoApplyDecision.Apply) return;
+        // 「更新する」や配布物の修復が進んでいれば、そちらに任せる。
+        if (!UpdateService.TryBeginApply()) return;
+        _ = AutoApplyAsync(stayResident: true);
+    }
+
+    private UpdateRestartLogic.AutoApplyDecision DecideAutoApply(bool auxiliaryWindowShown)
+    {
+        bool prepared = _preparedUpdate is { } p && File.Exists(p.ZipPath);
+        return UpdateRestartLogic.DecideAutoApply(
+            SettingsService.Load().AutoUpdate,
+            prepared,
+            _windows.Count(w => !w.IsDisposed),
+            auxiliaryWindowShown,
+            applyInProgress: false);
+    }
+
+    /// <summary>設定・取扱説明書・カスタムCSSの作成補助のどれかが利用者に見えているか。</summary>
+    private bool IsAuxiliaryWindowShown()
+        => _settingsWindow is { IsDisposed: false, Visible: true }
+        || _helpWindow is { IsDisposed: false, Visible: true }
+        || _cssEditorWindow is { IsDisposed: false };
+
+    /// <summary>
+    /// 用意した新しい版に入れ替える(U-10)。呼び出し元が<see cref="UpdateService.TryBeginApply"/>を済ませていること。
+    /// </summary>
+    /// <param name="stayResident">常駐していたか。trueなら新しい版を常駐で起動し直す。
+    /// falseなら(最後のウィンドウを閉じて終わるところなので)入れ替えたあとそのまま終わる。</param>
+    private async Task AutoApplyAsync(bool stayResident)
+    {
+        PreparedUpdate prepared = _preparedUpdate!;
+        _autoApplying = true;
+        _requestsDuringAutoApply.Clear();
+        Logger.Write($"自動更新: 本体のウィンドウがすべて閉じられたので {prepared.Tag} に入れ替える(常駐={stayResident})");
+        try
+        {
+            // 入れ替え(Zipの展開とコピー)には数秒かかる。UIスレッドを止めると、その間に届いた
+            // ファイルを開く要求を受け止められないため、裏で行う。
+            string newExe = await Task.Run(() => UpdateService.ApplyUpdate(prepared.ZipPath));
+            try { SettingsService.Update(s => s.AutoUpdatedNoticeTag = prepared.Tag); }
+            catch (Exception ex) { Logger.Debug($"自動更新: 「更新しました」の控えに失敗: {ex.GetType().Name}"); }
+
+            int requests = _requestsDuringAutoApply.Count;
+            if (UpdateRestartLogic.ShouldStartAfterAutoApply(stayResident, requests))
+            {
+                if (requests > 0)
+                {
+                    SaveReopenAfterUpdateRecord(UpdateRestartLogic.CollectReopenPaths(
+                        Array.Empty<string?>(), _requestsDuringAutoApply));
+                }
+                UpdateService.StartNewVersion(newExe, UpdateRestartLogic.BuildArguments(
+                    Environment.ProcessId, stayResident, openWindows: requests > 0));
+            }
+            else
+            {
+                Logger.Write("自動更新: 入れ替えた。常駐していないので、このまま終わる(次の起動から新しい版になる)");
+            }
+            ShutdownForUpdate();
+        }
+        catch (Exception ex)
+        {
+            // ApplyUpdate は途中で失敗すれば元に戻している。同じものでもう一度試しても同じ結果に
+            // なりやすいので、用意した版は捨てる(次の確認でまた用意し直す)。
+            Logger.WriteException("自動更新: 入れ替えに失敗(元の版のまま続ける)", ex);
+            DeletePreparedUpdateFiles();
+            _autoApplying = false;
+            UpdateService.EndApply();
+
+            var requests = _requestsDuringAutoApply.ToList();
+            _requestsDuringAutoApply.Clear();
+            foreach (string? path in requests) OpenWindow(path, forceActivate: true);
+            if (requests.Count == 0 && !stayResident) ExitThread();
+        }
+    }
+
+    /// <summary>用意したまま使わなかった新しい版の一時ファイルを消す(1つあたり約75MB)。</summary>
+    private void DeletePreparedUpdateFiles()
+    {
+        PreparedUpdate? prepared = _preparedUpdate;
+        _preparedUpdate = null;
+        if (prepared is null) return;
+        try
+        {
+            string? directory = Path.GetDirectoryName(prepared.ZipPath);
+            if (directory is not null && Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug($"自動更新: 用意した版の一時ファイルを消せなかった: {ex.GetType().Name}");
+        }
+    }
+
+    /// <summary>
+    /// ウィンドウを閉じている間に自動で入れ替えていたら(U-10)、そのことを知らせる。1回きり。
+    /// 知らせないと、利用者は版が変わったことに気づけない。
+    /// </summary>
+    private void TryShowAutoUpdatedNotice()
+    {
+        if (_autoUpdatedNoticeChecked) return;
+        string? tag = SettingsService.Load().AutoUpdatedNoticeTag;
+        if (string.IsNullOrWhiteSpace(tag))
+        {
+            _autoUpdatedNoticeChecked = true;
+            return;
+        }
+        MainForm? target = _windows.FirstOrDefault(w => !w.IsDisposed && w.IsReadyToUse);
+        if (target is null) return;
+
+        _autoUpdatedNoticeChecked = true;
+        try { SettingsService.Update(s => s.AutoUpdatedNoticeTag = null); }
+        catch (Exception ex) { Logger.Debug($"自動更新: 「更新しました」の控えを消せなかった: {ex.GetType().Name}"); }
+
+        string currentVersion = SettingsBridge.DetectAppVersion();
+        if (!UpdateRestartLogic.ShouldAnnounceAutoUpdate(tag, currentVersion))
+        {
+            Logger.Write($"自動更新: 控えの版({tag})に今の版({currentVersion})が届いていないので知らせない");
+            return;
+        }
+        Logger.Write($"自動更新: {tag} に更新したことを知らせる");
+        target.PostUpdateApplied($"Pane を {tag} に更新しました。");
+    }
+
     public void OpenWindowFromPipeRequest(string? path)
     {
+        if (_autoApplying)
+        {
+            // 入れ替えの最中(U-10)。ここで開いても、すぐに新しいPaneへ入れ替わって閉じてしまう。
+            // 新しいPaneで開くよう控えておく(AutoApplyAsync)。
+            Logger.Write($"更新の自動の入れ替え中にファイルを開く要求が届いた。新しい版で開く(path={(path is null ? "(なし)" : PrivacyLogFormatter.ShortenPath(path))})");
+            _requestsDuringAutoApply.Add(path);
+            return;
+        }
         // 不具合修正: パイプ経由の要求は常に、送信元プロセス(フォアグラウンド権を持つ)が
         // 自分自身を即終了させた後に届く。受信側の本プロセスはバックグラウンドにいる
         // (または--preloadで非表示常駐している)ことが多く、Windowsの仕様上
@@ -737,6 +1043,14 @@ internal sealed class PaneApplicationContext : ApplicationContext
             _lastUpdateCheckAt = DateTime.UtcNow;
             UpdateCheckResult? result = await UpdateService.CheckOnStartupAsync();
             if (result is null) return;
+
+            // 自動更新(U-10)がオンで、入れ替えられる場所に置いてあれば、そのことを案内に書き添える。
+            if (SettingsService.Load().AutoUpdate && !string.IsNullOrEmpty(result.DownloadUrl)
+                && UpdateService.CanWriteToInstallFolder(out _))
+            {
+                result = result with { Message = $"{result.Message} ウィンドウをすべて閉じると、自動で入れ替わります。" };
+                _ = PrepareAutoUpdateAsync(result);
+            }
 
             _pendingUpdateNotice = result;
             // 案内を出せないまま終了することもあるため、先に控えておく。出せた時点で消す。
@@ -900,7 +1214,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
         if (_cssEditorWindow is not { IsDisposed: false })
         {
             _cssEditorWindow = new CssEditorWindow(owner, OnCustomCssSavedFromEditor);
-            _cssEditorWindow.FormClosed += (_, _) => _cssEditorWindow = null;
+            _cssEditorWindow.FormClosed += (_, _) => { _cssEditorWindow = null; ScheduleAutoApplyCheck(); };
             Logger.Write("OpenCssEditorWindow: 新規に開いた");
         }
         _cssEditorWindow.Reveal();
@@ -931,8 +1245,9 @@ internal sealed class PaneApplicationContext : ApplicationContext
         if (isNew)
         {
             _settingsWindow = new SettingsWindow(
-                owner, BroadcastSettingsChanged, HasUnsavedDocuments, ShutdownForUpdate, OpenCssEditorWindow);
+                owner, BroadcastSettingsChanged, HasUnsavedDocuments, RestartIntoNewVersion, OpenCssEditorWindow);
             _settingsWindow.FormClosed += (_, _) => _settingsWindow = null;
+            _settingsWindow.VisibleChanged += OnAuxiliaryWindowVisibleChanged;
         }
         // 不具合修正(事前生成が効いていなかった件と合わせて整理): 新規作成直後の初回表示も、
         // 既存インスタンスの再表示も、どちらも「これからユーザーに見せる」という同じ意味のため
@@ -1030,8 +1345,9 @@ internal sealed class PaneApplicationContext : ApplicationContext
         {
             Form? owner = _windows.Count > 0 ? _windows[0] : null;
             window = new SettingsWindow(
-                owner, BroadcastSettingsChanged, HasUnsavedDocuments, ShutdownForUpdate, OpenCssEditorWindow);
+                owner, BroadcastSettingsChanged, HasUnsavedDocuments, RestartIntoNewVersion, OpenCssEditorWindow);
             window.FormClosed += (_, _) => _settingsWindow = null;
+            window.VisibleChanged += OnAuxiliaryWindowVisibleChanged;
             _settingsWindow = window;
             window.Prewarm();
             Logger.Write("PregenerateSettingsWindow: アイドル時の事前生成を開始した");
@@ -1061,6 +1377,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
         {
             _helpWindow = new HelpWindow(owner);
             _helpWindow.FormClosed += (_, _) => _helpWindow = null;
+            _helpWindow.VisibleChanged += OnAuxiliaryWindowVisibleChanged;
         }
         _helpWindow!.Reveal(owner);
         string helpPregenerateNote = IsPregenerationEnabled() ? "事前生成は間に合っていなかった" : "事前生成は設定でオフ";
@@ -1086,6 +1403,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
             Form? owner = _windows.Count > 0 ? _windows[0] : null;
             window = new HelpWindow(owner);
             window.FormClosed += (_, _) => _helpWindow = null;
+            window.VisibleChanged += OnAuxiliaryWindowVisibleChanged;
             _helpWindow = window;
             window.Prewarm();
             Logger.Write("PregenerateHelpWindow: アイドル時の事前生成を開始した");
@@ -1142,11 +1460,13 @@ internal sealed class PaneApplicationContext : ApplicationContext
             // 戻る(次にファイルを開くときもWebView2環境のキャッシュを保ったまま高速に開けるため)。
             // 次にOpenWindowFromPipeRequestが呼ばれたときも、既にウィンドウを一度見せた後なので
             // 復元確認は再実行しない(_initialOpenPendingは既にfalse)。
-            if (_preload || !quitOnLastWindowClosed)
+            if (_stayResident || !quitOnLastWindowClosed)
             {
-                string reason = _preload ? "preload起動" : "quitOnLastWindowClosed=false";
+                string reason = _preload ? "preload起動" : _stayResident ? "常駐していたPaneの更新後の後継" : "quitOnLastWindowClosed=false";
                 Logger.Write($"最後のウィンドウが閉じられた({reason})。ExitThreadは呼ばず常駐状態へ戻る" +
                     "(設定画面が開いていればそのまま開いた状態を維持する)");
+                // 新しい版を用意してあれば、ここで入れ替える(U-10。作業中のウィンドウはもう無い)。
+                ScheduleAutoApplyCheck();
             }
             else
             {
@@ -1165,6 +1485,13 @@ internal sealed class PaneApplicationContext : ApplicationContext
                 // 作成補助は保存していない変更があっても確かめずに閉じる。最後の本体ウィンドウを
                 // 閉じたのは利用者の操作で、確認のために見えないウィンドウを残すことはできないため。
                 _cssEditorWindow?.Dispose();
+                // 新しい版を用意してあれば、終わる前に入れ替える(U-10)。次に起動したときには新しい版になる。
+                if (DecideAutoApply(auxiliaryWindowShown: false) == UpdateRestartLogic.AutoApplyDecision.Apply
+                    && UpdateService.TryBeginApply())
+                {
+                    _ = AutoApplyAsync(stayResident: false);
+                    return;
+                }
                 ExitThread();
             }
         }

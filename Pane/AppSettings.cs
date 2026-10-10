@@ -906,6 +906,16 @@ internal sealed class AppSettings
     /// </summary>
     public bool CheckUpdateOnStartup { get; set; } = true;
 
+    /// <summary>
+    /// 新しい版を自動で入れるか(仕様書 U-10)。既定false。
+    ///
+    /// オンのときだけ、起動時の確認(<see cref="CheckUpdateOnStartup"/>)で新しい版が見つかったら
+    /// 裏でダウンロードと照合を済ませておき、本体のウィンドウをすべて閉じたときに入れ替える。
+    /// 作業中のウィンドウが閉じられることはない。起動時の確認がオフなら確認自体が行われないので働かない。
+    /// オフ(既定)のときは従来どおり、知らせるだけで、入れ替えは利用者が「更新する」を押したときだけ。
+    /// </summary>
+    public bool AutoUpdate { get; set; }
+
     /// <summary>ファイルツリーに隠しファイルを表示するか。既定false。</summary>
     public bool ShowHiddenFilesInTree { get; set; }
 
@@ -946,6 +956,24 @@ internal sealed class AppSettings
     /// 通信できないときでもそのまま出せるよう、文面ごと控えておく。
     /// </summary>
     public string? PendingUpdateNoticeMessage { get; set; }
+
+    /// <summary>
+    /// 更新で再起動したあとに開き直すファイルの一覧(仕様書 U-04b)。控えが無ければnull。
+    /// 古い側が終了する直前に書き、新しい側が起動時に読んで消す。
+    /// 空の一覧は「控えはあるが開き直すファイルは無い」(空の文書だけを開く)。
+    ///
+    /// 利用者が設定画面で触る項目ではない(更新の前後で受け渡すための内部の覚え書き)。
+    /// </summary>
+    public List<string>? ReopenAfterUpdatePaths { get; set; }
+
+    /// <summary>
+    /// 自動の入れ替え(U-10)を済ませた版のタグ。次にウィンドウが使える状態になったときに
+    /// 「更新しました」と知らせ、消す。ウィンドウを閉じている間に入れ替わるため、知らせないと
+    /// 利用者は版が変わったことに気づけない。
+    ///
+    /// 利用者が設定画面で触る項目ではない。
+    /// </summary>
+    public string? AutoUpdatedNoticeTag { get; set; }
 
     /// <summary>
     /// 配布元のAtomフィードを前回受け取ったときの目印(ETag)。次回はこれを添えて尋ね、

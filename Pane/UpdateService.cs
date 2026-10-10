@@ -853,7 +853,8 @@ internal static class UpdateService
     /// 新しいexeを起動する。呼び出し元は、この後すみやかに自分を終了させること
     /// (古いexeが動いたままだと、退避したファイルを次回起動時に消せない)。
     /// </summary>
-    public static void StartNewVersion(string exePath)
+    /// <param name="arguments">新しい側へ渡す引数(<see cref="UpdateRestartLogic.BuildArguments"/>)。</param>
+    public static void StartNewVersion(string exePath, string arguments)
     {
         // 自分のプロセスIDを渡し、新しい側にはこれが終わるまで待ってもらう
         // (--after-update。Program.Main参照)。
@@ -864,7 +865,7 @@ internal static class UpdateService
         // 初期化が返ってこなくなった(ウィンドウが出ないまま止まる)。
         // 名前付きMutex(多重起動制御)の解放も古い側のプロセス終了時のため、
         // 待たせておかないと新しい側が「既に起動中」と誤判定しうる。
-        string arguments = $"--after-update {Environment.ProcessId}";
+        // 引数は呼び出し元が UpdateRestartLogic.BuildArguments で組み立てる(常駐を続けるかどうかで変わる)。
         Logger.Write($"更新: 新しいPaneを起動する: {exePath} {arguments}");
 
         using Process? started = Process.Start(new ProcessStartInfo

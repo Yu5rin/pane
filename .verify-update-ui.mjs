@@ -8,6 +8,7 @@
 //   セッションA: 最新版だったとき / 新しい版があったとき / 各ボタンの送信メッセージ
 //   セッションB: 「更新する」を押してからの進捗表示と失敗表示
 //   セッションC: 画面を開いただけでは何も送らない(自動では通信しない)
+//   セッションG: 「新しい版を自動で入れる」(U-10)の設定と「更新しました」の帯
 const PORT = 8214;
 import pw from "playwright";
 const { chromium } = pw;
@@ -31,6 +32,7 @@ const SETTINGS_REPLY = {
   licenses: [{ name: "CodeMirror 6", license: "MIT License" }],
   updateCheckUrl: "https://api.github.com/repos/Yu5rin/pane/releases/latest",
   checkUpdateOnStartup: true,
+  autoUpdate: false,
 };
 
 async function newPage() {
@@ -326,6 +328,34 @@ const sectionText = (page) =>
 }
 
 // ============================================================
+// (G) 「新しい版を自動で入れる」(U-10)。既定はオフで、オンにして保存すると true が送られる
+// ============================================================
+{
+  const page = await newPage();
+  await openVersionInfo(page);
+
+  const auto = await page.$('input[data-field="autoUpdate"]');
+  ok("(G) 「新しい版を自動で入れる」のチェックがある", auto !== null);
+  ok("(G) 既定(false)ではチェックされていない", !(await auto.isChecked()));
+  const desc = await page.evaluate(() => document.querySelector('input[data-field="autoUpdate"]')
+    .closest(".settings-field, label, div").parentElement.textContent);
+  ok("(G) 説明に「ウィンドウをすべて閉じたとき」に入れ替えることが書いてある", desc.includes("ウィンドウをすべて閉じたとき"));
+
+  await page.check('input[data-field="autoUpdate"]');
+  await page.waitForTimeout(150);
+  const before = (await sentTypes(page)).length;
+  await page.click('[data-act="save"]');
+  await page.waitForTimeout(300);
+  const saved = await page.evaluate((n) =>
+    window.__sent.slice(n).filter((m) => m.type === "save-settings").pop(), before);
+  ok(`(G) チェックして保存するとtrueが送られる 実際=${JSON.stringify(saved?.settings?.autoUpdate)}`,
+    !!saved && saved.settings.autoUpdate === true);
+  ok("(G) チェックしただけでは確認も更新も始めない",
+    !(await sentTypes(page)).some((t) => t === "check-update" || t === "apply-update"));
+  await page.close();
+}
+
+// ============================================================
 // (F) 更新の案内(U-06)の帯 — 本体ウィンドウ側
 // ============================================================
 {
@@ -378,6 +408,15 @@ const sectionText = (page) =>
   await page.click("#ad-banner-close");
   await page.waitForTimeout(150);
   ok("(F) 「閉じる」で帯が消える", await page.$eval("#ad-banner", (el) => el.hidden));
+
+  // 閉じている間に自動で入れ替えた(U-10)。知らせるだけで、押すボタンは出さない。
+  await page.evaluate(() => window.__reply({ type: "update-applied", message: "Pane を v1.0.6 に更新しました。" }));
+  await page.waitForTimeout(150);
+  ok("(G) update-appliedで「更新しました」の帯が出る",
+    !(await page.$eval("#ad-banner", (el) => el.hidden))
+    && (await page.$eval("#ad-banner-text", (el) => el.textContent)) === "Pane を v1.0.6 に更新しました。");
+  ok("(G) 「更新しました」の帯には「更新する」ボタンを出さない",
+    await page.$eval("#ad-banner-action", (el) => el.hidden));
 
   await page.close();
 }

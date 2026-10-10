@@ -3015,6 +3015,11 @@ async function handleHostMessage(msg) {
         onAction: () => bridge?.postMessage({ type: "open-settings-window", category: "versionInfo" }),
       });
       break;
+    case "update-applied":
+      // ウィンドウを閉じている間に、設定「新しい版を自動で入れる」(仕様書 U-10)で入れ替わった。
+      // 版が変わったことに気づけるよう知らせる。知らせるだけなので、しばらくしたら消す。
+      showAdBanner(msg.message || "Pane を更新しました。", { autoHideMs: 10000 });
+      break;
     case "window-state":
       // 全画面表示(V-08)・常に手前に表示(V-12)の実際の状態はC#側(WinForms)が持ち、
       // トグル操作のたび・起動直後に届く。ここは表示専用(メニューのcheckedに反映するだけ)。

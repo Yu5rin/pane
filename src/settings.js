@@ -250,6 +250,7 @@ const FIELD_DEFS = {
   enableDebug: { kind: "bool", def: false },
   verboseLogging: { kind: "bool", def: false },
   checkUpdateOnStartup: { kind: "bool", def: true },
+  autoUpdate: { kind: "bool", def: false },
   showHiddenFilesInTree: { kind: "bool", def: false },
   addToPath: { kind: "bool", def: false },
 };
@@ -2277,7 +2278,9 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
       <div class="settings-group">
         <div class="settings-group-title">更新</div>
         ${fieldCheckbox("checkUpdateOnStartup", "起動時に新しい版があるか確認する",
-          "起動するたびに、配布元へ新しい版があるかを尋ねます。見つかったときは画面上部でお知らせするだけで、断りなく更新することはありません。オフにすると、下の「更新を確認」を押したとき以外は通信しません。")}
+          "起動するたびに、配布元へ新しい版があるかを尋ねます。見つかったときは画面上部でお知らせします。下の「新しい版を自動で入れる」をオンにしない限り、断りなく更新することはありません。オフにすると、下の「更新を確認」を押したとき以外は通信しません。")}
+        ${fieldCheckbox("autoUpdate", "新しい版を自動で入れる",
+          "起動時の確認で新しい版が見つかったら、裏でダウンロードしておき、Paneのウィンドウをすべて閉じたときに入れ替えます。作業中のウィンドウが閉じられることはありません。次に開いたときに「更新しました」とお知らせします。起動時の確認がオフのときは働きません。")}
         <div data-update-section>${updateSectionHtml()}</div>
       </div>
       <div class="settings-group">

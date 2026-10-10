@@ -37,7 +37,7 @@ internal static class DistRepairFlow
     /// そのかわり中の例外は呼び出し元へ届かず、放っておくとアプリごと落ちうるので、
     /// 全体を try で囲って必ずここで受け止める(確かめられないこと自体で起動を止めない)。
     /// </remarks>
-    public static async void CheckOnce(Form owner, string distPath, Func<bool> hasUnsavedDocuments, Action shutdownForUpdate)
+    public static async void CheckOnce(Form owner, string distPath, Func<bool> hasUnsavedDocuments, Action<string> restartIntoNewVersion)
     {
         if (_checkedThisProcess) return;
         _checkedThisProcess = true;
@@ -59,7 +59,7 @@ internal static class DistRepairFlow
             void Start()
             {
                 if (owner.IsDisposed) return;
-                owner.BeginInvoke(new MethodInvoker(() => _ = RunAsync(owner, missing, hasUnsavedDocuments, shutdownForUpdate)));
+                owner.BeginInvoke(new MethodInvoker(() => _ = RunAsync(owner, missing, hasUnsavedDocuments, restartIntoNewVersion)));
             }
             if (owner.Visible)
             {
@@ -91,7 +91,7 @@ internal static class DistRepairFlow
             name => File.Exists(Path.Combine(distPath, name.Replace('/', Path.DirectorySeparatorChar))));
     }
 
-    private static async Task RunAsync(Form owner, IReadOnlyList<string> missing, Func<bool> hasUnsavedDocuments, Action shutdownForUpdate)
+    private static async Task RunAsync(Form owner, IReadOnlyList<string> missing, Func<bool> hasUnsavedDocuments, Action<string> restartIntoNewVersion)
     {
         try
         {
@@ -122,7 +122,7 @@ internal static class DistRepairFlow
 
             try
             {
-                await RepairAsync(owner, shutdownForUpdate);
+                await RepairAsync(owner, restartIntoNewVersion);
             }
             finally
             {
@@ -135,7 +135,7 @@ internal static class DistRepairFlow
         }
     }
 
-    private static async Task RepairAsync(Form owner, Action shutdownForUpdate)
+    private static async Task RepairAsync(Form owner, Action<string> restartIntoNewVersion)
     {
         using var progress = new RepairProgressForm(owner);
         progress.Show(owner);
@@ -161,8 +161,7 @@ internal static class DistRepairFlow
 
             progress.SetStatus("直しました。Paneを再起動します。", 100);
             Logger.Write($"distの修復: 完了({info.LatestVersion})。再起動する");
-            UpdateService.StartNewVersion(newExe);
-            shutdownForUpdate();
+            restartIntoNewVersion(newExe);
         }
         catch (Exception ex)
         {

@@ -91,10 +91,10 @@ internal sealed class SettingsWindow : Form
     /// 更新の適用(仕様書 U-04)で使う2つの依頼。設定ウィンドウ自身はアプリ全体の状態を
     /// 知らないため、PaneApplicationContextから受け取る。
     ///   hasUnsavedDocuments: どれか1つでも未保存の文書が開かれているか
-    ///   shutdown: 新しいPaneを起動したあと、自分自身を終了させる
+    ///   restartIntoNewVersion: 新しいPaneを起動して、自分自身を終了させる
     /// </summary>
     private readonly Func<bool>? _hasUnsavedDocuments;
-    private readonly Action? _shutdown;
+    private readonly Action<string>? _restartIntoNewVersion;
     /// <summary>カスタムCSSの作成補助を開く(仕様書 第2.10.1節 C-16)。実体は
     /// <see cref="PaneApplicationContext.OpenCssEditorWindow"/>。</summary>
     private readonly Action<Form>? _openCssEditor;
@@ -103,13 +103,13 @@ internal sealed class SettingsWindow : Form
         Form? owner,
         Action broadcastSettingsChanged,
         Func<bool>? hasUnsavedDocuments = null,
-        Action? shutdown = null,
+        Action<string>? restartIntoNewVersion = null,
         Action<Form>? openCssEditor = null)
     {
         Logger.Write("SettingsWindow: 生成開始");
         _broadcastSettingsChanged = broadcastSettingsChanged;
         _hasUnsavedDocuments = hasUnsavedDocuments;
-        _shutdown = shutdown;
+        _restartIntoNewVersion = restartIntoNewVersion;
         _openCssEditor = openCssEditor;
 
         Text = "Pane - 設定"; // ダイアログタイトルの区切り記法を統一(総点検)。他は"Pane - 復元の確認"(PaneApplicationContext.cs)
@@ -544,7 +544,7 @@ internal sealed class SettingsWindow : Form
                 _ = SettingsBridge.HandleApplyUpdateRequestAsync(
                     PostToWeb,
                     _hasUnsavedDocuments ?? (() => false),
-                    _shutdown ?? (() => { }));
+                    _restartIntoNewVersion ?? (newExe => UpdateService.StartNewVersion(newExe, UpdateRestartLogic.BuildArguments(Environment.ProcessId, stayResident: false, openWindows: true))));
                 break;
             // 「リリースページを開く」。開くURLはC#側が直前の確認で受け取った値だけを使う
             // (SettingsBridge.OpenReleasePage参照)。
