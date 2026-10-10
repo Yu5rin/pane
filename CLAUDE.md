@@ -121,7 +121,10 @@ cd C:\Users\YUGO\pane; Get-Process Pane -ErrorAction SilentlyContinue | Stop-Pro
    内部の用語（クラス名・メソッド名・HTTPの状態コードなど）は出さない。
    見出しは「## 変更点」から始め、最後に「## ダウンロード」の表を置く形で揃える
    （本文に何を書き、何を書かないかは次の「リリース本文とREADMEの分担」に従う）
-5. 公開はユーザーが行う。こちらから公開しない
+5. ワークフローが終わったら、下書きができたことと中身（サイズ・SHA256）を確かめ、
+   **下書きのURLを毎回添える**（`gh api repos/Yu5rin/pane/releases?per_page=1` の `html_url`。
+   下書きは `releases/tag/untagged-...` の形で、タグ名のURLでは開けない）
+6. 公開はユーザーが行う。こちらから公開しない
 
 ## リリース本文とREADMEの分担
 
