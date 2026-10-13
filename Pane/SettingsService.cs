@@ -23,8 +23,8 @@ internal static class SettingsService
     /// </summary>
     private static readonly object UpdateLock = new();
 
-    private static string SettingsDirectory => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Pane");
+    /// <summary>exeの隣の data(書き込めなければ %LOCALAPPDATA%\Pane)。<see cref="AppDataPaths"/>。</summary>
+    private static string SettingsDirectory => AppDataPaths.Root;
 
     private static string SettingsPath => Path.Combine(SettingsDirectory, "settings.json");
 

@@ -74,7 +74,7 @@ PRとmainへの変更では、同じものがCI（`.github/workflows/ci.yml`）�
 方針のため、確認も `dotnet publish` で作った `publish\Pane.exe` を起動して行う。
 
 ```powershell
-cd C:\Users\YUGO\pane; Get-Process Pane -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep -Milliseconds 500; git fetch origin claude/pane-phase-1-setup-87833g; git reset --hard FETCH_HEAD; npm install; Remove-Item -Recurse -Force dist,publish -ErrorAction SilentlyContinue; npm run build; if ($LASTEXITCODE -ne 0) { throw "npm run build に失敗しました。ここで止めます" }; dotnet publish Pane\Pane.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o publish; if ($LASTEXITCODE -ne 0) { throw "dotnet publish に失敗しました。ここで止めます" }; .\publish\Pane.exe
+cd C:\Users\YUGO\pane; Get-Process Pane -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep -Milliseconds 500; git fetch origin claude/pane-phase-1-setup-87833g; git reset --hard FETCH_HEAD; npm install; Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue; Get-ChildItem publish -ErrorAction SilentlyContinue | Where-Object Name -ne 'data' | Remove-Item -Recurse -Force; npm run build; if ($LASTEXITCODE -ne 0) { throw "npm run build に失敗しました。ここで止めます" }; dotnet publish Pane\Pane.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o publish; if ($LASTEXITCODE -ne 0) { throw "dotnet publish に失敗しました。ここで止めます" }; .\publish\Pane.exe
 ```
 
 - パス（`C:\Users\YUGO\pane`）は省略せず毎回そのまま書く
@@ -100,6 +100,11 @@ cd C:\Users\YUGO\pane; Get-Process Pane -ErrorAction SilentlyContinue | Stop-Pro
    Paneは常駐するため、ウィンドウを閉じてもプロセスが残る。残っていると
    `publish\Pane.exe` を上書きできず `GenerateBundle` が
    「being used by another process」で失敗する。終了は即座ではないので待ちを入れる。
+
+4. **`publish` は `data` を残して消す**（2026-10-13 に追加）
+   設定・ログ・カスタムCSS・自動保存は exe の隣の `data` に置く（仕様書 第7.1節）。
+   `publish` を丸ごと消すと、確認のたびに設定やカスタムCSSが消えて初期状態に戻る。
+   古い版のファイルを残さないよう、`data` 以外はこれまでどおり毎回消す
 
 ## リリースの手順
 

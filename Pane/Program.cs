@@ -9,7 +9,11 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
-        // 実機での不具合調査用ログ(%LOCALAPPDATA%\Pane\logs\)。ハンドルされない例外を
+        // 設定・ログなどの置き場所を最初に決める(exeの隣の data。初回は以前の場所から引き継ぐ)。
+        // ログの置き場所もこれで決まるので、ログを書くより前に行う(AppDataPaths参照)。
+        AppDataPaths.Initialize();
+
+        // 実機での不具合調査用ログ(exeの隣の data\logs\)。ハンドルされない例外を
         // JITデバッグダイアログだけでなくログにも残し、後から原因を追いやすくする。
         // Logger.Errorは書き込みを後回しにせずその場で出し切るため、直後にプロセスが
         // 落ちても記録が残る(Logger参照)。
@@ -29,6 +33,8 @@ internal static class Program
         Logger.Write($"=== Pane起動 args=[{string.Join(",", args.Select(PrivacyLogFormatter.ShortenPath))}] ===");
         Logger.Debug($"=== Pane起動(フルパス) args=[{string.Join(",", args)}] ===");
         LogProcessStartToMainElapsed();
+        AppDataPaths.FlushStartupNotes();
+        AppDataPaths.RepairCustomCssPath();
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
 
         // Shift_JIS(コードページ932)等のANSI系エンコーディングを使えるようにする。

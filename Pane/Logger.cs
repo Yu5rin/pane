@@ -146,9 +146,8 @@ internal static class Logger
     {
         try
         {
-            string dir = System.IO.Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Pane", "logs");
+            // exeの隣の data\logs(書き込めなければ %LOCALAPPDATA%\Pane\logs)。AppDataPaths参照。
+            string dir = AppDataPaths.LogsFolder;
             Directory.CreateDirectory(dir);
             return dir;
         }

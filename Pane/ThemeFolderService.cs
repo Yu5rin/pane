@@ -15,10 +15,8 @@ namespace Pane;
 /// </summary>
 internal static class ThemeFolderService
 {
-    /// <summary>カスタムCSSの既定フォルダのパス。%LOCALAPPDATA%\Pane\themes</summary>
-    public static string FolderPath { get; } = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "Pane", "themes");
+    /// <summary>カスタムCSSの既定フォルダのパス。exeの隣の data\themes(<see cref="AppDataPaths"/>)。</summary>
+    public static string FolderPath => AppDataPaths.ThemesFolder;
 
     /// <summary>
     /// フォルダが無ければ作成し、サンプルCSS(sample.css)が無ければ書き出す。
