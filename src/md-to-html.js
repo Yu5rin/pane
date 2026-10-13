@@ -147,8 +147,16 @@ export async function substituteImagePlaceholders(html, imagePlaceholders, resol
 function inlineHtml(doc, tree, from, to, opts) {
   let html = "";
   let pos = from;
-  const node = tree.resolve(from, 1);
-  const container = node.from <= from && node.to >= to ? node : tree.topNode;
+  // 範囲を真に包むいちばん内側のノードから辿る。範囲と同じ大きさのノード(「**`data`**」の
+  // 中身にあたるInlineCode等)を入れ物にすると、そのノード自身が子として出てこないため
+  // <code>にならない。逆に包まないノード(その先頭のCodeMark等)だった場合に以前は文書全体
+  // (topNode)から辿り直しており、外側のStrongEmphasisに再び出会って同じ範囲で
+  // inlineHtmlを呼び続け、スタックを使い切っていた(2026-10-13、取扱説明書に
+  // 「**`data` フォルダ**」と書いたら取扱説明書の画面が丸ごと表示されなくなった)。
+  let container = tree.resolve(from, 1);
+  while (container.parent && !(container.from <= from && container.to >= to && (container.from < from || container.to > to))) {
+    container = container.parent;
+  }
 
   function render(n) {
     let c = n.firstChild;
