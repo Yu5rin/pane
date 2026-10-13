@@ -1,7 +1,7 @@
 namespace Pane;
 
 /// <summary>
-/// アプリ全体の設定。%LOCALAPPDATA%\Pane\settings.json に永続化する(仕様書 第7.1節)。
+/// アプリ全体の設定。exeの隣の data\settings.json に永続化する(仕様書 第7.1節。AppDataPaths)。
 /// ウィンドウの位置・サイズは「アプリ全体で1つ」を記憶し、ファイルごとには持たない
 /// (Phase 3スコープ: 複数ウィンドウのカスケード配置の基準として使う)。
 ///

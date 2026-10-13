@@ -30,7 +30,7 @@ internal static class CssEditorSaveLogic
 
     /// <summary>保存先のフルパスを決める。</summary>
     /// <param name="currentCustomCssPath">設定のカスタムCSS(未指定なら null か空)。</param>
-    /// <param name="themeFolder">カスタムCSSフォルダ(%LOCALAPPDATA%\Pane\themes)。</param>
+    /// <param name="themeFolder">カスタムCSSフォルダ(exeの隣の data\themes)。</param>
     /// <param name="fileExists">ファイルがあるかを返す関数(File.Exists)。</param>
     internal static string DecideSavePath(string? currentCustomCssPath, string themeFolder, Func<string, bool> fileExists)
     {

@@ -24,8 +24,7 @@ internal static class AutoSaveService
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
-    private static string AutoSaveDirectory => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Pane", "autosave");
+    private static string AutoSaveDirectory => AppDataPaths.AutoSaveFolder;
 
     private static string SnapshotPath(Guid windowId) => Path.Combine(AutoSaveDirectory, $"{windowId:N}.json");
 

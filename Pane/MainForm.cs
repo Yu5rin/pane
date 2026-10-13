@@ -906,9 +906,8 @@ internal sealed class MainForm : Form
         {
             if (_cachedEnvironment is not null) return _cachedEnvironment;
 
-            string userDataFolder = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Pane", "WebView2");
+            // 運ぶ必要の無い作業用データなので、設定と違って %LOCALAPPDATA% に置く(AppDataPaths参照)。
+            string userDataFolder = AppDataPaths.WebView2Folder;
 
             // CreateAsyncが返ってこないと、ウィンドウが出ないまま無言で止まる。実機では
             // 更新直後の再起動でこれが起きたが、ログには「OnLoadAsync開始」までしか残らず

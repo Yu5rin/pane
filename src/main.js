@@ -60,7 +60,7 @@ const bridge = window.chrome?.webview ?? null;
 document.addEventListener("contextmenu", (e) => e.preventDefault(), true);
 
 // ---- 実機での不具合調査用ログ(仕様書外・デバッグ支援) ----
-// C#側のLogger(%LOCALAPPDATA%\Pane\logs\)へJS側のログもまとめて送る。DevTools(Shift+F12)を
+// C#側のLogger(exeの隣の data\logs\)へJS側のログもまとめて送る。DevTools(Shift+F12)を
 // 別途開かなくても、テキストファイル1つで両側の動きを追えるようにする。
 function logToHost(level, message) {
   console[level === "error" ? "error" : "log"](message);
