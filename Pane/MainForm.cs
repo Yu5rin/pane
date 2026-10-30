@@ -67,6 +67,9 @@ internal sealed class MainForm : Form
 
     private readonly WebView2 _webView = new();
     private readonly string? _initialPath;
+    /// <summary>起動時に開くファイル(<see cref="_initialPath"/>)をまだ読み込んでいない間だけtrue。
+    /// その間も「このファイルはこのウィンドウが開く」と答えられるようにする(<see cref="OpenPathsLogic"/>)。</summary>
+    private bool _initialPathPending;
     /// <summary>起動時の動作(startupBehavior)が"customFolder"のときに読み込むフォルダ。
     /// <see cref="PaneApplicationContext"/> から渡される。</summary>
     private readonly string? _initialFolderPath;
@@ -270,11 +273,8 @@ internal sealed class MainForm : Form
     /// </summary>
     public IReadOnlyList<string> GetOpenFilePaths()
     {
-        if (_tabInfos.Count > 0)
-        {
-            return _tabInfos.Where(t => t.Path is not null).Select(t => t.Path!).ToList();
-        }
-        return _currentPath is not null ? new List<string> { _currentPath } : Array.Empty<string>();
+        return OpenPathsLogic.Collect(
+            _tabInfos.Select(t => t.Path).ToList(), _currentPath, _initialPathPending ? _initialPath : null);
     }
 
     /// <summary>
@@ -318,6 +318,8 @@ internal sealed class MainForm : Form
         // している。通常の起動(windowId省略)では従来どおり新規採番する。
         WindowId = windowId ?? Guid.NewGuid();
         _initialPath = initialPath;
+        // 復元・ドロップのときは_initialPathを読まない(下の"ready"の分岐)ので、予定にも含めない。
+        _initialPathPending = initialPath is not null && recoverFrom is null && droppedFile is null;
         _initialFolderPath = initialFolderPath;
         _recoverFrom = recoverFrom;
         _droppedFile = droppedFile;
@@ -1470,6 +1472,7 @@ internal sealed class MainForm : Form
             switch (type)
             {
             case "ready":
+                _initialPathPending = false;
                 PostCapabilities();
                 PostWindowState();
                 if (_recoverFrom is not null) RestoreFromSnapshot(_recoverFrom);
