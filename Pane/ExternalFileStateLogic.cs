@@ -74,4 +74,27 @@ internal static class ExternalFileStateLogic
             + "\nこのまま保存すると、同じ名前で新しく作成されます。"
             + "\n保存しますか?";
     }
+
+    /// <summary>
+    /// ファイルの変更を検知したときに「他のアプリケーションによって変更されました」と尋ねるか。
+    ///
+    /// 【実機で起きたこと】2026-11 のログで、Outlook の添付ファイルや Edge でダウンロードした
+    /// ファイルを開いた直後、またデスクトップのファイルを保存した直後に、中身は何も変わって
+    /// いないのにこの確認が出ていた。監視は書き込み時刻・大きさ・属性の変化を拾うので、
+    /// 開いた側のアプリが読み取り専用の印を付けた、ウイルス対策が調べた、といった
+    /// 中身と関係のない変化でも知らせてしまう。
+    /// 開いたとき(保存したとき)の中身の指紋を覚えておき、今の中身と同じなら尋ねない。
+    /// 指紋が無いとき・読めなかったとき・別のファイルのものしか無いときは、これまでどおり尋ねる。
+    /// </summary>
+    /// <param name="knownPath">指紋を取ったファイル。</param>
+    /// <param name="knownHash">そのときの中身の指紋。</param>
+    /// <param name="currentPath">今開いているファイル。</param>
+    /// <param name="currentHash">今の中身の指紋。読めなかったらnull。</param>
+    internal static bool ShouldAskAboutExternalChange(
+        string? knownPath, byte[]? knownHash, string currentPath, byte[]? currentHash)
+    {
+        if (knownPath is null || knownHash is null || currentHash is null) return true;
+        if (!string.Equals(knownPath, currentPath, StringComparison.OrdinalIgnoreCase)) return true;
+        return !knownHash.AsSpan().SequenceEqual(currentHash);
+    }
 }

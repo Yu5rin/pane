@@ -25,7 +25,12 @@ internal sealed record LoadResult(
     string Text,
     FileEncodingKind Encoding,
     LineEndingKind LineEnding,
-    bool HasTrailingNewline);
+    bool HasTrailingNewline)
+{
+    /// <summary>読み込んだ中身の指紋(SHA-256)。ファイルから読んだときだけ入る。
+    /// 中身の変わらない外部の変化で「変更されました」と尋ねないために使う(ExternalFileStateLogic)。</summary>
+    public byte[]? ContentHash { get; init; }
+}
 
 /// <summary>
 /// ファイルI/O(読み書き・文字コード判定・改行コード判定・アトミック保存)。
@@ -43,7 +48,8 @@ internal static class TextFileService
         // 同期フォルダ、ウイルス対策ソフトの介在)。閾値を超えたときだけ記録が残る。
         using (PerfWatch.Start($"ファイルの読み込み: {Path.GetFileName(path)}"))
         {
-            return LoadBytes(File.ReadAllBytes(path));
+            byte[] bytes = File.ReadAllBytes(path);
+            return LoadBytes(bytes) with { ContentHash = System.Security.Cryptography.SHA256.HashData(bytes) };
         }
     }
 
@@ -72,7 +78,8 @@ internal static class TextFileService
     /// <summary>
     /// 一時ファイル経由でアトミックに保存する。書き込み失敗時は原本を変更しない。
     /// </summary>
-    public static void SaveAtomic(
+    /// <returns>書き込んだ中身の指紋(SHA-256)。</returns>
+    public static byte[] SaveAtomic(
         string path,
         string editorText,
         FileEncodingKind encoding,
@@ -107,6 +114,7 @@ internal static class TextFileService
         }
 
         VerifySavedSize(path, bytes.Length, editorText.Length);
+        return System.Security.Cryptography.SHA256.HashData(bytes);
     }
 
     /// <summary>

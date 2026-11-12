@@ -67,6 +67,10 @@ internal sealed class MainForm : Form
 
     private readonly WebView2 _webView = new();
     private readonly string? _initialPath;
+    /// <summary>開いたとき・保存したときの中身の指紋と、そのファイル。中身が変わっていない外部の変化では
+    /// 「他のアプリケーションによって変更されました」と尋ねないために使う(ExternalFileStateLogic)。</summary>
+    private string? _knownContentPath;
+    private byte[]? _knownContentHash;
     /// <summary>起動時に開くファイル(<see cref="_initialPath"/>)をまだ読み込んでいない間だけtrue。
     /// その間も「このファイルはこのウィンドウが開く」と答えられるようにする(<see cref="OpenPathsLogic"/>)。</summary>
     private bool _initialPathPending;
@@ -2243,9 +2247,11 @@ internal sealed class MainForm : Form
 
         try
         {
+            byte[] savedHash = Array.Empty<byte>();
             SuppressWatcherDuring(() =>
-                TextFileService.SaveAtomic(targetPath, text, _currentEncoding, _currentLineEnding, _hasTrailingNewline));
+                savedHash = TextFileService.SaveAtomic(targetPath, text, _currentEncoding, _currentLineEnding, _hasTrailingNewline));
             _currentPath = targetPath;
+            RememberKnownContent(targetPath, savedHash);
             _isReadOnly = false;
             SetDirty(false);
             AutoSaveService.DeleteSnapshot(WindowId);
@@ -2310,6 +2316,7 @@ internal sealed class MainForm : Form
         {
             LoadResult result = TextFileService.Load(path);
             _currentPath = path;
+            RememberKnownContent(path, result.ContentHash);
             _currentEncoding = result.Encoding;
             _currentLineEnding = result.LineEnding;
             _hasTrailingNewline = result.HasTrailingNewline;
@@ -3589,6 +3596,19 @@ internal sealed class MainForm : Form
         }));
     }
 
+    private void RememberKnownContent(string path, byte[]? hash)
+    {
+        _knownContentPath = path;
+        _knownContentHash = hash;
+    }
+
+    /// <summary>今のファイルの中身の指紋。読めなければnull(そのときはこれまでどおり尋ねる)。</summary>
+    private static byte[]? TryHashFile(string path)
+    {
+        try { return System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(path)); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
+    }
+
     private void OnExternalChangeDebounceElapsed(object? sender, EventArgs e)
     {
         if (IsDisposed) return; // Form破棄後にTickが走った場合の保険(FormClosedで基本は止めているが念のため)
@@ -3616,6 +3636,15 @@ internal sealed class MainForm : Form
         }
         if (!_externalChangePending || _currentPath is null) return;
         _externalChangePending = false;
+
+        // 中身が開いたとき(保存したとき)のままなら尋ねない。属性や時刻だけの変化
+        // (開いた側のアプリの読み取り専用の印、ウイルス対策の検査など)で確認を出していた。
+        if (!ExternalFileStateLogic.ShouldAskAboutExternalChange(
+                _knownContentPath, _knownContentHash, _currentPath, TryHashFile(_currentPath)))
+        {
+            Logger.Write($"OnExternalChangeDebounceElapsed: 変化を検知したが中身は同じため知らせない ({PrivacyLogFormatter.ShortenPath(_currentPath)})");
+            return;
+        }
 
         // (B) 前回このファイルで「いいえ」を選んでいれば、次に自分が保存する/別のファイルを
         // 開くまで(_suppressedExternalChangePathの解除はStartWatching/StopWatching参照)、
