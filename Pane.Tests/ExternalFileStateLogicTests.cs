@@ -118,4 +118,30 @@ public class ExternalFileStateLogicTests
             }
         }
     }
+
+    // ---- 中身の変わらない変化では「変更されました」と尋ねない(2026-11 の実機ログ) ----
+    // Outlook の添付や Edge のダウンロードを開いた直後、保存した直後に、中身は同じなのに確認が出ていた。
+
+    private static readonly byte[] 指紋A = { 1, 2, 3 };
+    private static readonly byte[] 指紋B = { 1, 2, 4 };
+
+    [Fact]
+    public void 中身が同じなら尋ねない()
+    {
+        Assert.False(ExternalFileStateLogic.ShouldAskAboutExternalChange(@"C:\a.txt", 指紋A, @"c:\A.TXT", new byte[] { 1, 2, 3 }));
+    }
+
+    [Fact]
+    public void 中身が変わっていれば尋ねる()
+    {
+        Assert.True(ExternalFileStateLogic.ShouldAskAboutExternalChange(@"C:\a.txt", 指紋A, @"C:\a.txt", 指紋B));
+    }
+
+    [Fact]
+    public void 指紋が無い_読めない_別のファイルのものしか無いときはこれまでどおり尋ねる()
+    {
+        Assert.True(ExternalFileStateLogic.ShouldAskAboutExternalChange(null, null, @"C:\a.txt", 指紋A));
+        Assert.True(ExternalFileStateLogic.ShouldAskAboutExternalChange(@"C:\a.txt", 指紋A, @"C:\a.txt", null));
+        Assert.True(ExternalFileStateLogic.ShouldAskAboutExternalChange(@"C:\b.txt", 指紋A, @"C:\a.txt", 指紋A));
+    }
 }
