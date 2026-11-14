@@ -1203,8 +1203,18 @@ function openLanguagePicker(onChoose) {
   filter();
   input.focus();
 }
+// モードの表示を押したとき。コードモードでは言語を選ぶ一覧を開く(これまでどおり)。
+// Markdown・プレーンテキストでは、以前は押しても何も起きなかった(隣の文字コード・改行コードは
+// 押すとメニューが出るのに、ここだけ反応が無い。2026-11 の点検)。モードを選ぶメニューを出す。
 statusMode.addEventListener("click", () => {
-  if (editor.getMode() === "code") openLanguagePicker();
+  if (editor.getMode() === "code") { openLanguagePicker(); return; }
+  const rect = statusMode.getBoundingClientRect();
+  const mode = editor.getMode();
+  showContextMenu(ctx, rect.left, rect.bottom, [
+    { label: "Markdown", checked: mode === "markdown", run: () => ctx.actions.setMode("markdown") },
+    { label: "プレーンテキスト", checked: mode === "plain", run: () => ctx.actions.setMode("plain") },
+    { label: "コード", checked: false, run: () => ctx.actions.setMode("code") },
+  ]);
 });
 function updateWrapButton() {
   setStatusFitText("wrap", wordWrapOn ? "折り返し: あり" : "折り返し: なし");
@@ -1282,6 +1292,8 @@ window.addEventListener("beforeprint", enterExportLayout);
 window.addEventListener("afterprint", exitExportLayout);
 
 const editor = createEditor(host, {
+  // 裏の解析が進んだら、アウトラインを描き直す(sidebar.js側でまとめて1回にする)。
+  onTreeGrew() { sidebar.refresh(); },
   onChange() {
     // 実機不具合の修正: 以前はここで無条件にsetDirty(true)していたため、入力してから
     // Ctrl+Z等で元の内容にぴったり戻しても「未保存」表示が残ったままだった。
@@ -2177,6 +2189,9 @@ function renderTabs() {
   if (!tabbarEl) return;
   tabbarEl.hidden = displayMode !== "tab";
   if (tabbarEl.hidden) return;
+  // 作り直すと横スクロールの位置が先頭へ戻る。タブが多いと、今いるタブがタブバーの外へ出て
+  // 見えなくなっていた(2026-11 の点検)。位置を覚えておいて戻し、今いるタブは必ず見える所へ寄せる。
+  const prevScrollLeft = tabbarListEl.scrollLeft;
   tabbarListEl.innerHTML = "";
   for (const tab of tabs) {
     const el = document.createElement("div");
@@ -2250,6 +2265,8 @@ function renderTabs() {
 
     tabbarListEl.appendChild(el);
   }
+  tabbarListEl.scrollLeft = prevScrollLeft;
+  tabbarListEl.querySelector(".tab-item.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
 function clearTabDragOverClasses() {
   tabbarListEl.querySelectorAll(".drag-over-before, .drag-over-after")

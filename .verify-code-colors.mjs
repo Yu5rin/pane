@@ -173,6 +173,15 @@ function checkJsDistinct(prefix, tk, paperBg, codeBg, themeLabel) {
     ok(`${prefix} ${name}が背景に埋もれていない(vsPaper=${rP?.toFixed(2)} vsCodeBg=${rC?.toFixed(2)})`,
       rP != null && rC != null && rP >= 3.0 && rC >= 3.0);
   }
+  // コメントも読める(4.5:1以上、paper・code-bg両方)。以前はコメントだけ検査から外しており、
+  // nord 1.7 / night 2.3 / solarized-dark 2.8 / dracula 3.0 のまま通っていた(2026-11 の点検)。
+  // コメントは細い斜体の普通の大きさの文字なので、大きな文字向けの 3:1 では足りない。
+  {
+    const rP = contrastRatio(tk.cmt, paperBg);
+    const rC = contrastRatio(tk.cmt, codeBg);
+    ok(`${prefix} コメントが読める(vsPaper=${rP?.toFixed(2)} vsCodeBg=${rC?.toFixed(2)}、要求4.5以上)`,
+      rP != null && rC != null && rP >= 4.5 && rC >= 4.5);
+  }
 }
 
 const JSON_DOC = "```json\n{\n  \"port\": 3000,\n  \"name\": \"pane\"\n}\n```\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n";

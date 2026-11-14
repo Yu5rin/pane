@@ -158,11 +158,28 @@ internal static class Program
         // 設定ウィンドウが必要とする重い情報を、要求される前に用意しておく。
         Task.Run(WarmUpForSettingsWindow);
 
-        var context = new PaneApplicationContext(initialPath, preload, stayResident);
-
+        // 2つ目以降の起動からの要求を受ける口は、最初のウィンドウを作るより前に開けておく。
+        // 以前は PaneApplicationContext を作り終えてから開けていた。2つ目の起動は、口が開くのを
+        // 2秒だけ待ち、開かなければ「先にいるプロセスは応答しない」とみなして自分も本体として
+        // 立ち上がる。起動が重いとき(冷えた状態・ウイルス対策の検査中)に、エクスプローラーで
+        // 2つのファイルを選んで開くと、この2秒を超えてプロセスが2つになり、プロセスは常に1つ
+        // (仕様書 第8.1節)が崩れていた(2026-11 の点検)。
+        // 口を先に開けるので、PaneApplicationContext ができる前に要求が届くことがある
+        // (作っている途中でダイアログが出て、メッセージが処理される場合)。その間の要求は控えておき、
+        // できてから開く。
+        PaneApplicationContext? context = null;
+        var requestedBeforeReady = new List<string?>();
         var server = new SingleInstanceServer(SynchronizationContext.Current!);
-        server.FileRequested += path => context.OpenWindowFromPipeRequest(path);
+        server.FileRequested += path =>
+        {
+            if (context is null) { requestedBeforeReady.Add(path); return; }
+            context.OpenWindowFromPipeRequest(path);
+        };
         server.Start();
+
+        context = new PaneApplicationContext(initialPath, preload, stayResident);
+        foreach (string? path in requestedBeforeReady) context.OpenWindowFromPipeRequest(path);
+        requestedBeforeReady.Clear();
 
         Application.Run(context);
 

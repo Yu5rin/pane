@@ -332,7 +332,10 @@ function comboFromEvent(e) {
   if (e.ctrlKey || e.metaKey) parts.push("Ctrl");
   if (e.shiftKey) parts.push("Shift");
   if (e.altKey) parts.push("Alt");
-  const key = SYMBOL_CODE_REVERSE[e.code] ?? (e.key.length === 1 ? e.key.toUpperCase() : e.key);
+  // 数字はすべて物理キーから読む(commands.js の matchesShortcut と同じ理由。Shiftを押していると
+  // e.key は「!」などの記号になり、「Ctrl+Shift+!」という一致しない組み合わせが登録されていた)。
+  const digit = /^(?:Digit|Numpad)([0-9])$/.exec(e.code);
+  const key = digit ? digit[1] : SYMBOL_CODE_REVERSE[e.code] ?? (e.key.length === 1 ? e.key.toUpperCase() : e.key);
   if (!key) return null;
   parts.push(key);
   return parts.join("+");

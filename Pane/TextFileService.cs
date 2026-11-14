@@ -42,13 +42,29 @@ internal static class TextFileService
     private static readonly byte[] Utf16LeBomBytes = { 0xFF, 0xFE };
     private static readonly byte[] Utf16BeBomBytes = { 0xFE, 0xFF };
 
+    /// <summary>
+    /// 他のアプリケーションが書き込みのために開いているファイルも読む。
+    /// File.ReadAllBytes は「他の誰も書き込んでいない」ことを求めるので、書き込み中のログや、
+    /// 別のアプリケーションが開いたままにしているファイルが「使用中」で開けなかった(2026-11 の点検)。
+    /// 読むだけなので、相手の書き込み・削除・名前の変更を妨げない形で開く。
+    /// </summary>
+    internal static byte[] ReadAllBytesShared(string path)
+    {
+        using var stream = new FileStream(
+            path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete,
+            bufferSize: 81920, FileOptions.SequentialScan);
+        using var memory = new MemoryStream(stream.CanSeek ? (int)Math.Min(stream.Length, int.MaxValue / 2) : 0);
+        stream.CopyTo(memory);
+        return memory.ToArray();
+    }
+
     public static LoadResult Load(string path)
     {
         // 読み込みが遅いのはファイルが大きいときだけとは限らない(ネットワークドライブ、
         // 同期フォルダ、ウイルス対策ソフトの介在)。閾値を超えたときだけ記録が残る。
         using (PerfWatch.Start($"ファイルの読み込み: {Path.GetFileName(path)}"))
         {
-            byte[] bytes = File.ReadAllBytes(path);
+            byte[] bytes = ReadAllBytesShared(path);
             return LoadBytes(bytes) with { ContentHash = System.Security.Cryptography.SHA256.HashData(bytes) };
         }
     }

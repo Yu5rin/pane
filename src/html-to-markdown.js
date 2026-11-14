@@ -49,6 +49,34 @@ function inline(node) {
   return out;
 }
 
+// 中にあれば「入れ物」とみなすブロック要素。
+const BLOCK_TAGS = "p,div,h1,h2,h3,h4,h5,h6,ul,ol,table,pre,blockquote,hr,section,article";
+
+// リストを行の並びにする。入れ子のリストは、親の項目の下へ字下げして続ける。
+// 以前は項目の中身をすべて1行のインラインとして読んでいたので、入れ子のリストが親の項目の
+// 文字とつながって「親子1子2」のような1行になっていた(2026-11 の点検)。
+function listLines(listEl, depth) {
+  const ordered = listEl.tagName.toLowerCase() === "ol";
+  const indent = "  ".repeat(depth * 2); // 番号付きの下でも入れ子と認識されるよう、1段につき4つ
+  const lines = [];
+  let n = 1;
+  for (const li of listEl.children) {
+    if (li.tagName.toLowerCase() !== "li") continue;
+    // 項目自身の文字(入れ子のリストを除いた部分)と、入れ子のリストとを分ける。
+    const own = li.cloneNode(true);
+    for (const nested of [...own.querySelectorAll("ul,ol")]) nested.remove();
+    const text = inline(own).replace(/\s*\n\s*/g, " ").trim();
+    lines.push(`${indent}${ordered ? `${n++}. ` : "- "}${text}`);
+    for (const nested of li.children) {
+      const t = nested.tagName.toLowerCase();
+      if (t === "ul" || t === "ol") lines.push(...listLines(nested, depth + 1));
+      // p や div に包まれた入れ子のリスト(Wordなど)も拾う。
+      else for (const deep of nested.querySelectorAll(":scope > ul, :scope > ol")) lines.push(...listLines(deep, depth + 1));
+    }
+  }
+  return lines;
+}
+
 function block(node, out, ctx) {
   for (const child of node.childNodes) {
     if (child.nodeType === Node.TEXT_NODE) {
@@ -60,6 +88,11 @@ function block(node, out, ctx) {
     const tag = child.tagName.toLowerCase();
     const m = tag.match(/^h([1-6])$/);
     if (m) { out.push(`${"#".repeat(Number(m[1]))} ${inline(child).trim()}`); continue; }
+    // div は、中にブロック(段落・見出し・リスト・表など)を持つなら入れ物として中へ降りる。
+    // 以前は p と同じく1つの段落として扱っていたので、Webページやメールの本文
+    // (全体が div で包まれている)を貼ると、段落も見出しもリストもつながった1行になっていた
+    // (2026-11 の点検)。文字とインライン要素だけの div は、従来どおり1つの段落。
+    if (tag === "div" && child.querySelector(BLOCK_TAGS)) { block(child, out, ctx); continue; }
     if (tag === "p" || tag === "div") { const t = inline(child).trim(); if (t) out.push(t); continue; }
     if (tag === "blockquote") {
       const inner = []; block(child, inner, ctx);
@@ -72,21 +105,17 @@ function block(node, out, ctx) {
       continue;
     }
     if (tag === "ul" || tag === "ol") {
-      // 【実際に落ちたこと】以前は項目を1つずつoutへpushしていた。outは最後に "\n\n" で
-      // 連結されるため、項目の間に空行が入って「ゆるいリスト」(各項目が段落として描かれる)に
-      // なっていた。表と同じく、リストは1つのブロックとしてまとめてから積む。
-      let i = 1;
-      const items = [];
-      for (const li of child.children) {
-        if (li.tagName.toLowerCase() !== "li") continue;
-        const prefix = tag === "ol" ? `${i++}. ` : "- ";
-        items.push(prefix + inline(li).trim());
-      }
+      // リストは1つのブロックとしてまとめてから積む(項目を1つずつ積むと、間に空行が入って
+      // 各項目が段落として描かれる「ゆるいリスト」になる)。
+      const items = listLines(child, 0);
       if (items.length) out.push(items.join("\n"));
       continue;
     }
     if (tag === "table") {
-      const rows = [...child.querySelectorAll("tr")].map((tr) => [...tr.children].map((c) => inline(c).trim()));
+      // セルの中の「|」は「\|」にし、改行は空白にする。そのままだと列の区切りや行の区切りとして
+      // 読まれて、表が崩れる(2026-11 の点検)。
+      const cell = (c) => inline(c).replace(/\s*\n\s*/g, " ").replace(/\|/g, "\\|").trim();
+      const rows = [...child.querySelectorAll("tr")].map((tr) => [...tr.children].map(cell));
       if (rows.length) {
         const cols = rows[0].length;
         out.push([

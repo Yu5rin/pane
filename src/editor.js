@@ -900,6 +900,16 @@ const livePreview = ViewPlugin.fromClass(class {
     requestAnimationFrame(() => { if (!view.destroyed) view.dispatch({ effects: [] }); });
   }
   update(u) {
+    // 日本語入力の変換中は作り直さず、今ある装飾の位置だけを文書の変更に合わせてずらす。
+    // 変換中に作り直すと、未確定の文字が入るたびに、カーソルの隣にある記法(** や ` など)の
+    // 表示/非表示やウィジェットが差し替わる。ブラウザは変換中の文字を置いているDOMを見失い、
+    // 確定した文字が記法の内側に入ったり、消えたり、二重になったりした(2026-11 の点検。
+    // 「これは**太字**」の直後で変換すると「これは**太字日本語**」になった)。
+    // 確定したあとの作り直しは、createEditor の compositionend が空の更新を流して起こす。
+    if (u.view.composing || u.view.compositionStarted) {
+      if (u.docChanged) this.decorations = this.decorations.map(u.changes);
+      return;
+    }
     if (u.docChanged || u.selectionSet || u.viewportChanged || u.focusChanged || u.transactions.length)
       this.decorations = this.build(u.view);
   }
@@ -1182,7 +1192,15 @@ const livePreview = ViewPlugin.fromClass(class {
               // depthぶんのマーカーをまとめて隠す(内側の">"も含めて画面に見えないようにする)
               marks.push({ from: line.from, to: line.from + consumed, deco: Decoration.replace({}) });
             }
-            const cls = calloutType ? `tok-quote cm-callout cm-callout-${calloutType}` : "tok-quote";
+            // Calloutの帯と背景は、行そのもの(Decoration.line)に付ける。以前は行の中のspanを
+            // display:block にして付けていたため、題名の行(ウィジェットに置き換わる)には帯が付かず、
+            // 本文の行はspanの外に行の高さが残って、題名と本文が離れた別々の部品に見えていた
+            // (2026-11 の点検)。行に付ければ、題名から最後の行までが1つの箱としてつながる。
+            if (calloutType) {
+              const edge = (ln === markerLn ? " cm-callout-first" : "") + (ln === lastLn ? " cm-callout-last" : "");
+              marks.push({ from: line.from, to: line.from, deco: Decoration.line({ class: `cm-callout-line cm-callout-${calloutType}${edge}` }), line: true });
+            }
+            const cls = calloutType ? "tok-quote cm-callout" : "tok-quote";
             if (depth >= 2) {
               // 2段目以降は深さに応じて左の罫線を重ねて表示する(仕様書 M-03)。
               // .tok-quote のborder-leftは1本分の見た目のため、多段では
@@ -1585,11 +1603,39 @@ function handleEnter(view) {
 
 // 本体向けAPI: エディタを生成して操作関数を返す
 // ---- Markdownテーブル ----
+// 表の行の中で、セルの区切りになっている「|」の位置。「\|」(セルの中に書いた縦線)は区切りではない。
+//
+// 2026-11 の点検まで、行を単純に「|」で割っていた。セルに「a \| b」と書いた表は、カーソルが
+// 表を離れたときの自動整形で列が1つ増えた形に書き換えられ、保存すると元に戻せなかった。
+// 構文木(lezer-markdown)とGFMの仕様はどちらも「\|」だけをセル内の縦線として扱うので、
+// それに合わせる(コードの中の「|」は、GFMでも区切りとして扱われる)。
+// セルを割る・セルの位置を求める・何列目にいるかを数える、のすべてでこの1つを使うこと。
+function cellSeparators(text) {
+  const out = [];
+  for (let i = 0; i < text.length; i++) {
+    const ch = text.charCodeAt(i);
+    if (ch === 92 /* \ */) { i++; continue; }
+    if (ch === 124 /* | */) out.push(i);
+  }
+  return out;
+}
+// 行頭からその位置までに区切りがいくつあるか(=何列目にいるかの元)。
+function separatorsBefore(lineText, offset) {
+  let n = 0;
+  for (const p of cellSeparators(lineText)) { if (p < offset) n++; else break; }
+  return n;
+}
 function splitCells(t) {
-  let s = t.trim();
-  if (s.startsWith("|")) s = s.slice(1);
-  if (s.endsWith("|")) s = s.slice(0, -1);
-  return s.split("|").map(c => c.trim());
+  const s = t.trim();
+  const seps = cellSeparators(s);
+  const cells = [];
+  let start = 0;
+  for (const p of seps) { cells.push(s.slice(start, p)); start = p + 1; }
+  cells.push(s.slice(start));
+  // 行頭・行末の「|」の外側にできる空の要素は、セルではない。
+  if (seps.length && seps[0] === 0) cells.shift();
+  if (seps.length && seps[seps.length - 1] === s.length - 1 && cells.length) cells.pop();
+  return cells.map(c => c.trim());
 }
 // 構文木のTableノード(from/toを持つオブジェクト)から表データを組み立てる
 function tableFromNode(state, node) {
@@ -1650,6 +1696,7 @@ const escHtml = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>
 // セル内インライン記法(太字/斜体/打消/ハイライト/コード/リンク/内部リンク)のみ対応
 function renderInline(s) {
   let h = escHtml(s);
+  h = h.replace(/\\\|/g, "|"); // 「\|」はセルの中の縦線。表示では「|」だけにする
   h = h.replace(/`([^`]+)`/g, "<code>$1</code>");
   h = h.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
   h = h.replace(/\*([^*]+)\*/g, "<i>$1</i>");
@@ -1661,9 +1708,12 @@ function renderInline(s) {
 // 生テキスト上のセル位置(行内のc番目セルの末尾)を求める
 function cellPos(state, t, rowIdx, c) {
   const line = state.doc.line(t.startLine + rowIdx);
-  let i = line.text.indexOf("|") + 1, cell = 0;
-  while (cell < c) { const p = line.text.indexOf("|", i); if (p < 0) break; i = p + 1; cell++; }
-  let j = line.text.indexOf("|", i); if (j < 0) j = line.text.length;
+  // 区切りは cellSeparators で数える(「\|」を区切りと数えると、隣のセルを選んでしまう)。
+  const seps = cellSeparators(line.text);
+  const lead0 = seps.length && line.text.slice(0, seps[0]).trim() === "" ? 1 : 0; // 行頭の「|」の分
+  const startSep = seps[lead0 + c - 1];
+  const i = lead0 + c === 0 ? 0 : (startSep === undefined ? (seps.length ? seps[seps.length - 1] + 1 : 0) : startSep + 1);
+  let j = seps.find((p) => p >= i); if (j === undefined) j = line.text.length;
   const seg = line.text.slice(i, j);
   const lead = seg.match(/^\s*/)[0].length, trail = seg.match(/\s*$/)[0].length;
   return { from: line.from + i + lead, to: line.from + j - trail };
@@ -1859,13 +1909,13 @@ function remapTableBlocks(tables, tr) {
 const tableBlocksField = StateField.define({
   create: (state) => findAllTables(state),
   update: (v, tr) => {
-    if (!tr.docChanged) return v;
+    if (!tr.docChanged) return syntaxTreeGrew(tr) ? findAllTables(tr.state) : v;
     return blockListNeedsRecompute(v, tr, ["|"]) ? findAllTables(tr.state) : remapTableBlocks(v, tr);
   },
 });
 const tableField = StateField.define({
   create: (state) => buildTableDeco(state, state.field(tableBlocksField)),
-  update: (v, tr) => (tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect)))
+  update: (v, tr) => (blocksChanged(tr, tableBlocksField) || tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect)))
     ? buildTableDeco(tr.state, tr.state.field(tableBlocksField))
     : v,
   provide: (f) => EditorView.decorations.from(f),
@@ -1902,7 +1952,7 @@ function findTocParagraphs(state) {
 const tocParasField = StateField.define({
   create: (state) => findTocParagraphs(state),
   update: (v, tr) => {
-    if (!tr.docChanged) return v;
+    if (!tr.docChanged) return syntaxTreeGrew(tr) ? findTocParagraphs(tr.state) : v;
     return blockListNeedsRecompute(v, tr, ["toc"]) ? findTocParagraphs(tr.state) : remapBlockRanges(v, tr.changes);
   },
 });
@@ -1920,7 +1970,7 @@ function buildTocDeco(state, paras) {
 }
 const tocField = StateField.define({
   create: (state) => buildTocDeco(state, state.field(tocParasField)),
-  update: (v, tr) => (tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect)))
+  update: (v, tr) => (blocksChanged(tr, tocParasField) || syntaxTreeGrew(tr) || tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect)))
     ? buildTocDeco(tr.state, tr.state.field(tocParasField))
     : v,
   provide: (f) => EditorView.decorations.from(f),
@@ -1968,6 +2018,22 @@ function windowContainsTrigger(doc, from, to, pad, triggers) {
   const wTo = Math.min(doc.length, to + pad);
   const text = doc.sliceString(wFrom, wTo).toLowerCase();
   return triggers.some((s) => text.includes(s));
+}
+// 構文木が、文書の変更なしに先へ伸びたか。
+// CodeMirrorは文書を作った時点では先頭の約3,000文字までしか解析せず、残りは裏で少しずつ進める。
+// その進み具合は文書の変更ではないので、tr.docChanged だけを見て作り直す一覧(表・[toc]・Mermaid・
+// ```math・生HTML)は、開いたときに解析が届いていた範囲までしか拾えなかった。開いた文書の後半にある
+// 表が記法のまま表示され、クリックしても直らなかった(2026-11 の点検。.verify-late-blocks.mjs)。
+// 木の長さが伸びたときだけ作り直すので、解析が済んだあとの入力では余計な走査は増えない。
+// 一覧(表・目次・図・生HTML)が作り直されたか。切り替えの前後どちらかの状態に一覧が無いことがある
+// (Markdownとコードモードの切り替えで、ライブプレビューの拡張ごと付け外しされる)ので、
+// 無ければ undefined として比べる。field() をそのまま呼ぶと「Field is not present in this state」で
+// 落ち、モードの切り替えが途中で止まる(後半の表が描画されない不具合を直した直後に、自分で入れた誤り)。
+function blocksChanged(tr, field) {
+  return tr.state.field(field, false) !== tr.startState.field(field, false);
+}
+function syntaxTreeGrew(tr) {
+  return syntaxTree(tr.state).length > syntaxTree(tr.startState).length;
 }
 function blockListNeedsRecompute(existing, tr, triggers) {
   const allTriggers = triggers.length ? [...triggers, ...FENCE_MARK_TRIGGERS] : FENCE_MARK_TRIGGERS;
@@ -2090,7 +2156,7 @@ const mermaidBlocksField = StateField.define({
   // 文書サイズに比例するコストがかかるため、Mermaidフェンスと無関係な変更(既存ブロックに
   // 触れず"```"も"mermaid"も挿入されない)では辿り直さない(§8.2・第8.4節、mathBlocksFieldと同じ考え方)。
   update: (v, tr) => {
-    if (!tr.docChanged) return v;
+    if (!tr.docChanged) return syntaxTreeGrew(tr) ? findMermaidBlocks(tr.state) : v;
     return blockListNeedsRecompute(v, tr, ["```", "mermaid"]) ? findMermaidBlocks(tr.state) : remapBlockRanges(v, tr.changes);
   },
 });
@@ -2113,7 +2179,7 @@ function buildMermaidBlockDeco(state, blocks) {
 }
 const mermaidBlockDecoField = StateField.define({
   create: (state) => buildMermaidBlockDeco(state, state.field(mermaidBlocksField)),
-  update: (v, tr) => (tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect) || e.is(themeRefreshEffect) || e.is(setExtToggles)))
+  update: (v, tr) => (blocksChanged(tr, mermaidBlocksField) || tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect) || e.is(themeRefreshEffect) || e.is(setExtToggles)))
     ? buildMermaidBlockDeco(tr.state, tr.state.field(mermaidBlocksField))
     : v,
   provide: (f) => EditorView.decorations.from(f),
@@ -2149,7 +2215,7 @@ const codeMathBlocksField = StateField.define({
   // mermaidBlocksFieldと同じ考え方(§8.2・第8.4節): ```mathフェンスと無関係な変更では
   // 構文木を辿り直さない。
   update: (v, tr) => {
-    if (!tr.docChanged) return v;
+    if (!tr.docChanged) return syntaxTreeGrew(tr) ? findCodeMathBlocks(tr.state) : v;
     return blockListNeedsRecompute(v, tr, ["```", "math"]) ? findCodeMathBlocks(tr.state) : remapBlockRanges(v, tr.changes);
   },
 });
@@ -2167,7 +2233,7 @@ function buildCodeMathBlockDeco(state, blocks) {
 }
 const codeMathBlockDecoField = StateField.define({
   create: (state) => buildCodeMathBlockDeco(state, state.field(codeMathBlocksField)),
-  update: (v, tr) => (tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect) || e.is(setExtToggles)))
+  update: (v, tr) => (blocksChanged(tr, codeMathBlocksField) || tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect) || e.is(setExtToggles)))
     ? buildCodeMathBlockDeco(tr.state, tr.state.field(codeMathBlocksField))
     : v,
   provide: (f) => EditorView.decorations.from(f),
@@ -2438,7 +2504,7 @@ const htmlBlocksField = StateField.define({
   // 開始行は必ず"<"を含むため、それが挿入されず既存ブロックにも触れない変更では
   // 構文木を辿り直さない。
   update: (v, tr) => {
-    if (!tr.docChanged) return v;
+    if (!tr.docChanged) return syntaxTreeGrew(tr) ? findHtmlBlocks(tr.state) : v;
     return blockListNeedsRecompute(v, tr, ["<"]) ? findHtmlBlocks(tr.state) : remapBlockRanges(v, tr.changes);
   },
 });
@@ -2463,7 +2529,7 @@ const htmlBlockDecoField = StateField.define({
   create: (state) => buildHtmlBlockDeco(state, state.field(htmlBlocksField)),
   // setRemoteConsent/setExtToggles(外部リソースの許可状況)が変わったときも作り直す必要がある
   // (プレースホルダ→実際のiframe/imgへの切替、または設定ONで最初から読み込む場合)。
-  update: (v, tr) => (tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect) || e.is(setRemoteConsent) || e.is(setExtToggles)))
+  update: (v, tr) => (blocksChanged(tr, htmlBlocksField) || tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect) || e.is(setRemoteConsent) || e.is(setExtToggles)))
     ? buildHtmlBlockDeco(tr.state, tr.state.field(htmlBlocksField))
     : v,
   provide: (f) => EditorView.decorations.from(f),
@@ -2493,7 +2559,7 @@ function handleTableKey(view, ev) {
   const rowIdx = line.number - t.startLine; // 0=見出し 1=区切り 2以降=ボディ
   const cols = Math.max(t.header.length, ...(t.body.length ? t.body.map(r => r.length) : [0]), 1);
   const before = line.text.slice(0, pos - line.from);
-  const c = Math.min(cols - 1, Math.max(0, (before.match(/\|/g) || []).length - 1));
+  const c = Math.min(cols - 1, Math.max(0, separatorsBefore(line.text, before.length) - 1));
   if (ev.key === "Tab") {
     let r = rowIdx === 1 ? 2 : rowIdx, nc = c + (ev.shiftKey ? -1 : 1), nr = r;
     if (nc >= cols) { nc = 0; nr = r === 0 ? 2 : r + 1; }
@@ -2915,10 +2981,44 @@ const smartTypingInputHandler = Prec.highest(EditorView.inputHandler.of((view, f
 // 利便性は失うが、ツールバー/ショートカットの「ハイライト」操作(applyMdAction「highlight」→
 // wrapSel("==")、こちらは選択範囲を明示的に"=="で囲むだけなので誤発火しようがない)で
 // "==highlight=="を挿入する経路は従来どおり使える)。
+//
+// 【閉じ側が余って残る誤り(2026-11 の点検)】 以前は「直後に同じ記号があれば乗り越える、
+// 無ければ対で入れる」だけだったので、強調のつもりでない記号にも閉じ側が付き、行末に残っていた。
+//   「file_name.txt」→「file_name.txt_」   「2 * 3 = 6」→「2 * 3 = 6*」   「10~20」→「10~20~」
+//   文の途中から「**太字** と打つ」→「**太字***」(2つ目の*が乗り越えになり、閉じ側が1つしか無い)
+// 次の4つの決まりで防ぐ。どれも「強調の開き側になりえない場所では対にしない」という考え方。
+//   1. 直前が半角の英数字なら対にしない(単語の途中の _ や、掛け算・範囲の * ~)。
+//      日本語は語の間に空白を置かないので、全角の文字の直後は従来どおり対にする。
+//   2. 空の対(*|*)の中でもう一度打ったら、乗り越えずに両側へ足す(**|**)。太字を打てるようにする。
+//   3. 直前に同じ記号が並んでいて直後に閉じ側が無いなら、手で打っている途中なので足さない。
+//   4. 空の対の中で空白を打ったら、閉じ側を消す(記号の直後が空白なら強調ではない)。
 const MD_PAIR_CHARS = { "*": "*", "_": "_", "~": "~" };
+// その位置の前後に、記号chがいくつ並んでいるか。
+function markerRuns(state, pos, ch) {
+  const line = state.doc.lineAt(pos);
+  const off = pos - line.from;
+  let before = 0, after = 0;
+  while (off - before - 1 >= 0 && line.text[off - before - 1] === ch) before++;
+  while (off + after < line.text.length && line.text[off + after] === ch) after++;
+  return { before, after };
+}
 const mdAutoPairInputHandler = EditorView.inputHandler.of((view, from, to, text) => {
   const toggles = view.state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
   if (toggles.autoPairMarkdown === false) return false;
+  if (text === " " && from === to && from > 0) {
+    // 決まり4: 空の対の中の空白。
+    const ch = view.state.sliceDoc(from - 1, from);
+    if (!(ch in MD_PAIR_CHARS)) return false;
+    const runs = markerRuns(view.state, from, ch);
+    if (runs.after === 0 || runs.before !== runs.after) return false;
+    if (inCodeContext(view.state, from)) return false;
+    view.dispatch({
+      changes: { from, to: from + runs.after, insert: " " },
+      selection: { anchor: from + 1 },
+      userEvent: "input.type",
+    });
+    return true;
+  }
   if (!(text in MD_PAIR_CHARS)) return false;
   if (inCodeContext(view.state, from)) return false; // コードブロック・インラインコード・数式内は対象外
   if (from === to && (text === "*" || text === "_")) {
@@ -2936,12 +3036,28 @@ const mdAutoPairInputHandler = EditorView.inputHandler.of((view, from, to, text)
     });
     return true;
   }
-  const after = view.state.sliceDoc(to, to + text.length);
-  if (after === text) {
+  const runs = markerRuns(view.state, from, text);
+  // 空の対の中か。前後に同じ数だけ並んでいても、それより手前にまだ閉じていない開き側があるなら、
+  // 閉じ側を打っている途中(「**重要*|*」)なので空の対ではない。開き側が残っているかは、
+  // 手前にある記号の並びの数が奇数かで見る(行頭の箇条書き記号は数えない)。
+  let emptyPair = runs.after > 0 && runs.before === runs.after;
+  if (emptyPair) {
+    const line = view.state.doc.lineAt(from);
+    const head = line.text.slice(0, from - line.from - runs.before).replace(/^\s*[*+-]\s/, "");
+    const esc = text.replace(/[*]/g, "\\$&");
+    const openRuns = (head.match(new RegExp(`${esc}+`, "g")) || []).length;
+    if (openRuns % 2 === 1) emptyPair = false;
+  }
+  if (runs.after > 0 && !emptyPair) {
     // カーソルの直後に既に同じ閉じマーカーがある → 追加せずその上を乗り越えるだけ(closeBrackets同様)
     view.dispatch({ selection: { anchor: to + text.length }, userEvent: "input.type" });
     return true;
   }
+  if (runs.after === 0) {
+    if (runs.before > 0) return false; // 決まり3: 手で打っている途中
+    if (/[A-Za-z0-9]/.test(view.state.sliceDoc(Math.max(0, from - 1), from))) return false; // 決まり1
+  }
+  // ここへ来るのは、新しく開く場合か、空の対の中(決まり2。両側へ1つずつ足す)。
   view.dispatch({
     changes: { from, to, insert: text + MD_PAIR_CHARS[text] },
     selection: { anchor: from + text.length },
@@ -3041,8 +3157,66 @@ const codeCopyHoverPlugin = ViewPlugin.fromClass(class {
 // 不具合5の修正: focusField/focusNotifier/emojiCompletionはここには含めない(常設拡張として
 // buildExtensions()側に移した。理由はfocusField定義部・emojiCompletionSource定義部の
 // コメント参照)。
+// ---- 行末の、隠れている閉じ記号を飛び越える ----
+// 太字・斜体・コード・リンクなどで終わる行は、カーソルがその装飾に触れていない間、閉じ側の記号
+// (「**」「`」「](URL)」)を隠している。隠れた記号は幅が無いので、Endキーや行末のクリックで
+// 移動すると、カーソルは記号の手前(「**太字|**」)に入る。そこで打った文字は太字の中に入り、
+// 「太字で終わる行の続きを書いたら、続きまで太字になる」ことになっていた(2026-11 の点検)。
+// 外から移動してきて、カーソルの先が行末まで閉じ記号だけなら、行末へ進める。
+// 矢印キーで装飾の中を1文字ずつ動いているとき(すでに記号が見えている)は何もしない。
+const TAIL_MARK_NAMES = new Set(["EmphasisMark", "CodeMark", "StrikethroughMark", "SuperscriptMark", "SubscriptMark", "LinkMark", "URL"]);
+const TAIL_STYLE_NAMES = new Set(["StrongEmphasis", "Emphasis", "Strikethrough", "InlineCode", "Link", "Superscript", "Subscript"]);
+const skipHiddenTailMarks = EditorState.transactionFilter.of((tr) => {
+  if (!tr.selection || tr.docChanged || !tr.isUserEvent("select")) return tr;
+  const sel = tr.newSelection;
+  if (sel.ranges.length !== 1 || !sel.main.empty) return tr;
+  const state = tr.startState, pos = sel.main.head;
+  const line = state.doc.lineAt(pos);
+  if (pos === line.to || pos === line.from) return tr;
+  const tree = syntaxTree(state);
+  if (tree.length < line.to) return tr;
+  const mark = tree.resolveInner(pos, 1);
+  if (!TAIL_MARK_NAMES.has(mark.name) || mark.from !== pos) return tr;
+  // 触れていなかった(=記号が隠れていた)装飾か。入れ子は一番外側で見る。
+  let top = null;
+  for (let n = mark.parent; n && TAIL_STYLE_NAMES.has(n.name); n = n.parent) top = n;
+  if (!top || top.to !== line.to || top.from >= pos) return tr;
+  const before = state.selection.main;
+  if (before.from <= top.to && before.to >= top.from) return tr;
+  // カーソルの先が、行末まで閉じ記号だけでできているか。
+  let covered = pos;
+  tree.iterate({ from: pos, to: line.to, enter: (n) => {
+    if (TAIL_MARK_NAMES.has(n.name) && n.from === covered) { covered = n.to; return false; }
+    return n.from <= pos; // 祖先(装飾そのもの)へは降りる。それ以外の中身には入らない
+  } });
+  if (covered !== line.to) return tr;
+  return [tr, { selection: { anchor: line.to }, sequential: true }];
+});
+
+// ---- 表のセルへ複数行を貼り付けたとき、表を壊さない ----
+// 表の1行は文書の1行なので、セルの途中へ改行を含む文字を貼ると、その行が途中で切れて
+// 表が崩れる(後ろの列が次の行へ落ち、以降が表でなくなる。2026-11 の点検)。
+// セルの中へ貼るときは、改行を空白に置き換えて1行にする。
+// 入口(キーでの貼り付け・右クリックの貼り付け・書式つきの貼り付け)ごとに直すと漏れるので、
+// 文書を書き換える直前のここ1か所で見る。行頭へ貼るとき・貼るものが表の行そのもの
+// (どの行も「|」で始まる)のときは、行を足したいのだと考えて何もしない。
+const tablePasteGuard = EditorState.transactionFilter.of((tr) => {
+  if (!tr.docChanged || !tr.isUserEvent("input.paste")) return tr;
+  const found = [];
+  tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => { found.push({ from: fromA, to: toA, text: inserted.toString() }); });
+  if (found.length !== 1) return tr;
+  const { from, to, text } = found[0];
+  if (!text.includes("\n")) return tr;
+  const state = tr.startState;
+  const line = state.doc.lineAt(from);
+  if (from === line.from || !tableNodeAt(state, from)) return tr;
+  if (text.split("\n").filter((l) => l.trim()).every((l) => l.trim().startsWith("|"))) return tr;
+  const flat = text.replace(/\s*\r?\n\s*/g, " ").trim();
+  return { changes: { from, to, insert: flat }, selection: { anchor: from + flat.length }, userEvent: "input.paste", scrollIntoView: true };
+});
+
 const livePreviewExt = () => [
-  livePreview, codeCopyHotBlockField, tableBlocksField, tableField, tableAutoFormat,
+  livePreview, skipHiddenTailMarks, tablePasteGuard, codeCopyHotBlockField, tableBlocksField, tableField, tableAutoFormat,
   frontmatterField, tocParasField, tocField, extTogglesField,
   // 外部リソース読み込み同意(remoteConsentField、上記コメント参照)。extTogglesFieldと違い
   // setValue()側では復元しない(文書が入れ替わるたび既定のfalse/空集合に戻すのが仕様のため)。
@@ -4389,7 +4563,7 @@ export const DEFAULT_FONT_SIZE = 15;
 const MIN_FONT_SIZE = 8;
 const MAX_FONT_SIZE = 40;
 
-export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionChange, onRender, onPaste, onCopy, onSelectionChange } = {}) {
+export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionChange, onRender, onPaste, onCopy, onSelectionChange, onTreeGrew } = {}) {
   const editable = new Compartment();
   const themeComp = new Compartment();
   // Undo履歴(@codemirror/commandsのhistory())をCompartmentに載せる(ラウンド2で見つかった
@@ -4689,6 +4863,9 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
           // 文書全体を文字列化する無駄なコストになっていたため引数を渡すのをやめる。
           // 本文の文字列が必要な呼び出し元はeditor.getValue()を都度呼ぶこと。
           if (u.docChanged && onChange) onChange();
+          // 裏の解析が進んで構文木が伸びた(文書は変わっていない)。大きな文書では、開いた直後の
+          // アウトラインが解析の届いた所までしか並ばなかったので、伸びたことを知らせて描き直させる。
+          if (!u.docChanged && onTreeGrew && syntaxTree(u.state).length > syntaxTree(u.startState).length) onTreeGrew();
           // 検索パネルの件数自動更新(バグ2の修正)。この常設リスナーはbuildExtensions()の
           // 戻り値としてどのEditorState(=どのタブ)にも常に含まれるため、docChangeListeners
           // に登録した購読者はタブ切替をまたいでも呼ばれ続ける。
@@ -4706,7 +4883,12 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
         }),
         EditorView.domEventHandlers({
           compositionstart: () => { composing = true; onCompositionChange?.(true); },
-          compositionend: () => { composing = false; onCompositionChange?.(false); },
+          compositionend: (_e, v) => {
+            composing = false; onCompositionChange?.(false);
+            // 変換中に止めていたライブプレビューの装飾を作り直す(livePreview.update の説明を参照)。
+            // CodeMirrorが確定の後始末を終えるのを待ってから流す。
+            setTimeout(() => { if (!v.destroyed && !v.composing) v.dispatch({ effects: [] }); }, 80);
+          },
           // スマートペースト(仕様書 第2.9.3節): HTML形式のクリップボードをMarkdownへ変換して
           // 挿入する。CMの既定貼り付け処理より先に評価し、変換しない場合は既定動作に委ねる。
           paste: (e) => { if (onPaste && onPaste(e)) { e.preventDefault(); return true; } return false; },
@@ -5250,7 +5432,10 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
       };
     },
     // ---- 検索・置換(仕様書 E-17〜E-19) ----
-    setSearchQuery: (opts) => view.dispatch({ effects: setSearchQuery.of(new SearchQuery(opts)) }),
+    // 正規表現がオフのときは literal を立てる。立てないと CodeMirror は検索語・置換語の
+    // 「\n」「\t」「\\」を改行・タブ・バックスラッシュとして読み替える(2026-11 の点検。
+    // 「C:\new」を探すと改行+ew を探しに行き、置換語の「\t」がタブになっていた)。
+    setSearchQuery: (opts) => view.dispatch({ effects: setSearchQuery.of(new SearchQuery({ ...opts, literal: !opts.regexp })) }),
     findNext: () => findNext(view),
     findPrevious: () => findPrevious(view),
     replaceNext: () => replaceNext(view),
@@ -5293,7 +5478,8 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
     // 内部アンカーもCtrlクリック相当としてジャンプさせる(右クリックメニューからの明示操作のため)。
     openLink: (href) => openOrJumpLink(view, href, true),
     // 選択範囲をテキストで置き換える(プレーンテキスト貼り付け・スマートペースト用)
-    pasteText: (text) => { view.dispatch(view.state.replaceSelection(text)); view.focus(); },
+    // userEvent を付ける(貼り付けを見ている処理(tablePasteGuard)が、この経路も拾えるように)。
+    pasteText: (text) => { view.dispatch({ ...view.state.replaceSelection(text), userEvent: "input.paste" }); view.focus(); },
     // themeRefreshEffectも併せて発行し、Mermaid図(mermaidBlockDecoField)をdark/lightに
     // 合わせて再描画させる(既存のMathWidgetはCSS変数のみで配色するため再描画不要だが、
     // MermaidはSVG自体をtheme:"dark"/"default"で作り直す必要があるため)。
@@ -5400,7 +5586,7 @@ function selectStyleRangeAtCursor(view) {
     const rowIdx = line.number - t.startLine;
     const cols = Math.max(t.header.length, ...(t.body.length ? t.body.map((r) => r.length) : [0]), 1);
     const before = line.text.slice(0, pos - line.from);
-    const c = Math.min(cols - 1, Math.max(0, (before.match(/\|/g) || []).length - 1));
+    const c = Math.min(cols - 1, Math.max(0, separatorsBefore(line.text, before.length) - 1));
     selectCell(view, t, rowIdx, c);
     return;
   }
@@ -5585,7 +5771,7 @@ function tableInfoFromPos(state, t, pos) {
   const rowIdx = line.number - t.startLine; // 0=見出し 1=区切り 2以降=ボディ
   const cols = Math.max(t.header.length, ...(t.body.length ? t.body.map((r) => r.length) : [0]), 1);
   const before = line.text.slice(0, pos - line.from);
-  const col = Math.min(cols - 1, Math.max(0, (before.match(/\|/g) || []).length - 1));
+  const col = Math.min(cols - 1, Math.max(0, separatorsBefore(line.text, before.length) - 1));
   const rowKind = rowIdx <= 1 ? "header" : "body";
   const bodyIndex = rowIdx <= 1 ? -1 : rowIdx - 2;
   return { t, rowKind, bodyIndex, col, cols };

@@ -531,6 +531,8 @@ internal sealed class PaneApplicationContext : ApplicationContext
         // (SchedulePregenerationAfterFirstWindow参照)。
         form.ReadyToUse += SchedulePregenerationAfterFirstWindow;
 
+        form.ActivateOtherWindowForPath = ActivateOtherWindowFor;
+
         _windows.Add(form);
         form.Show();
 
@@ -692,6 +694,22 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// 開いているウィンドウのどれかに未保存の変更があるか(仕様書 U-04)。
     /// 更新の適用は再起動を伴うため、実行前にこれを確かめる。
     /// </summary>
+    /// <summary>
+    /// <paramref name="requester"/>以外のウィンドウがそのファイルを開いていれば、前面に出して true。
+    /// (<see cref="MainForm.ActivateOtherWindowForPath"/>の説明を参照)
+    /// </summary>
+    private bool ActivateOtherWindowFor(MainForm requester, string path)
+    {
+        MainForm? existing = _windows.FirstOrDefault(w =>
+            !ReferenceEquals(w, requester) && !w.IsDisposed
+            && w.GetOpenFilePaths().Any(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase)));
+        if (existing is null) return false;
+        Logger.Write($"既に開いているウィンドウへ切り替える: {PrivacyLogFormatter.ShortenPath(path)}");
+        existing.ActivateTabForPathIfPresent(path);
+        WindowChrome.ForceActivate(existing);
+        return true;
+    }
+
     private bool HasUnsavedDocuments() => _windows.Any(w => w.IsDirty);
 
     /// <summary>
