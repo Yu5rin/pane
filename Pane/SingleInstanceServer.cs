@@ -22,6 +22,9 @@ internal sealed class SingleInstanceServer
     /// </summary>
     private const int ActivationWaitTimeoutMs = 1200;
 
+    /// <summary>失敗のあと、待ち受けに戻るまでの待ち(ミリ秒)。</summary>
+    private const int RetryPauseMs = 200;
+
     private readonly SynchronizationContext _uiContext;
     private readonly CancellationTokenSource _cts = new();
 
@@ -121,6 +124,7 @@ internal sealed class SingleInstanceServer
             {
                 // クライアント切断等。次の接続待ちへ戻る。
                 Logger.Write($"SingleInstanceServer: IOExceptionを無視して待受を継続する: {ex.Message}");
+                if (!await PauseBeforeRetryAsync(token).ConfigureAwait(false)) break;
             }
             catch (Exception ex)
             {
@@ -135,7 +139,27 @@ internal sealed class SingleInstanceServer
                 {
                     break;
                 }
+                if (!await PauseBeforeRetryAsync(token).ConfigureAwait(false)) break;
             }
+        }
+    }
+
+    /// <summary>
+    /// 失敗のあと、少し待ってから待ち受けに戻る。待たずに戻ると、パイプを作るところで
+    /// 失敗し続ける場合(同じ名前のパイプを別のものが握っている等)に、休み無く回り続けて
+    /// CPUを使い切り、ログも同じ行で埋まる。2つ目の起動は口が開くのを2秒待つので、
+    /// この程度の待ちで取りこぼすことは無い。止められたら false。
+    /// </summary>
+    private static async Task<bool> PauseBeforeRetryAsync(CancellationToken token)
+    {
+        try
+        {
+            await Task.Delay(RetryPauseMs, token).ConfigureAwait(false);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
         }
     }
 }

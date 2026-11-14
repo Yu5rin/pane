@@ -1967,11 +1967,40 @@ internal sealed class MainForm : Form
     // 実処理はFolderService(既存のフォルダ走査サービス)へ集約し、ここではJSONの取り出しと
     // 完了後のフォルダ再読み込み・エラー表示だけを行う。
 
+    /// <summary>そのパスが内蔵の(取り外さない)ドライブにあるか。調べられなければ false。</summary>
+    private static bool IsOnFixedDrive(string path)
+    {
+        try
+        {
+            string? root = Path.GetPathRoot(Path.GetFullPath(path));
+            if (string.IsNullOrEmpty(root) || root.StartsWith(@"\\", StringComparison.Ordinal)) return false;
+            return new DriveInfo(root).DriveType == DriveType.Fixed;
+        }
+        catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            return false;
+        }
+    }
+
     /// <summary>"delete-path": ファイル/フォルダをごみ箱へ送る。</summary>
     private void HandleDeletePathRequest(JsonElement root)
     {
         TryGetString(root, "path", out string path);
         if (path.Length == 0) return;
+        // ごみ箱の無い場所(ネットワークドライブ・共有フォルダ・USBメモリ)では、Windowsは黙って
+        // 完全に削除する。画面側は「ごみ箱へ移動しますか?」としか尋ねていないので、
+        // 元に戻せないことをここで伝えて、もう一度確かめる(RecycleBinLogic の説明を参照)。
+        if (!RecycleBinLogic.HasRecycleBin(path, IsOnFixedDrive(path)))
+        {
+            DialogResult choice = PaneDialog.Show(
+                this,
+                $"この場所にはごみ箱がありません。\n\"{Path.GetFileName(path)}\" は完全に削除され、元に戻せません。削除しますか?",
+                "Pane",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning,
+                defaultToCancel: true);
+            if (choice != DialogResult.Yes) return;
+        }
         if (!FolderService.DeleteToRecycleBin(path, out string? error))
         {
             PaneDialog.Show(this, $"削除できませんでした。\n{error}", "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -2273,9 +2302,17 @@ internal sealed class MainForm : Form
         {
             Logger.WriteException($"保存失敗: {targetPath}", ex);
             CompleteSave(ok: false);
-            // msg.errorは現状JS側では表示に使っていない(main.js "save-result"のコメント
-            // 参照)が、将来表示されたときに型名・生の.NETメッセージが出ないよう先に直しておく。
-            PostToWeb(new { type = "save-result", ok = false, error = ExceptionMessages.Describe(ex) });
+            string reason = ExceptionMessages.Describe(ex);
+            PostToWeb(new { type = "save-result", ok = false, error = reason });
+            // 保存できなかったことを必ず画面に出す。以前はログに書くだけで、画面には何も出なかった
+            // (2026-11 の点検)。書き込みを禁じられた場所・他のアプリが開いているファイル・
+            // 外れたUSBメモリなどで Ctrl+S を押しても何も起きず、タイトルの「未保存」の印に
+            // 気づかなければ、保存できたつもりで閉じてしまう。削除・名前の変更・開く、の失敗は
+            // 以前から同じ形で知らせている。
+            PaneDialog.Show(
+                this,
+                $"保存できませんでした。\n{reason}\n\n内容は失われていません。別の場所へ保存するには「名前を付けて保存」を使ってください。",
+                "Pane", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
@@ -3605,7 +3642,7 @@ internal sealed class MainForm : Form
     /// <summary>今のファイルの中身の指紋。読めなければnull(そのときはこれまでどおり尋ねる)。</summary>
     private static byte[]? TryHashFile(string path)
     {
-        try { return System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(path)); }
+        try { return System.Security.Cryptography.SHA256.HashData(TextFileService.ReadAllBytesShared(path)); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
     }
 
@@ -4206,7 +4243,14 @@ internal sealed class MainForm : Form
                     // ものなので、印刷直前にスタイルを注入する)。
                     await InjectPrintHeaderFooterCssAsync(pageOptions);
                     CoreWebView2PrintSettings printSettings = BuildPrintSettings(pageOptions);
-                    await _webView.CoreWebView2.PrintToPdfAsync(targetPath, printSettings);
+                    // 書き出せたかは戻り値で分かる(例外にはならない)。以前は戻り値を見ておらず、
+                    // 書き出し先を他のアプリが開いている・書き込めない場所、のときに何も出ず、
+                    // 「書き出し後に開く」が古いファイルや無いファイルを開こうとしていた(2026-11 の点検)。
+                    bool printed = await _webView.CoreWebView2.PrintToPdfAsync(targetPath, printSettings);
+                    if (!printed)
+                    {
+                        throw new IOException("PDFを書き出せませんでした。書き出し先のファイルを他のアプリケーションで開いていないか、書き込める場所かを確かめてください。");
+                    }
                     break;
                 case "html":
                 case "html-plain":
