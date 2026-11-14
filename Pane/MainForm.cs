@@ -275,6 +275,19 @@ internal sealed class MainForm : Form
     /// 全タブのパス(パスがあるものだけ)を、そうでなければ従来どおり<see cref="CurrentPath"/>
     /// 1件(あれば)を返す。<see cref="PaneApplicationContext"/>が全ウィンドウぶんを集約する。
     /// </summary>
+    /// <summary>
+    /// そのファイルを別のウィンドウが開いていれば、そちらを前面に出して true を返す
+    /// (<see cref="PaneApplicationContext"/>が差し込む)。
+    ///
+    /// 同じファイルを2つのウィンドウで開かない決まりは、以前は「新しいウィンドウで開く」経路
+    /// (<see cref="PaneApplicationContext.OpenWindow"/>)にしか無かった。今のウィンドウの文書を
+    /// 入れ替えて開く経路(最近使ったファイル・サイドバー・クイックオープン・検索結果・
+    /// 「開く」ダイアログ・ドロップ)は素通りで、同じファイルが2枚開き、あとから保存した側が
+    /// もう片方の変更を黙って上書きできた(2026-11 の点検)。
+    /// 入口ごとに塞ぐと漏れるので、実際に読み込む<see cref="OpenFile"/>で確かめる。
+    /// </summary>
+    public Func<MainForm, string, bool>? ActivateOtherWindowForPath { get; set; }
+
     public IReadOnlyList<string> GetOpenFilePaths()
     {
         return OpenPathsLogic.Collect(
@@ -2097,6 +2110,9 @@ internal sealed class MainForm : Form
             OpenInNewTab(path);
             return;
         }
+        // 別のウィンドウが開いているなら、保存するかを尋ねる前にそちらへ切り替える
+        // (このウィンドウの文書は入れ替わらないので、尋ねる必要が無い)。
+        if (ActivateOtherWindowForPath?.Invoke(this, path) == true) return;
         if (!await ConfirmDiscardDirtyAsync()) return;
         OpenFile(path);
     }
@@ -2349,6 +2365,14 @@ internal sealed class MainForm : Form
     {
         Logger.Write($"OpenFile: {PrivacyLogFormatter.ShortenPath(path)}");
         Logger.Debug($"OpenFile(フルパス): {path}");
+        // 別のウィンドウが開いているファイルは、そちらへ切り替えるだけにする
+        // (ActivateOtherWindowForPath の説明を参照)。今開いているファイルの読み直しは対象外。
+        if (!string.Equals(path, _currentPath, StringComparison.OrdinalIgnoreCase)
+            && ActivateOtherWindowForPath?.Invoke(this, path) == true)
+        {
+            Logger.Write("OpenFile: 別のウィンドウが開いているので、そちらへ切り替えた");
+            return;
+        }
         try
         {
             LoadResult result = TextFileService.Load(path);
