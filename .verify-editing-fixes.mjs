@@ -5,6 +5,7 @@
 //   (4) 日本語入力: 太字などの直後で変換しても、直前の文字が消えない。行末の隠れた閉じ記号の手前で止まらない
 //   (5) 書式つきの貼り付け: divで包まれた本文・入れ子のリスト・表のセルの「|」
 //   (6) Shiftと数字のショートカット、コードモードでのMarkdown用コマンド、コマンドパレット
+//   (7) 見た目: 空の文書の案内、ホバーと選択中の色の区別、表の操作ボタンのSVG
 import pw from "playwright";
 const { chromium } = pw;
 const PORT = 8223;
@@ -251,6 +252,47 @@ async function pasteHtml(html, plain) {
   await page.fill("#palette-input", "表示");
   const n = await page.$$eval("#palette-list li:not(.palette-empty)", (els) => els.length);
   ok("(6) コマンドパレットで「表示」と打つと、表示メニューの項目が並ぶ", n >= 5, n);
+  await page.close();
+}
+
+// ---- (7) 見た目: 空の文書の案内、ホバーと選択中の色、表のボタン ----
+{
+  const page = await open("");
+  const hint = await page.evaluate(() => document.querySelector("#cm-host .cm-placeholder")?.textContent ?? null);
+  ok("(7) 何も書いていない文書に、薄い案内が出る", !!hint && hint.includes("F1"), hint);
+  await page.click(".cm-content");
+  await page.keyboard.type("a");
+  await page.waitForTimeout(150);
+  ok("(7) 1文字打つと案内が消える", await page.evaluate(() => !document.querySelector("#cm-host .cm-placeholder")));
+  ok("(7) 案内の文字は文書の内容に含まれない", (await value(page)).trim() === "a");
+  await page.close();
+}
+{
+  const page = await open("x\n", "a.js");
+  ok("(7) コードの文書には、Markdown向けの案内を出さない", await page.evaluate(() => !document.querySelector("#cm-host .cm-placeholder")));
+  await page.close();
+}
+{
+  // コマンドパレット: 矢印キーで選んだ行と、マウスを乗せた行が、別の濃さになる。
+  const page = await open("本文\n");
+  await page.click(".cm-content");
+  await page.keyboard.press("Control+Shift+P");
+  await page.waitForSelector("#palette-list li");
+  await page.hover("#palette-list li:nth-child(4)");
+  await page.waitForTimeout(150);
+  const bg = await page.evaluate(() => {
+    const rows = document.querySelectorAll("#palette-list li");
+    return { sel: getComputedStyle(rows[0]).backgroundColor, hover: getComputedStyle(rows[3]).backgroundColor, plain: getComputedStyle(rows[6]).backgroundColor };
+  });
+  ok("(7) 選択中の行・マウスを乗せた行・ふつうの行が、3つとも違う地の色になる",
+    bg.sel !== bg.hover && bg.hover !== bg.plain && bg.sel !== bg.plain, bg);
+  await page.close();
+}
+{
+  // 表の操作ボタンは、文字ではなくSVGで描く。
+  const page = await open("上\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n下\n");
+  const btns = await page.$$eval("#cm-host table .tbl-ctl", (els) => els.map((e) => ({ svg: !!e.querySelector("svg"), text: e.textContent.trim(), label: e.getAttribute("aria-label") })));
+  ok("(7) 表の操作ボタンがSVGで、読み上げ用の名前を持つ", btns.length > 0 && btns.every((b) => b.svg && b.text === "" && b.label), btns.slice(0, 3));
   await page.close();
 }
 

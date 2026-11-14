@@ -1264,6 +1264,8 @@ html[data-theme="dark"] .cm-search-ruler-mark.is-active {
 .cm-table .tbl-ctls:hover { display: flex; pointer-events: auto; }
 .cm-table .tbl-ctl { border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 4px; font-size: 12px; line-height: 1; width: 20px; height: 20px; padding: 0; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,.18); }
 .cm-table .tbl-ctl:hover { background: var(--accent-soft); color: var(--accent-ink); border-color: var(--accent); }
+.cm-table .tbl-ctl { display: inline-flex; align-items: center; justify-content: center; }
+.cm-table .tbl-ctl > svg { display: block; }
 /* 補完ポップアップをテーマに合わせる */
 .cm-tooltip.cm-tooltip-autocomplete { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .cm-tooltip-autocomplete ul li[aria-selected] { background: var(--accent-soft); color: var(--accent-ink); }
@@ -1894,11 +1896,13 @@ html[data-theme="dark"] .cm-search-ruler-mark.is-active {
 .help-article:focus { outline: none; }
 .help-load-error { color: var(--danger); }
 
-/* 見出し・段落等の本文装飾。Pane本体のMarkdown表示と揃えるため--font-heading(本文の
-   見出しフォント)・--accent(リンク色)等の既存トークンのみを使う。新しい色は導入しない。 */
+/* 見出し・段落等の本文装飾。--accent(リンク色)等の既存トークンのみを使う。新しい色は導入しない。
+   見出しの書体は本文と同じ --font-body。以前は --font-heading(明朝体)を指定していたが、
+   Pane本体の文書の見出しは本文と同じ書体で描いており、取扱説明書の見出しだけが明朝体で
+   別のアプリのように見えていた(2026-11 の点検。利用者がゴシックにそろえる方を選んだ)。 */
 .help-article h1, .help-article h2, .help-article h3,
 .help-article h4, .help-article h5, .help-article h6 {
-  font-family: var(--font-heading, var(--font-body));
+  font-family: var(--font-body);
   font-weight: 700;
   color: var(--ink);
   line-height: 1.4;
@@ -1942,3 +1946,27 @@ html[data-theme="dark"] .cm-search-ruler-mark.is-active {
    var(--accent))に差し替える。 */
 mark.help-search-hit { background: var(--accent-soft); color: var(--menu-hover-fg, var(--accent)); border-radius: 2px; }
 mark.help-search-hit.current { background: var(--accent-ink); color: var(--paper); }
+
+/* ---- マウスを乗せた行と、選択中の行を別の濃さにする(2026-11 の点検) ----
+   一覧の行は、乗せた行も選択中の行も同じ var(--accent-soft) で塗っていたため、
+   「今どれが選ばれているか」と「今どこにマウスがあるか」が見分けられなかった
+   (コマンドパレットでは、矢印キーで選んだ行とマウスの下の行が同じ見た目で2つ並ぶ)。
+   乗せた行は、同じ色を半分の濃さにする(新しい色は足さない)。選択中の行は、乗せても濃いまま。
+   文字色は変えない(半分の濃さの地は --accent-soft より地の色に近いので、文字との差は今より広がる)。
+   このまとまりはファイルの最後に置く(上にある同じ強さの :hover の指定を上書きするため)。 */
+:root { --row-hover: color-mix(in srgb, var(--accent-soft) 50%, transparent); }
+#palette-list li:hover,
+.outline-item:hover,
+.file-item:hover,
+.tree-item:hover,
+.settings-nav-item:hover,
+.help-toc-item:hover { background: var(--row-hover); }
+#palette-list li.sel:hover,
+.outline-item.current:hover,
+.file-item.current:hover,
+.tree-item.current:hover,
+.settings-nav-item.active:hover,
+.help-toc-item.active:hover { background: var(--accent-soft); }
+
+/* 何も書いていない文書に出す薄い案内(editor.js の EMPTY_DOC_HINT)。本文より薄い --ink-mute。 */
+#cm-host .cm-placeholder { color: var(--ink-mute); }
