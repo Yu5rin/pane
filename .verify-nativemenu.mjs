@@ -59,11 +59,18 @@ function lastOpenMenu(sent, menuName) {
   ok("(a) 見出しに.openクラスが付く(ハイライト)", await page.evaluate(() =>
     [...document.querySelectorAll("#menubar .menu-top")].some((b) => b.textContent === "表示" && b.classList.contains("open"))));
 
-  // (b) items32項目(既存20 + 折りたたみ関連コマンド12件: カーソル位置を折りたたむ/展開・
-  // すべて折りたたむ/展開・再帰的な折りたたみ/展開・レベル1〜5・すべてのコメントブロック)、
+  // (b) 表示メニューは、まとまりごとに下の階層へ入れてある(MENU_LAYOUT。2026-11 の点検までは
+  // 32項目が1列に並んでいた)。上の階層は16項目で、折りたたみの12項目は「折りたたみ」の下にある。
   // 各項目にlabel/shortcut/enabled/checked/separatorAfterが入っている。
   const items = viewMsg.items;
-  ok(`(b) 表示メニューの項目数が32 (既存20+折りたたみ関連12。実際=${items.length})`, items.length === 32);
+  ok(`(b) 表示メニューの上の階層が16項目 (実際=${items.length})`, items.length === 16);
+  const foldGroup = items.find((it) => it.label === "折りたたみ");
+  ok(`(b) 「折りたたみ」の下に12項目がある (実際=${foldGroup?.submenu?.length})`, foldGroup?.submenu?.length === 12);
+  ok("(b) 下の階層の項目も、コマンドのidとショートカットを持つ",
+    foldGroup?.submenu?.[0]?.id === "view.foldAtCursor" && foldGroup.submenu[0].shortcut === "Alt+[");
+  const modeGroup = items.find((it) => it.label === "編集モード");
+  ok("(b) 「編集モード」の下で、今のモード(Markdown)にチェックが付く",
+    modeGroup?.submenu?.find((e) => e.id === "view.modeMarkdown")?.checked === true);
   const hasAllFields = items.every((it) =>
     typeof it.label === "string" &&
     typeof it.shortcut === "string" &&
@@ -97,13 +104,15 @@ function lastOpenMenu(sent, menuName) {
   const sentAfterFile = await page.evaluate(() => window.__sent);
   const fileMsg = lastOpenMenu(sentAfterFile, "File");
   const recentEntry = fileMsg?.items.find((it) => it.id === "file.recentFiles");
-  ok("(d) 「最近使ったファイル」がsubmenuとして入っている", Array.isArray(recentEntry?.submenu) && recentEntry.submenu.length === 3);
+  // ファイル3件のあとに区切りを挟んで「履歴を消去」が並ぶ(計4項目)。
+  ok("(d) 「最近使ったファイル」がsubmenuとして入っている", Array.isArray(recentEntry?.submenu) && recentEntry.submenu.length === 4);
   const subIds = recentEntry?.submenu.map((s) => s.id) ?? [];
   ok(`(d) submenu各項目に一意なidがある ${JSON.stringify(subIds)}`,
-    subIds.length === 3 && new Set(subIds).size === 3 && subIds.every((id) => typeof id === "string" && id.startsWith("file.recentFiles/")));
+    subIds.length === 4 && new Set(subIds).size === 4 && subIds.every((id) => typeof id === "string" && id.startsWith("file.recentFiles/")));
   const recentLabels = recentEntry?.submenu.map((s) => s.label) ?? [];
-  ok(`(d) submenuのlabelが実際のファイルパス ${JSON.stringify(recentLabels)}`,
-    JSON.stringify(recentLabels) === JSON.stringify(["C:\\work\\a.md", "C:\\work\\b.md", "C:\\work\\c.md"]));
+  ok(`(d) submenuのlabelが実際のファイルパスで、最後に「履歴を消去」がある ${JSON.stringify(recentLabels)}`,
+    JSON.stringify(recentLabels) === JSON.stringify(["C:\\work\\a.md", "C:\\work\\b.md", "C:\\work\\c.md", "履歴を消去"])
+    && recentEntry.submenu[2].separatorAfter === true);
 
   // (e) menu-commandを返すと対応するコマンドが実行される(例: view.wordWrap→折り返し表示切替)。
   // id→実行関数の対応表は開くたびに作り直される(直前に「ファイル」を開いたため)ので、
@@ -273,21 +282,21 @@ function lastOpenMenu(sent, menuName) {
   const [editHi2, viewHi2] = await highlighted(["編集", "表示"]);
   ok("(j-2) menu-arrow-switch(prev)で「表示」から「編集」へ戻る", editHi2 === true && viewHi2 === false);
 
-  // (j-3) 末尾(書式)でnextを受けると先頭(ファイル)へ折り返す(Windows標準のメニューバーに合わせる)。
+  // (j-3) 末尾(ヘルプ)でnextを受けると先頭(ファイル)へ折り返す(Windows標準のメニューバーに合わせる)。
   await page.click("#menubar .menu-top:text('編集')"); // いったん閉じてから
   await page.waitForTimeout(200);
-  await page.click("#menubar .menu-top:text('書式')");
+  await page.click("#menubar .menu-top:text('ヘルプ')");
   await page.waitForTimeout(300);
-  await page.evaluate(() => window.__reply({ type: "menu-arrow-switch", menu: "Format", direction: "next" }));
+  await page.evaluate(() => window.__reply({ type: "menu-arrow-switch", menu: "Help", direction: "next" }));
   await page.waitForTimeout(200);
-  const [fileHi3, formatHi3] = await highlighted(["ファイル", "書式"]);
-  ok("(j-3) 末尾(書式)でnextを受けると先頭(ファイル)へ折り返す", fileHi3 === true && formatHi3 === false);
+  const [fileHi3, helpHi3] = await highlighted(["ファイル", "ヘルプ"]);
+  ok("(j-3) 末尾(ヘルプ)でnextを受けると先頭(ファイル)へ折り返す", fileHi3 === true && helpHi3 === false);
 
-  // (j-4) 先頭(ファイル)でprevを受けると末尾(書式)へ折り返す。
+  // (j-4) 先頭(ファイル)でprevを受けると末尾(ヘルプ)へ折り返す。
   await page.evaluate(() => window.__reply({ type: "menu-arrow-switch", menu: "File", direction: "prev" }));
   await page.waitForTimeout(200);
-  const [fileHi4, formatHi4] = await highlighted(["ファイル", "書式"]);
-  ok("(j-4) 先頭(ファイル)でprevを受けると末尾(書式)へ折り返す", fileHi4 === false && formatHi4 === true);
+  const [fileHi4, helpHi4] = await highlighted(["ファイル", "ヘルプ"]);
+  ok("(j-4) 先頭(ファイル)でprevを受けると末尾(ヘルプ)へ折り返す", fileHi4 === false && helpHi4 === true);
 
   // (j-5) メニューが閉じている間にmenu-arrow-switchが届いても何も起きない(標準の防御)。
   await page.evaluate(() => window.__reply({ type: "menu-closed", menu: "Format" }));
@@ -331,7 +340,13 @@ function lastOpenMenu(sent, menuName) {
   const dropdown = await page.$(".menu-dropdown");
   ok("(g) ブリッジ無しでは従来どおりHTMLのドロップダウンが出る", dropdown !== null);
   const itemCount = await page.$$eval(".menu-dropdown .menu-item", (e) => e.length);
-  ok(`(g) HTMLドロップダウンの項目数が32 (既存20+折りたたみ関連12。実際=${itemCount})`, itemCount === 32);
+  ok(`(g) HTMLドロップダウンの上の階層が16項目 (実際=${itemCount})`, itemCount === 16);
+  // 下の階層(HTML版): 「編集モード」に乗ると、チェックの付いた3項目が出る。
+  await page.hover(".menu-dropdown .menu-item:has-text('編集モード')");
+  await page.waitForTimeout(200);
+  const subRows = await page.$$eval(".menu-dropdown:last-of-type .menu-item", (els) => els.map((e) => e.textContent.trim()));
+  ok(`(g) 下の階層に、チェックの付いた項目が並ぶ ${JSON.stringify(subRows)}`,
+    subRows.length === 3 && subRows[0].includes("✓") && subRows[0].includes("Markdown"));
   await page.keyboard.press("Escape");
   await page.waitForTimeout(200);
   await page.close();

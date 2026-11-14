@@ -9,6 +9,7 @@
 // editor.jsから読まずローカル定数に持つよう変更済み)ため、このエントリのバンドルに
 // CodeMirrorが巻き込まれることはない。
 import { createSettings } from "./settings.js";
+import { initKeyboardLayout } from "./keyboard-layout.js";
 import { buildCommands, initContextMenu, routeNativeMenuCommand, routeNativeMenuClosed } from "./commands.js";
 
 const bridge = window.chrome?.webview ?? null;
@@ -127,3 +128,6 @@ if (bridge) {
 // このウィンドウは画面全体が設定画面そのものなので、メニュー等からの明示操作を待たず
 // 読み込み直後に表示する(get-settingsも内部でここから送信される)。
 settingsUI.open();
+
+// キーボードの配列を調べておく(キーの割り当ての登録と表示を、キーの刻印に合わせるため)。
+initKeyboardLayout();

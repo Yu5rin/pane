@@ -4,7 +4,7 @@
 // 使えない場合(単体のブラウザで動作確認する場合)は File System Access API /
 // File API による仮実装にフォールバックする(Phase 1からの経路をそのまま維持)。
 import { createEditor, DEFAULT_FONT_SIZE } from "./editor.js";
-import { buildCommands, initMenuBar, initCommandPalette, initContextMenu, routeNativeMenuCommand, routeNativeMenuClosed, routeNativeMenuArrowSwitch, bindShortcuts, applyKeyBindings, showContextMenu } from "./commands.js";
+import { buildCommands, MENU_LAYOUT, initMenuBar, initCommandPalette, initContextMenu, routeNativeMenuCommand, routeNativeMenuClosed, routeNativeMenuArrowSwitch, bindShortcuts, applyKeyBindings, showContextMenu } from "./commands.js";
 import { createSearchUI, refreshOpenSearchCount } from "./search-ui.js";
 import { createSidebar } from "./sidebar.js";
 import { createQuickOpen } from "./quick-open.js";
@@ -17,6 +17,7 @@ import { detectContentMode, detectCodeLanguage } from "./detect-mode.js";
 import { setReadingSpeedWpm } from "./text-stats.js";
 import { setOutlineMaxLevel } from "./markdown-extras.js";
 import { paneConfirm, paneAlert, paneInput } from "./dialog.js";
+import { initKeyboardLayout } from "./keyboard-layout.js";
 import { applyTooltip, applyTooltipsIn, setCurrentLevel as setSharedTooltipLevel, TOOLTIP_LEVELS, DEFAULT_TOOLTIP_DETAIL } from "./tooltips.js";
 
 const host = document.getElementById("cm-host");
@@ -1482,6 +1483,15 @@ const ctx = {
       const path = closedFiles.pop();
       bridge.postMessage({ type: "open-path", path });
     },
+    // 最近使ったファイルの履歴を消す(ファイル > 最近使ったファイル > 履歴を消去)。
+    // 設定の「詳細」にある同じ操作と同じ要求を送る。消したあとの一覧はC#側から届く。
+    async clearRecentFiles() {
+      if (!bridge) return;
+      if (!(await paneConfirm({ title: "履歴を消去しますか?", message: "最近使ったファイルの履歴をすべて消去しますか? この操作は取り消せません。", okLabel: "消去する", danger: true }))) return;
+      bridge.postMessage({ type: "clear-recent-files" });
+    },
+    // コマンドパレットを開く(ヘルプメニューから)。
+    openCommandPalette() { commandPalette.open(); },
     openRecentFile(path) {
       bridge?.postMessage({ type: "open-path", path });
     },
@@ -1548,7 +1558,8 @@ const ctx = {
     // 従来どおりHTML製のモーダル(settings.js)を出すフォールバックを残す
     // (settings.js自体はここで初めて動的importする。ensureSettingsUI()参照)。
     openSettings(category) {
-      if (bridge) { bridge.postMessage({ type: "open-settings-window" }); return; }
+      // category を渡すと、設定をその分類で開く(ヘルプメニューの「キーボードショートカットの一覧」など)。
+      if (bridge) { bridge.postMessage(category ? { type: "open-settings-window", category } : { type: "open-settings-window" }); return; }
       // 不具合3の修正: .catchが無いとsettings.jsの動的import失敗がunhandled rejectionに
       // なり、ユーザーには「設定を開いたのに何も起きない」としか見えなかった。
       // ensureSettingsUI()側でsettingsUIPromiseは既にnullへ戻しているので、失敗を
@@ -1753,6 +1764,9 @@ const commands = buildCommands(ctx);
 bindShortcuts(commands, ctx);
 const menuBar = initMenuBar(menubarEl, commands, ctx);
 const commandPalette = initCommandPalette(document.body, commands, ctx);
+// キーボードの配列を調べておく(記号のショートカットを、キーの刻印どおりに効かせるため。
+// shortcut-keys.js の説明を参照)。結果は後から届き、届くまでは従来どおりキーの位置で判定する。
+initKeyboardLayout();
 // 右クリック(コンテキスト)メニュー(docs/コンテキストメニュー仕様.md)。documentに1つだけ
 // 登録し、入力欄(input/textarea)かどうかはinitContextMenu自身が最優先で判定する
 // (検索ボックス・設定画面の入力欄など、どこにあっても同じ最小メニューになる、第5節)。
@@ -1789,6 +1803,7 @@ ctx.commands = commands;
 if (!bridge) {
   window.__paneDebugEditor = editor;
   window.__paneDebugCtx = ctx;
+  window.__paneDebugMenuLayout = MENU_LAYOUT; // メニューの並びの検査(.verify-menu-layout.mjs)用
 }
 
 // ---- 右クリックメニュー: 本文(CodeMirror)の上(docs/コンテキストメニュー仕様.md 第2章・第3章) ----
@@ -3395,7 +3410,8 @@ async function saveFile(forcePicker) {
   setDirty(false);
 }
 
-document.getElementById("btn-theme").addEventListener("click", () => {
+// ライト/ダークの切り替え。右上のボタンと、表示メニューの「ライト/ダークを切り替え」の両方から呼ぶ。
+function toggleTheme() {
   const cur = document.documentElement.dataset.theme;
   const next = cur === "dark" ? "light" : "dark";
   document.documentElement.dataset.theme = next;
@@ -3404,7 +3420,9 @@ document.getElementById("btn-theme").addEventListener("click", () => {
   bridge?.postMessage({ type: "set-theme", theme: next });
   // タイトルバーも本文エリアと同じ色に切り替える。
   syncTitleBarColor();
-});
+}
+ctx.actions.toggleTheme = toggleTheme;
+document.getElementById("btn-theme").addEventListener("click", toggleTheme);
 // 不具合修正: ステータスバーの「設定」ボタン(#btn-settings)はユーザー要望により削除した。
 // 設定を開く手段自体はメニューバー右側の歯車ボタン(#btn-menu-settings、commands.js
 // initMenuBar参照)とFile > 設定(Ctrl+,、commands.jsのfile.settingsコマンド)に残っている

@@ -19,7 +19,9 @@
 //   shortcutsSuppressed  真偽値の書き込み用フラグ。キーバインド再設定中はtrueにして、
 //                        commands.js側の全域ショートカット発火を止めてもらう(bindShortcuts参照)。
 import { FILE_TYPES, CATEGORIES } from "./file-types.js";
-import { MENU_LABELS, isAssignableShortcut } from "./commands.js";
+import { MENU_LABELS, isAssignableShortcut, shownShortcut } from "./commands.js";
+import { keyNameFromEvent } from "./shortcut-keys.js";
+import { getKeyboardLayout } from "./keyboard-layout.js";
 import { paneConfirm, paneAlert } from "./dialog.js";
 // Tabキーでのフォーカス閉じ込め・開閉時のフォーカス退避復帰は、独自ダイアログ(dialog.js)や
 // コマンドパレット(commands.js)と全く同じロジックのため、共通モジュール(focus-trap.js)を使う
@@ -322,20 +324,15 @@ const ALL_EXTENSIONS = FILE_TYPES.flatMap((t) => t.extensions);
 const MARKDOWN_EXTENSIONS = FILE_TYPES.find((t) => t.id === "markdown").extensions;
 
 // ---- キーバインド捕捉時の組み合わせ文字列化 ----
-// commands.jsのparseShortcut/matchesShortcutが解釈できる形("Ctrl+Shift+K"のように"+"区切り、
-// 修飾子はCtrl/Shift/Alt)に合わせる。記号キーはcommands.js側もe.code(物理キー)で判定して
-// いるため、ここでも同じ7キーだけはe.codeから逆引きし、Shift併用時にe.keyが別文字になる
-// 問題(例: Shift+` は e.key が "~")を避ける。
-const SYMBOL_CODE_REVERSE = { Backquote: "`", BracketLeft: "[", BracketRight: "]", Backslash: "\\", Minus: "-", Equal: "=", Digit0: "0" };
+// commands.js が解釈できる形("Ctrl+Shift+K"のように"+"区切り、修飾子はCtrl/Shift/Alt)に合わせる。
+// キーの名前は shortcut-keys.js の keyNameFromEvent で作る(照合する側と同じ決まりで、
+// 記号はキーの刻印どおり・数字はShiftを押していても数字として登録される)。
 function comboFromEvent(e) {
   const parts = [];
   if (e.ctrlKey || e.metaKey) parts.push("Ctrl");
   if (e.shiftKey) parts.push("Shift");
   if (e.altKey) parts.push("Alt");
-  // 数字はすべて物理キーから読む(commands.js の matchesShortcut と同じ理由。Shiftを押していると
-  // e.key は「!」などの記号になり、「Ctrl+Shift+!」という一致しない組み合わせが登録されていた)。
-  const digit = /^(?:Digit|Numpad)([0-9])$/.exec(e.code);
-  const key = digit ? digit[1] : SYMBOL_CODE_REVERSE[e.code] ?? (e.key.length === 1 ? e.key.toUpperCase() : e.key);
+  const key = keyNameFromEvent(e, getKeyboardLayout());
   if (!key) return null;
   parts.push(key);
   return parts.join("+");
@@ -1967,7 +1964,7 @@ export function createSettings(ctx, { mode = "modal" } = {}) {
       return `
         <button type="button" class="kb-row${capturing ? " capturing" : ""}${conflictWith.length ? " conflict" : ""}" data-cmd="${cmd.id}">
           <span class="kb-cell-label">${menuLabel ? menuLabel + ": " : ""}${cmd.label}</span>
-          <span class="kb-cell-shortcut">${capturing ? "キーを押してください…" : (sc ? `<kbd>${sc}</kbd>` : "(なし)")}</span>
+          <span class="kb-cell-shortcut">${capturing ? "キーを押してください…" : (sc ? `<kbd>${shownShortcut(sc)}</kbd>` : "(なし)")}</span>
           ${warnText ? `<span class="kb-cell-warn">${warnText}</span>` : ""}
         </button>`;
     }).join("");

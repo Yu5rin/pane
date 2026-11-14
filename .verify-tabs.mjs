@@ -104,8 +104,9 @@ async function tabCount(page) {
   await page.click("text=ファイル");
   await page.waitForTimeout(150);
   const openMenuMsg = await lastMsg(page, "open-menu");
+  // ウィンドウ形式では、押せない「新しいタブ」をメニューに並べない(以前は常に灰色で出ていた)。
   const newTabItem = findItem(openMenuMsg?.items, "新しいタブ");
-  ok("(A) ウィンドウ形式では「新しいタブ」メニュー項目が無効(enabled:false)", newTabItem?.enabled === false);
+  ok("(A) ウィンドウ形式では「新しいタブ」がメニューに並ばない", newTabItem === undefined || newTabItem === null);
   await page.evaluate(() => window.__reply({ type: "menu-closed", menu: "File" }));
 
   // 総点検 指摘H5: ウィンドウ形式(既定)では、Ctrl+N相当(commands.js file.new、

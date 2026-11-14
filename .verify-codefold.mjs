@@ -72,6 +72,9 @@ import pw from "playwright";
 import zlib from "node:zlib";
 import fs from "node:fs";
 const { chromium } = pw;
+// メニューの項目は、まとまりごとに下の階層(submenu)へ入っている(src/commands.js の MENU_LAYOUT)。
+// 項目を探すときは、下の階層も含めて平らにしてから探す。
+const flatMenuItems = (items) => (items ?? []).flatMap((i) => [i, ...flatMenuItems(i.submenu)]);
 
 const PORT = 8195;
 const BASE = `http://localhost:${PORT}/index.html`;
@@ -2059,9 +2062,9 @@ const NESTED_CODE = [
   await page.click("#menubar .menu-top:text('表示')");
   await page.waitForTimeout(200);
   const openMenuMd = await page.evaluate(() => window.__sent.find((m) => m.type === "open-menu" && m.menu === "View"));
-  const foldItemMd = openMenuMd?.items?.find((i) => i.id === "view.foldAtCursor");
-  const levelItemMd = openMenuMd?.items?.find((i) => i.id === "view.foldLevel3");
-  const commentsItemMd = openMenuMd?.items?.find((i) => i.id === "view.foldAllBlockComments");
+  const foldItemMd = flatMenuItems(openMenuMd?.items).find((i) => i.id === "view.foldAtCursor");
+  const levelItemMd = flatMenuItems(openMenuMd?.items).find((i) => i.id === "view.foldLevel3");
+  const commentsItemMd = flatMenuItems(openMenuMd?.items).find((i) => i.id === "view.foldAllBlockComments");
   ok(`(CC) Markdownモードでは折りたたみ関連のメニュー項目がすべて無効になる(fold=${foldItemMd?.enabled}, level3=${levelItemMd?.enabled}, comments=${commentsItemMd?.enabled})`,
     foldItemMd?.enabled === false && levelItemMd?.enabled === false && commentsItemMd?.enabled === false);
   await page.keyboard.press("Escape");
@@ -2072,10 +2075,10 @@ const NESTED_CODE = [
   await page.click("#menubar .menu-top:text('表示')");
   await page.waitForTimeout(200);
   const openMenuCode = await page.evaluate(() => window.__sent.find((m) => m.type === "open-menu" && m.menu === "View"));
-  const levelItemCode = openMenuCode?.items?.find((i) => i.id === "view.foldLevel3");
+  const levelItemCode = flatMenuItems(openMenuCode?.items).find((i) => i.id === "view.foldLevel3");
   ok(`(CC) コードモードに戻すと折りたたみ関連のメニュー項目が有効になる(level3=${levelItemCode?.enabled})`, levelItemCode?.enabled === true);
   // 依頼どおりレベル1〜5の5項目・再帰2項目・コメントブロック1項目が揃っていることも確認する。
-  const foldIds = (openMenuCode?.items ?? []).map((i) => i.id).filter((id) => id && id.startsWith("view.fold") || id === "view.unfoldAtCursor" || id === "view.unfoldAllRanges" || id === "view.unfoldRecursively");
+  const foldIds = flatMenuItems(openMenuCode?.items).map((i) => i.id).filter((id) => id && id.startsWith("view.fold") || id === "view.unfoldAtCursor" || id === "view.unfoldAllRanges" || id === "view.unfoldRecursively");
   console.log(`  [実測] 表示メニューの折りたたみ関連コマンドID一覧: ${JSON.stringify(foldIds)}`);
   for (const id of ["view.foldAtCursor", "view.unfoldAtCursor", "view.foldAllRanges", "view.unfoldAllRanges", "view.foldRecursively", "view.unfoldRecursively", "view.foldLevel1", "view.foldLevel2", "view.foldLevel3", "view.foldLevel4", "view.foldLevel5", "view.foldAllBlockComments"]) {
     ok(`(CC) メニューにコマンド"${id}"が存在する`, foldIds.includes(id));
