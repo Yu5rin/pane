@@ -1814,7 +1814,12 @@ class TableWidget extends WidgetType {
     }
     if (savedWidths.some((w) => w != null)) tbl.style.tableLayout = "fixed";
     tbl.appendChild(colgroup);
-    const mkBtn = (label, title, fn) => { const b = document.createElement("button"); b.type = "button"; b.className = "tbl-ctl"; b.innerHTML = label; b.title = title; b.addEventListener("mousedown", (e) => { e.preventDefault(); e.stopPropagation(); fn(); }); return b; };
+    // 表の操作ボタンの記号。文字(◀ + − ▶)ではなくSVGで描く(線幅1.75。仕様書 第10.1節)。
+    // 以前は文字だったので、フォントによって太さも位置も他のアイコンとそろわなかった(2026-11 の点検)。
+    // ボタンは20px四方なので、絵は12pxで描く。
+    const tblIcon = (d) => `<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${d}"/></svg>`;
+    const ICON_LEFT = tblIcon("M15 18l-6-6 6-6"), ICON_RIGHT = tblIcon("M9 18l6-6-6-6"), ICON_PLUS = tblIcon("M12 5v14M5 12h14"), ICON_MINUS = tblIcon("M5 12h14");
+    const mkBtn = (label, title, fn) => { const b = document.createElement("button"); b.type = "button"; b.className = "tbl-ctl"; b.innerHTML = label; b.title = title; b.setAttribute("aria-label", title); b.addEventListener("mousedown", (e) => { e.preventDefault(); e.stopPropagation(); fn(); }); return b; };
     const pos = () => { try { return view.posAtDOM(wrap); } catch { return t.from; } };
     // ヘッダー行(列操作ボタン付き)
     const thead = document.createElement("thead"); const hr = document.createElement("tr");
@@ -1825,10 +1830,10 @@ class TableWidget extends WidgetType {
       th.innerHTML = renderInline(t.header[c] ?? "");
       const ctl = document.createElement("span"); ctl.className = "tbl-ctls";
       const cc = c;
-      if (cc > 0) ctl.appendChild(mkBtn("&#x25C0;", "列を左へ移動", () => mutateTable(view, pos(), (x) => { for (const arr of [x.header, x.aligns, ...x.body]) arr.splice(cc - 1, 0, ...arr.splice(cc, 1)); })));
-      ctl.appendChild(mkBtn("+", "列を右に挿入", () => mutateTable(view, pos(), (x) => { x.header.splice(cc + 1, 0, ""); x.aligns.splice(cc + 1, 0, null); for (const r of x.body) r.splice(cc + 1, 0, ""); })));
-      if (cols > 1) ctl.appendChild(mkBtn("&#x2212;", "列を削除", () => mutateTable(view, pos(), (x) => { x.header.splice(cc, 1); x.aligns.splice(cc, 1); for (const r of x.body) r.splice(cc, 1); })));
-      if (cc < cols - 1) ctl.appendChild(mkBtn("&#x25B6;", "列を右へ移動", () => mutateTable(view, pos(), (x) => { for (const arr of [x.header, x.aligns, ...x.body]) arr.splice(cc + 1, 0, ...arr.splice(cc, 1)); })));
+      if (cc > 0) ctl.appendChild(mkBtn(ICON_LEFT, "列を左へ移動", () => mutateTable(view, pos(), (x) => { for (const arr of [x.header, x.aligns, ...x.body]) arr.splice(cc - 1, 0, ...arr.splice(cc, 1)); })));
+      ctl.appendChild(mkBtn(ICON_PLUS, "列を右に挿入", () => mutateTable(view, pos(), (x) => { x.header.splice(cc + 1, 0, ""); x.aligns.splice(cc + 1, 0, null); for (const r of x.body) r.splice(cc + 1, 0, ""); })));
+      if (cols > 1) ctl.appendChild(mkBtn(ICON_MINUS, "列を削除", () => mutateTable(view, pos(), (x) => { x.header.splice(cc, 1); x.aligns.splice(cc, 1); for (const r of x.body) r.splice(cc, 1); })));
+      if (cc < cols - 1) ctl.appendChild(mkBtn(ICON_RIGHT, "列を右へ移動", () => mutateTable(view, pos(), (x) => { for (const arr of [x.header, x.aligns, ...x.body]) arr.splice(cc + 1, 0, ...arr.splice(cc, 1)); })));
       th.appendChild(ctl);
       // 右クリックでは反応しない(理由はImageWidgetのmousedownコメントと同じ:
       // 反応すると表ウィジェットが生テキストへ置き換わり、右クリックメニューの文脈判定を妨げる)。
@@ -1854,8 +1859,8 @@ class TableWidget extends WidgetType {
         td.innerHTML = renderInline(r[c] ?? "");
         if (c === 0) {
           const ctl = document.createElement("span"); ctl.className = "tbl-ctls tbl-row-ctls";
-          ctl.appendChild(mkBtn("+", "行を下に挿入", () => mutateTable(view, pos(), (x) => x.body.splice(ri + 1, 0, Array(cols).fill("")))));
-          ctl.appendChild(mkBtn("&#x2212;", "行を削除", () => mutateTable(view, pos(), (x) => x.body.splice(ri, 1))));
+          ctl.appendChild(mkBtn(ICON_PLUS, "行を下に挿入", () => mutateTable(view, pos(), (x) => x.body.splice(ri + 1, 0, Array(cols).fill("")))));
+          ctl.appendChild(mkBtn(ICON_MINUS, "行を削除", () => mutateTable(view, pos(), (x) => x.body.splice(ri, 1))));
           td.appendChild(ctl);
         }
         const rc = ri, cc = c;
@@ -3215,7 +3220,20 @@ const tablePasteGuard = EditorState.transactionFilter.of((tr) => {
   return { changes: { from, to, insert: flat }, selection: { anchor: from + flat.length }, userEvent: "input.paste", scrollIntoView: true };
 });
 
+// 何も書いていない文書に出す、薄い案内(2026-11 の点検。利用者が入れる方を選んだ)。
+// 起動した直後の真っ白な画面では、どこに何を書けばよいのか、説明書がどこにあるのかが分からなかった。
+// 1文字でも打てば消える(文書の内容には含まれない)。Markdownの文書でだけ出す
+// (コードやプレーンテキストでは「# で見出し」が当てはまらない)。
+//
+// CodeMirror の placeholder() は使わない。あれは案内の文字を、本文の行の中のDOMとして置く。
+// 行の文字を読む処理(回帰スイートの多くがそう。画面の文字を読む道具も同じ)から、案内が
+// 本文の内容として見えてしまう(入れた直後、空の文書を確かめる検査が「本文が空でない」と落ちた)。
+// 文書が空のときだけ属性を付け、文字はCSSの content で描く(style.css)。DOMの文字にはならない。
+const EMPTY_DOC_HINT = "ここに書き始めます。行頭に「# 」で見出し、「- 」で箇条書き。F1 で取扱説明書を開きます。";
+const emptyDocHint = EditorView.contentAttributes.compute(["doc"], (state) => (state.doc.length === 0 ? { "data-empty-hint": EMPTY_DOC_HINT } : {}));
+
 const livePreviewExt = () => [
+  emptyDocHint,
   livePreview, skipHiddenTailMarks, tablePasteGuard, codeCopyHotBlockField, tableBlocksField, tableField, tableAutoFormat,
   frontmatterField, tocParasField, tocField, extTogglesField,
   // 外部リソース読み込み同意(remoteConsentField、上記コメント参照)。extTogglesFieldと違い

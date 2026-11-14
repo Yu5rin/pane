@@ -21,6 +21,8 @@ import { trapTabKey, focusModal } from "./focus-trap.js";
 // F3/Shift+F3(次を検索・前を検索、グローバルショートカット経由)の実行後に検索パネルの
 // 件数表示を更新するためのフック(不具合2)。search-ui.js側の解説コメント参照。
 import { refreshOpenSearchCount } from "./search-ui.js";
+import { parseShortcut, matchesShortcut, displayShortcut } from "./shortcut-keys.js";
+import { getKeyboardLayout } from "./keyboard-layout.js";
 
 // Paneは仕様書上Windows専用(WinForms + WebView2)のため、修飾キーはCtrl固定でよい。
 const MOD = "Ctrl";
@@ -39,7 +41,10 @@ export function buildCommands(ctx) {
     // 有効になるのはsettings.jsonを直接編集してdisplayMode:"tab"にした場合のみ
     // (既定のウィンドウ形式では常に無効表示のまま)。
     // ショートカットは割り当てない(Ctrl+Tは既に「表を挿入」para.tableが使用済み)。
-    { id: "file.newTab", menu: "File", label: "新しいタブ", grayed: (c) => c.getState().displayMode !== "tab", run: app((c) => c.actions.newTab()) },
+    // タブ形式でないときは、メニューに並べない(hidden)。以前は常に灰色で出ていて、既定の
+    // ウィンドウ形式では一度も押せない項目が「ファイル」の3番目にあった。grayed は残す
+    // (ショートカットを割り当てた人が、ウィンドウ形式で動かしてしまわないように)。
+    { id: "file.newTab", menu: "File", label: "新しいタブ", hidden: (c) => c.getState().displayMode !== "tab", grayed: (c) => c.getState().displayMode !== "tab", run: app((c) => c.actions.newTab()) },
     { id: "file.open", menu: "File", label: "開く", shortcut: `${MOD}+O`, run: app((c) => c.actions.openFile()) },
     { id: "file.openFolder", menu: "File", label: "フォルダを開く", run: app((c) => c.actions.openFolder()) },
     { id: "file.quickOpen", menu: "File", label: "クイックオープン", shortcut: `${MOD}+P`, run: app((c) => c.actions.openQuickOpen()), enabled: () => ctx.getState().folderLoaded },
@@ -49,7 +54,11 @@ export function buildCommands(ctx) {
       submenu: () => {
         const files = ctx.getState().recentFiles ?? [];
         if (!files.length) return [{ label: "(なし)", disabled: true }];
-        return files.map((p) => ({ label: p, run: () => ctx.actions.openRecentFile(p) }));
+        const entries = files.map((p) => ({ label: p, run: () => ctx.actions.openRecentFile(p) }));
+        // 一覧の下に、履歴を消す項目を置く(以前は設定の「詳細」まで行かないと消せなかった)。
+        entries[entries.length - 1].separatorAfter = true;
+        entries.push({ label: "履歴を消去", disabled: !ctx.bridge, run: () => ctx.actions.clearRecentFiles() });
+        return entries;
       },
       separatorAfter: true,
     },
@@ -80,7 +89,11 @@ export function buildCommands(ctx) {
     // ---- ヘルプ(メニューバーには出さない。F1・メニューバー右上の「?」ボタン・コマンドパレットから
     // 開く。OSの慣習どおりF1はヘルプを開く唯一の目的のキーで、本文編集中の他のショートカットとは
     // 衝突しない値のため無条件に割り当てる) ----
-    { id: "help.manual", label: "取扱説明書を開く", shortcut: "F1", run: app((c) => c.actions.openHelp()) },
+    { id: "help.manual", menu: "Help", label: "取扱説明書を開く", shortcut: "F1", run: app((c) => c.actions.openHelp()) },
+    { id: "help.shortcuts", menu: "Help", label: "キーボードショートカットの一覧", run: app((c) => c.actions.openSettings("keyboard")) },
+    // コマンドパレット。キーの待ち受けは main.js にある(shortcut にすると二重に動くので keyHint)。
+    { id: "help.commandPalette", menu: "Help", label: "コマンドパレット", keyHint: "Ctrl+Shift+P", run: app((c) => c.actions.openCommandPalette()) },
+    { id: "help.about", menu: "Help", label: "バージョン情報と更新の確認", run: app((c) => c.actions.openSettings("versionInfo")) },
 
     // ---- Edit(第2.2節) ----
     // 標準の編集操作(E-01〜E-03・E-08・E-14・E-15)。キーボードでも行えるが、Typoraと同じく
@@ -100,8 +113,8 @@ export function buildCommands(ctx) {
     // shortcutではなくkeyHintにする(Ctrl+Z/Ctrl+Yはbindshortcutsで横取りしない)。
     { id: "edit.undo", menu: "Edit", label: "元に戻す", keyHint: `${MOD}+Z`, run: () => editor().applyAction("undo") },
     { id: "edit.redo", menu: "Edit", label: "やり直す", keyHint: `${MOD}+Y`, run: () => editor().applyAction("redo"), separatorAfter: true },
-    { id: "edit.newParagraph", menu: "Edit", label: "段落を追加", keyHint: "Enter", run: () => editor().applyAction("newParagraph") },
-    { id: "edit.softBreak", menu: "Edit", label: "改行(ソフトブレーク)", keyHint: "Shift+Enter", run: () => editor().applyAction("softBreak"), separatorAfter: true },
+    { id: "edit.newParagraph", menu: "Paragraph", label: "段落を追加", keyHint: "Enter", run: () => editor().applyAction("newParagraph") },
+    { id: "edit.softBreak", menu: "Paragraph", label: "改行(ソフトブレーク)", keyHint: "Shift+Enter", run: () => editor().applyAction("softBreak"), separatorAfter: true },
     { id: "edit.cut", menu: "Edit", label: "切り取り", keyHint: `${MOD}+X`, enabled: () => ctx.getState().hasSelection, run: () => document.execCommand("cut") },
     { id: "edit.copy", menu: "Edit", label: "コピー", keyHint: `${MOD}+C`, enabled: () => ctx.getState().hasSelection, run: () => document.execCommand("copy") },
     { id: "edit.paste", menu: "Edit", label: "貼り付け", keyHint: `${MOD}+V`, run: app((c) => c.actions.pasteRich()) },
@@ -114,7 +127,7 @@ export function buildCommands(ctx) {
     { id: "edit.selectStyleRange", menu: "Edit", label: "スタイル範囲を選択", shortcut: `${MOD}+E`, run: () => editor().applyAction("selectStyleRange") },
     { id: "edit.selectWord", menu: "Edit", label: "単語を選択", shortcut: `${MOD}+D`, run: () => editor().applyAction("selectWord") },
     { id: "edit.deleteWord", menu: "Edit", label: "単語を削除", shortcut: `${MOD}+Shift+D`, run: () => editor().applyAction("deleteWord") },
-    { id: "edit.deleteTableRow", menu: "Edit", label: "表の行を削除", shortcut: `${MOD}+Shift+Backspace`, run: () => editor().applyAction("deleteTableRow"), separatorAfter: true },
+    { id: "edit.deleteTableRow", menu: "Paragraph", label: "表の行を削除", shortcut: `${MOD}+Shift+Backspace`, run: () => editor().applyAction("deleteTableRow"), separatorAfter: true },
     { id: "edit.docStart", menu: "Edit", label: "先頭へジャンプ", keyHint: `${MOD}+Home`, run: () => editor().applyAction("docStart") },
     { id: "edit.docEnd", menu: "Edit", label: "末尾へジャンプ", keyHint: `${MOD}+End`, run: () => editor().applyAction("docEnd") },
     { id: "edit.jumpToSelection", menu: "Edit", label: "選択箇所へジャンプ", shortcut: `${MOD}+J`, run: () => editor().applyAction("scrollToSelection"), separatorAfter: true },
@@ -229,7 +242,7 @@ export function buildCommands(ctx) {
     // すべてのコメントブロックを折りたたむ(VS Code Fold All Block Comments相当。
     // ユーザーが例に挙げた項目そのもの)。
     { id: "view.foldAllBlockComments", menu: "View", label: "すべてのコメントブロックを折りたたむ", run: () => editor().foldAllBlockComments(), enabled: () => ctx.getState().mode === "code" && editor().isCodeFolding(), separatorAfter: true },
-    { id: "view.gotoLine", menu: "View", label: "指定行へジャンプ", shortcut: `${MOD}+G`, run: app((c) => c.actions.gotoLineFlow()), separatorAfter: true },
+    { id: "view.gotoLine", menu: "Edit", label: "指定行へジャンプ", shortcut: `${MOD}+G`, run: app((c) => c.actions.gotoLineFlow()), separatorAfter: true },
     { id: "view.fullscreen", menu: "View", label: "全画面表示", shortcut: "F11", run: app((c) => c.actions.toggleFullscreen()), checked: () => ctx.getState().fullscreen },
     { id: "view.zoomReset", menu: "View", label: "文字サイズを既定に戻す", shortcut: `${MOD}+Shift+0`, run: app((c) => c.actions.zoomReset()) },
     { id: "view.zoomIn", menu: "View", label: "拡大", shortcut: `${MOD}+Shift+=`, run: app((c) => c.actions.zoomIn()) },
@@ -237,6 +250,7 @@ export function buildCommands(ctx) {
     { id: "view.switchDocument", menu: "View", label: "開いている文書を切り替え", shortcut: `${MOD}+Tab`, run: app((c) => c.actions.switchDocument()) },
     { id: "view.alwaysOnTop", menu: "View", label: "常に手前に表示", run: app((c) => c.actions.toggleAlwaysOnTop()), checked: () => ctx.getState().alwaysOnTop, separatorAfter: true },
     { id: "view.wordCount", menu: "View", label: "文字数カウントの表示", run: app((c) => c.actions.toggleWordCount()), checked: () => ctx.getState().showWordCount, separatorAfter: true },
+    { id: "view.toggleTheme", menu: "View", label: "ライト/ダークを切り替え", run: app((c) => c.actions.toggleTheme()) },
     { id: "view.devtools", menu: "View", label: "開発者ツール", shortcut: "Shift+F12", run: app((c) => c.actions.openDevTools()), enabled: () => !!ctx.bridge },
   ];
 
@@ -331,10 +345,128 @@ export function routeNativeMenuArrowSwitch(menu, direction) { activeNativeOwner?
 // 内部の分類キー(コマンド定義の menu プロパティ、File/Edit/Paragraph/Format/View)は
 // 既存コード全体の判定に使われているため英語のまま維持し、表示ラベルだけ日本語化する
 // (多言語対応は将来別途行う予定のため、ここでは決め打ちの日本語のみとする)。
-export const MENU_LABELS = { File: "ファイル", Edit: "編集", Paragraph: "段落", Format: "書式", View: "表示" };
+// メニューやパレットに出すショートカットの文字。今のキーボードの配列で実際に押すキーの刻印に合わせる
+// (日本語配列では「Ctrl+=」を「Ctrl+^」と出す。shortcut-keys.js の説明を参照)。
+export function shownShortcut(shortcut) {
+  return shortcut ? displayShortcut(shortcut, getKeyboardLayout()) : shortcut;
+}
+
+export const MENU_LABELS = { File: "ファイル", Edit: "編集", Paragraph: "段落", Format: "書式", View: "表示", Help: "ヘルプ" };
+
+// ---- メニューの並び ----
+// どのメニューに、何を、どの順で、どこに区切りを入れて並べるかは、ここ1か所で決める。
+// コマンドの定義(buildCommands)は、実行する中身・ショートカット・有効/無効だけを持つ。
+//
+// 以前はコマンドの定義の順がそのままメニューの並びで、「表示」に32項目、「編集」に26項目が
+// 1列に並んでいた(2026-11 の点検)。Markdownの文書では使えない折りたたみの12項目が
+// 「表示」の半分近くを占め、よく使う項目が埋もれていた。まとまりごとに下の階層へ入れる。
+//
+// 書き方:
+//   "コマンドのid"                … その項目
+//   ["コマンドのid", "表示名"]    … メニューの中でだけ別の名前で出す(下の階層では短くする等)
+//   "---"                         … 区切り
+//   { label, items: [...] }       … 下の階層
+// 決まり:
+//   ・続けて入力や選択を求める項目(ダイアログ・一覧が開く)は、名前の末尾に「…」を付ける
+//   ・コマンドのidとショートカットは変えない(キー割り当ての設定がidを見ている)
+//   ・ここに書かれていないコマンドは、メニューには出ない(コマンドパレットには出る)。
+//     .verify-menu-layout.mjs が、書き忘れ(どのメニューにも無いコマンド)を見つける
+export const MENU_ORDER = ["File", "Edit", "View", "Paragraph", "Format", "Help"];
+export const MENU_LAYOUT = {
+  File: [
+    "file.new", "file.newWindow", "file.newTab", "---",
+    ["file.open", "開く…"], ["file.openFolder", "フォルダを開く…"], ["file.quickOpen", "クイックオープン…"],
+    "file.recentFiles", "file.reopenClosed", "---",
+    "file.save", ["file.saveAs", "名前を付けて保存…"], "file.duplicate", "---",
+    { label: "エクスポート", items: [
+      ["file.exportPdf", "PDF…"], ["file.exportHtml", "HTML…"], ["file.exportHtmlPlain", "HTML(スタイルなし)…"], "---",
+      ["file.exportWord", "Word…"], ["file.exportEpub", "EPUB…"], ["file.exportRtf", "RTF…"], ["file.exportLatex", "LaTeX…"], ["file.exportTextile", "Textile…"],
+    ] },
+    ["file.print", "印刷…"], "---",
+    ["file.settings", "設定…"], "---",
+    "file.close",
+  ],
+  Edit: [
+    "edit.undo", "edit.redo", "---",
+    "edit.cut", "edit.copy", "edit.paste", "edit.pastePlain",
+    { label: "形式を選んでコピー", items: ["edit.copyAll", "edit.copyMarkdown", "edit.copyHtml"] }, "---",
+    "edit.selectAll",
+    { label: "選択", items: ["edit.selectLine", "edit.selectWord", "edit.selectStyleRange", "---", "edit.deleteWord"] }, "---",
+    ["edit.find", "検索…"], "edit.findNext", "edit.findPrev", ["edit.replace", "置換…"], ["edit.globalSearch", "フォルダ内を検索…"], "---",
+    { label: "移動", items: ["edit.docStart", "edit.docEnd", "edit.jumpToSelection", ["view.gotoLine", "指定行へジャンプ…"]] }, "---",
+    "edit.insertDateTime",
+  ],
+  View: [
+    { label: "サイドバー", items: ["view.sidebar", "---", ["view.outline", "アウトライン"], "view.articleList", "view.fileTree"] },
+    { label: "編集モード", items: [["view.modeMarkdown", "Markdown"], ["view.modePlain", "プレーンテキスト"], ["view.modeCode", "コード"]] }, "---",
+    "view.sourceMode", "view.focusMode", "view.typewriterMode", "view.wordWrap", "view.wordCount", "---",
+    { label: "折りたたみ", items: [
+      "view.foldAtCursor", "view.unfoldAtCursor", "view.foldAllRanges", "view.unfoldAllRanges", "---",
+      "view.foldRecursively", "view.unfoldRecursively", "---",
+      "view.foldLevel1", "view.foldLevel2", "view.foldLevel3", "view.foldLevel4", "view.foldLevel5", "---",
+      "view.foldAllBlockComments",
+    ] }, "---",
+    ["view.zoomIn", "文字を大きく"], ["view.zoomOut", "文字を小さく"], "view.zoomReset", "---",
+    "view.toggleTheme", "view.fullscreen", "view.alwaysOnTop", "view.switchDocument", "---",
+    "view.devtools",
+  ],
+  Paragraph: [
+    "para.h1", "para.h2", "para.h3", "para.h4", "para.h5", "para.h6", "para.p", "para.headingUp", "para.headingDown", "---",
+    "edit.newParagraph", "edit.softBreak", "---",
+    "para.list", "para.olist", "para.taskList", "para.indent", "para.outdent", "---",
+    "para.quote", ["para.codeblock", "コードブロック"], ["para.mathBlock", "数式ブロック"], ["para.table", "表"], "para.hr", "---",
+    "edit.deleteTableRow", "---",
+    "para.frontMatter",
+  ],
+  Format: [
+    "format.bold", "format.italic", "format.underline", "format.strike", "format.code", "format.highlight", "format.superscript", "format.subscript", "---",
+    ["format.link", "リンクを挿入…"], ["format.image", "画像を挿入…"], "---",
+    "format.eraseFormat",
+  ],
+  Help: [
+    ["help.manual", "取扱説明書"], ["help.shortcuts", "キーボードショートカットの一覧…"], ["help.commandPalette", "コマンドパレット…"], "---",
+    ["help.about", "バージョン情報と更新の確認…"],
+  ],
+};
+
+// 配置の定義から、そのメニューに並べる項目を作る。返すのはコマンドと同じ形のオブジェクト
+// (id・label・shortcut・enabled・checked・run・separatorAfter・submenu)で、描く側
+// (ネイティブのポップアップ・HTMLのドロップダウン)はどちらもこれをそのまま読む。
+// hidden(ctx) が真のコマンドは並べない(「新しいタブ」は、タブ形式のときだけ出す)。
+export function buildMenuItems(menuName, commands, ctx) {
+  const byId = new Map(commands.map((c) => [c.id, c]));
+  const expand = (layout, path) => {
+    const out = [];
+    let pendingSeparator = false;
+    layout.forEach((entry, index) => {
+      if (entry === "---") { pendingSeparator = out.length > 0; return; }
+      let item = null;
+      if (typeof entry === "string" || Array.isArray(entry)) {
+        const [id, label] = Array.isArray(entry) ? entry : [entry, null];
+        const cmd = byId.get(id);
+        if (!cmd || cmd.hidden?.(ctx)) return;
+        item = { ...cmd, label: label ?? cmd.label, separatorAfter: false };
+      } else {
+        const id = `menu:${path}/${index}`;
+        const children = () => expand(entry.items, `${path}/${index}`);
+        // 中身がすべて使えないときは、親も灰色にする(開いても何もできない階層を開かせない)。
+        item = {
+          id, label: entry.label, separatorAfter: false, submenu: children,
+          enabled: () => children().some((c) => !(c.grayed?.(ctx) ?? false) && (c.enabled ? c.enabled(ctx) : true)),
+        };
+      }
+      if (pendingSeparator) out[out.length - 1].separatorAfter = true;
+      pendingSeparator = false;
+      out.push(item);
+    });
+    return out;
+  };
+  return expand(MENU_LAYOUT[menuName] ?? [], menuName);
+}
+
 export function initMenuBar(container, commands, ctx) {
-  // 並びは「ファイル、編集、表示、段落、書式」。
-  const menus = ["File", "Edit", "View", "Paragraph", "Format"];
+  // 並びは「ファイル、編集、表示、段落、書式、ヘルプ」。中身は MENU_LAYOUT で決める。
+  const menus = MENU_ORDER;
   // コンテナ末尾には右端寄せ用のスペーサーとテーマ切替ボタンが静的HTML側で既に置かれているため、
   // それらは残したまま、メニュー項目だけをその手前に挿入する。
   const anchor = container.firstChild;
@@ -395,18 +527,22 @@ export function initMenuBar(container, commands, ctx) {
       label: item.label,
       // keyHintは「キー操作の案内だけを出し、ここではキーを横取りしない」項目用
       // (bindShortcutsはshortcutしか見ない)。詳細はEditメニューの標準操作のコメント参照。
-      shortcut: item.shortcut ?? item.keyHint ?? "",
+      shortcut: shownShortcut(item.shortcut) ?? item.keyHint ?? "",
       enabled,
       checked: !!item.checked?.(ctx),
       separatorAfter: !!item.separatorAfter,
       note: item.note ?? "",
     };
-    if (item.id) nativeRunRegistry.set(item.id, item.run);
+    if (item.id && item.run) nativeRunRegistry.set(item.id, item.run);
     if (item.submenu) {
       node.submenu = item.submenu(ctx).map((entry, i) => {
+        // 下の階層に並ぶのがコマンド(idを持つ)なら、上の階層と同じ作り方をする
+        // (ショートカット・チェック・有効/無効・区切りがそのまま出る)。
+        // 「最近使ったファイル」のような、その場で作る一覧(idを持たない)は従来どおり。
+        if (entry.id) return buildNativeItem(entry);
         const subId = `${item.id}/${i}`;
         if (!entry.disabled) nativeRunRegistry.set(subId, entry.run);
-        return { id: subId, label: entry.label, shortcut: "", enabled: !entry.disabled, checked: false, separatorAfter: false, note: "" };
+        return { id: subId, label: entry.label, shortcut: "", enabled: !entry.disabled, checked: false, separatorAfter: !!entry.separatorAfter, note: "" };
       });
     }
     return node;
@@ -443,7 +579,7 @@ export function initMenuBar(container, commands, ctx) {
     // 新しいポップアップを開くため起きないはずだが、取りこぼし防止)。
     clearNativeHighlight();
     nativeRunRegistry = new Map();
-    const items = commands.filter((c) => c.menu === menuName && !c.contextOnly).map(buildNativeItem);
+    const items = buildMenuItems(menuName, commands, ctx).map(buildNativeItem);
     nativeOpenBtn = btn;
     nativeOpenMenuName = menuName;
     nativeOpenedByHover = viaHover;
@@ -555,42 +691,20 @@ export function initMenuBar(container, commands, ctx) {
     if (e.key === "Escape") { closeAll(); return; }
   }
 
-  // サブメニュー(最近使ったファイル等)を親項目の右側に表示する。動的リストなので
-  // 開くたびに item.submenu(ctx) を呼び直す。
-  function renderSubmenu(entries, anchorRow) {
-    const rect = anchorRow.getBoundingClientRect();
-    const sub = document.createElement("div");
-    sub.className = "menu-dropdown";
-    for (const entry of entries) {
-      const row = document.createElement("button");
-      row.type = "button";
-      row.className = "menu-item" + (entry.disabled ? " disabled" : "");
-      row.innerHTML = `<span class="menu-item-check"></span><span class="menu-item-label">${entry.label}</span><span class="menu-item-shortcut"></span>`;
-      if (entry.disabled) row.disabled = true;
-      else row.addEventListener("click", () => { closeAll(); entry.run(); });
-      sub.appendChild(row);
-    }
-    sub.style.left = rect.right + "px";
-    sub.style.top = rect.top + "px";
-    container.appendChild(sub);
-    return sub;
-  }
-
-  function renderDropdown(menuName, anchorEl) {
-    const items = commands.filter((c) => c.menu === menuName && !c.contextOnly);
-    const dd = document.createElement("div");
-    dd.className = "menu-dropdown";
+  // 項目の並びを1つのドロップダウンにする。上の階層・下の階層のどちらもこれで描く
+  // (下の階層にもショートカット・チェック・区切り・無効の表示が出る)。
+  function fillDropdown(dd, items) {
     for (const item of items) {
       const grayed = item.grayed?.(ctx) ?? false;
-      const enabled = !grayed && (item.enabled ? item.enabled(ctx) : true);
+      const enabled = !item.disabled && !grayed && (item.enabled ? item.enabled(ctx) : true);
       const row = document.createElement("button");
       row.type = "button";
       row.className = "menu-item" + (enabled ? "" : " disabled");
       const checked = item.checked?.(ctx);
       row.innerHTML = `<span class="menu-item-check">${checked ? "✓" : ""}</span>` +
         `<span class="menu-item-label">${item.label}</span>` +
-        `<span class="menu-item-shortcut">${item.submenu ? "▶" : item.shortcut ? item.shortcut : (item.keyHint ?? item.note ?? "")}</span>`;
-      if (item.submenu) {
+        `<span class="menu-item-shortcut">${item.submenu ? "▶" : item.shortcut ? shownShortcut(item.shortcut) : (item.keyHint ?? item.note ?? "")}</span>`;
+      if (item.submenu && enabled) {
         let subEl = null;
         row.addEventListener("mouseenter", () => {
           subEl?.remove();
@@ -612,6 +726,25 @@ export function initMenuBar(container, commands, ctx) {
         dd.appendChild(sep);
       }
     }
+  }
+
+  // 下の階層を、親の項目の右側に表示する。開くたびに item.submenu(ctx) を呼び直す
+  // (「最近使ったファイル」のように、開くたびに中身が変わるものがある)。
+  function renderSubmenu(entries, anchorRow) {
+    const rect = anchorRow.getBoundingClientRect();
+    const sub = document.createElement("div");
+    sub.className = "menu-dropdown";
+    fillDropdown(sub, entries);
+    sub.style.left = rect.right + "px";
+    sub.style.top = rect.top + "px";
+    container.appendChild(sub);
+    return sub;
+  }
+
+  function renderDropdown(menuName, anchorEl) {
+    const dd = document.createElement("div");
+    dd.className = "menu-dropdown";
+    fillDropdown(dd, buildMenuItems(menuName, commands, ctx));
     const rect = anchorEl.getBoundingClientRect();
     dd.style.left = rect.left + "px";
     dd.style.top = rect.bottom + "px";
@@ -846,7 +979,7 @@ export function initCommandPalette(root, commands, ctx) {
         const li = document.createElement("li");
         li.className = i === sel ? "sel" : "";
         const menuLabel = cmd.menu ? (MENU_LABELS[cmd.menu] ?? cmd.menu) : "";
-        const keyText = cmd.shortcut || cmd.keyHint || "";
+        const keyText = shownShortcut(cmd.shortcut) || cmd.keyHint || "";
         li.innerHTML = `<span>${menuLabel ? menuLabel + ": " : ""}${cmd.label}</span>` + (keyText ? `<span class="palette-shortcut">${keyText}</span>` : "");
         li.addEventListener("mousedown", (e) => { e.preventDefault(); close(); cmd.run(); });
         list.appendChild(li);
@@ -1082,7 +1215,7 @@ export function bindShortcuts(commands, ctx) {
     if (ctx.shortcutsSuppressed) return;
     for (const cmd of commands) {
       if (!cmd.shortcut) continue;
-      if (!matchesShortcut(e, parseShortcut(cmd.shortcut))) continue;
+      if (!matchesShortcut(e, parseShortcut(cmd.shortcut), getKeyboardLayout())) continue;
       if (!isShortcutEnabled(cmd, ctx)) {
         console.log(`[shortcut] ${cmd.shortcut} は一致したが無効(grayed/enabled=false): ${cmd.id}`);
         continue;
@@ -1094,35 +1227,5 @@ export function bindShortcuts(commands, ctx) {
     }
   }, true);
 }
-function parseShortcut(s) {
-  const parts = s.split("+");
-  const key = parts.pop();
-  return {
-    key: key.toLowerCase(),
-    ctrl: parts.includes("Ctrl"),
-    shift: parts.includes("Shift"),
-    alt: parts.includes("Alt"),
-  };
-}
-// 記号キーはShift併用時にe.keyが別の文字になる(例: Shift+` → "~")ため、
-// 物理キー(e.code)で判定する。それ以外は論理キー(e.key)で判定する。
-// "0"はShift併用時にe.keyが")"になる(Ctrl+Shift+0、文字サイズを既定に戻す)ため、他の記号キーと
-// 同様に物理キー(e.code)で判定する対象へ加える。
-const SYMBOL_CODE_MAP = { "`": "Backquote", "[": "BracketLeft", "]": "BracketRight", "\\": "Backslash", "-": "Minus", "=": "Equal", "0": "Digit0" };
-function matchesShortcut(e, combo) {
-  if (/^[0-9]$/.test(combo.key)) {
-    // 数字はすべて物理キーで判定する。Shiftを押していると e.key は記号になる
-    // (日本語キーボードの Shift+1 は「!」、Shift+5 は「%」)ので、e.key で比べると
-    // Ctrl+Shift+1〜3(サイドバーの切り替え)や Alt+Shift+5(取り消し線)が一度も一致しなかった
-    // (2026-11 の点検。以前は「0」だけを物理キーで見ていた)。テンキーの数字も同じに扱う。
-    if (e.code !== `Digit${combo.key}` && e.code !== `Numpad${combo.key}`) return false;
-  } else if (SYMBOL_CODE_MAP[combo.key]) {
-    if (e.code !== SYMBOL_CODE_MAP[combo.key]) return false;
-  } else if (e.key.toLowerCase() !== combo.key) {
-    return false;
-  }
-  if ((e.ctrlKey || e.metaKey) !== combo.ctrl) return false;
-  if (e.shiftKey !== combo.shift) return false;
-  if (e.altKey !== combo.alt) return false;
-  return true;
-}
+// キーの照合(parseShortcut・matchesShortcut)は shortcut-keys.js にある。記号のキーを、キーボードの
+// 配列に合わせて(キーの刻印どおりに)判定する。以前はここで、キーの位置だけを見て判定していた。

@@ -16,7 +16,7 @@ const ok = (label, cond) => console.log(`${cond ? "OK  " : "NG  "} ${label}`);
 // ---- 起動時の健全性 ----
 ok("ページエラーなし", errors.length === 0);
 const menus = await page.$$eval("#menubar .menu-top", (e) => e.map((x) => x.textContent));
-ok(`メニューバー日本語5項目 ${JSON.stringify(menus)}`, menus.join() === "ファイル,編集,表示,段落,書式");
+ok(`メニューバー日本語6項目 ${JSON.stringify(menus)}`, menus.join() === "ファイル,編集,表示,段落,書式,ヘルプ");
 
 // ---- サイドバー ----
 ok("サイドバーは初期状態で閉じている", await page.evaluate(() => document.getElementById("sidebar").classList.contains("collapsed")));

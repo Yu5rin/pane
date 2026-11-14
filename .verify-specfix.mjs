@@ -17,6 +17,9 @@
 //   (J) ページエラー・コンソールエラーが0件であること
 import pw from "playwright";
 const { chromium } = pw;
+// メニューの項目は、まとまりごとに下の階層(submenu)へ入っている(src/commands.js の MENU_LAYOUT)。
+// 項目を探すときは、下の階層も含めて平らにしてから探す。
+const flatMenuItems = (items) => (items ?? []).flatMap((i) => [i, ...flatMenuItems(i.submenu)]);
 
 const PORT = 8167;
 const BASE = `http://localhost:${PORT}/index.html`;
@@ -209,13 +212,16 @@ function findItem(items, label) {
   await page.click("#menubar .menu-top:text('ファイル')");
   await page.waitForTimeout(200);
   const fileMsg = await lastMsg(page, "open-menu");
-  const labels = (fileMsg?.items ?? []).map((i) => i.label);
-  ok(`(F) Fileメニューに「エクスポート: RTF」がある ${JSON.stringify(labels)}`, labels.includes("エクスポート: RTF"));
-  ok("(F) Fileメニューに「エクスポート: LaTeX」がある", labels.includes("エクスポート: LaTeX"));
-  ok("(F) Fileメニューに「エクスポート: Textile」がある", labels.includes("エクスポート: Textile"));
-  const rtfItem = findItem(fileMsg.items, "エクスポート: RTF");
-  const latexItem = findItem(fileMsg.items, "エクスポート: LaTeX");
-  const textileItem = findItem(fileMsg.items, "エクスポート: Textile");
+  // エクスポートの各形式は、File > エクスポート の下の階層にある(名前は「RTF…」のように形式だけ)。
+  const exportItems = flatMenuItems(fileMsg?.items);
+  const byId = (items, id) => flatMenuItems(items).find((i) => i.id === id);
+  const labels = exportItems.map((i) => i.label);
+  ok(`(F) Fileメニューのエクスポートに「RTF…」がある ${JSON.stringify(labels)}`, byId(fileMsg?.items, "file.exportRtf")?.label === "RTF…");
+  ok("(F) Fileメニューのエクスポートに「LaTeX…」がある", byId(fileMsg?.items, "file.exportLatex")?.label === "LaTeX…");
+  ok("(F) Fileメニューのエクスポートに「Textile…」がある", byId(fileMsg?.items, "file.exportTextile")?.label === "Textile…");
+  const rtfItem = byId(fileMsg.items, "file.exportRtf");
+  const latexItem = byId(fileMsg.items, "file.exportLatex");
+  const textileItem = byId(fileMsg.items, "file.exportTextile");
   ok("(F) Pandoc未導入時、RTFは無効表示", rtfItem?.enabled === false && rtfItem?.note === "Pandoc未導入");
   ok("(F) Pandoc未導入時、LaTeXは無効表示", latexItem?.enabled === false && latexItem?.note === "Pandoc未導入");
   ok("(F) Pandoc未導入時、Textileは無効表示", textileItem?.enabled === false && textileItem?.note === "Pandoc未導入");
@@ -228,9 +234,9 @@ function findItem(items, label) {
   await page.click("#menubar .menu-top:text('ファイル')");
   await page.waitForTimeout(200);
   const fileMsg2 = await lastMsg(page, "open-menu");
-  ok("(F) Pandoc導入時、RTFは有効", findItem(fileMsg2.items, "エクスポート: RTF")?.enabled === true);
-  ok("(F) Pandoc導入時、LaTeXは有効", findItem(fileMsg2.items, "エクスポート: LaTeX")?.enabled === true);
-  ok("(F) Pandoc導入時、Textileは有効", findItem(fileMsg2.items, "エクスポート: Textile")?.enabled === true);
+  ok("(F) Pandoc導入時、RTFは有効", byId(fileMsg2.items, "file.exportRtf")?.enabled === true);
+  ok("(F) Pandoc導入時、LaTeXは有効", byId(fileMsg2.items, "file.exportLatex")?.enabled === true);
+  ok("(F) Pandoc導入時、Textileは有効", byId(fileMsg2.items, "file.exportTextile")?.enabled === true);
   await page.evaluate(() => window.__reply({ type: "menu-closed", menu: "File" }));
   await page.close();
 }

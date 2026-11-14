@@ -11,6 +11,9 @@
 // ポートは8216。
 import pw from "playwright";
 const { chromium } = pw;
+// メニューの項目は、まとまりごとに下の階層(submenu)へ入っている(src/commands.js の MENU_LAYOUT)。
+// 項目を探すときは、下の階層も含めて平らにしてから探す。
+const flatMenuItems = (items) => (items ?? []).flatMap((i) => [i, ...flatMenuItems(i.submenu)]);
 const browser = await chromium.launch();
 const page = await browser.newPage();
 const errors = [];
@@ -48,7 +51,7 @@ async function openFileMenuAndGetExportPdfItem() {
   // にすると以後のクリックが邪魔されるため、選ばずに閉じておく。
   await page.evaluate(() => window.__reply({ type: "menu-closed", menu: "File" }));
   await page.waitForTimeout(100);
-  return items.find((it) => it.id === "file.exportPdf");
+  return flatMenuItems(items).find((it) => it.id === "file.exportPdf");
 }
 
 const exportSentCount = () => page.evaluate(() => window.__sent.filter((m) => m.type === "export").length);
