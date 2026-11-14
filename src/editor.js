@@ -1,7 +1,7 @@
 // Pane ライブプレビューエディタ (CodeMirror 6)
 // index.html から createEditor() で生成し、返り値のAPIで操作する。
 // 依存はすべてesbuildでビルド成果物(dist/)に同梱する。実行時に外部CDNへは一切到達しない。
-import { EditorView, keymap, Decoration, ViewPlugin, WidgetType, lineNumbers, GutterMarker, gutterLineClass, placeholder } from "@codemirror/view";
+import { EditorView, keymap, Decoration, ViewPlugin, WidgetType, lineNumbers, GutterMarker, gutterLineClass } from "@codemirror/view";
 import { EditorState, Compartment, StateEffect, StateField, Prec, Transaction, countColumn, RangeSet, MapMode } from "@codemirror/state";
 import { markdown } from "@codemirror/lang-markdown";
 import { Strikethrough, Table, Superscript, Subscript, Emoji, Autolink } from "@lezer/markdown";
@@ -3224,10 +3224,16 @@ const tablePasteGuard = EditorState.transactionFilter.of((tr) => {
 // 起動した直後の真っ白な画面では、どこに何を書けばよいのか、説明書がどこにあるのかが分からなかった。
 // 1文字でも打てば消える(文書の内容には含まれない)。Markdownの文書でだけ出す
 // (コードやプレーンテキストでは「# で見出し」が当てはまらない)。
+//
+// CodeMirror の placeholder() は使わない。あれは案内の文字を、本文の行の中のDOMとして置く。
+// 行の文字を読む処理(回帰スイートの多くがそう。画面の文字を読む道具も同じ)から、案内が
+// 本文の内容として見えてしまう(入れた直後、空の文書を確かめる検査が「本文が空でない」と落ちた)。
+// 文書が空のときだけ属性を付け、文字はCSSの content で描く(style.css)。DOMの文字にはならない。
 const EMPTY_DOC_HINT = "ここに書き始めます。行頭に「# 」で見出し、「- 」で箇条書き。F1 で取扱説明書を開きます。";
+const emptyDocHint = EditorView.contentAttributes.compute(["doc"], (state) => (state.doc.length === 0 ? { "data-empty-hint": EMPTY_DOC_HINT } : {}));
 
 const livePreviewExt = () => [
-  placeholder(EMPTY_DOC_HINT),
+  emptyDocHint,
   livePreview, skipHiddenTailMarks, tablePasteGuard, codeCopyHotBlockField, tableBlocksField, tableField, tableAutoFormat,
   frontmatterField, tocParasField, tocField, extTogglesField,
   // 外部リソース読み込み同意(remoteConsentField、上記コメント参照)。extTogglesFieldと違い

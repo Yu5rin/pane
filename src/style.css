@@ -189,8 +189,12 @@ html[data-theme="dark"] {
      var(--surface)のまま(既定ダークは下のhtml[data-theme="dark"]ブロック参照)。 */
   --danger-ink: var(--surface);
 
-  --font-heading: "Source Serif 4", "Noto Serif JP", serif;
   --font-body: "Inter", "Noto Sans JP", system-ui, sans-serif;
+  /* 見出しの書体。使っているのは取扱説明書の見出しとカスタムCSS画面の題名だけ(本体の文書の見出しは
+     --font-body)。以前は明朝体("Source Serif 4", "Noto Serif JP", serif)で、取扱説明書の見出しだけが
+     別のアプリのように見えていた(2026-11 の点検。利用者がゴシックにそろえる方を選んだ)。
+     変数は残す(カスタムCSSでここを指定している人の設定が、これまでどおり効くように)。 */
+  --font-heading: var(--font-body);
   --font-mono: "JetBrains Mono", "BIZ UDゴシック", ui-monospace, monospace;
 }
 html[data-theme="dark"] {
@@ -1896,13 +1900,11 @@ html[data-theme="dark"] .cm-search-ruler-mark.is-active {
 .help-article:focus { outline: none; }
 .help-load-error { color: var(--danger); }
 
-/* 見出し・段落等の本文装飾。--accent(リンク色)等の既存トークンのみを使う。新しい色は導入しない。
-   見出しの書体は本文と同じ --font-body。以前は --font-heading(明朝体)を指定していたが、
-   Pane本体の文書の見出しは本文と同じ書体で描いており、取扱説明書の見出しだけが明朝体で
-   別のアプリのように見えていた(2026-11 の点検。利用者がゴシックにそろえる方を選んだ)。 */
+/* 見出し・段落等の本文装飾。--font-heading(既定は本文と同じ書体)・--accent(リンク色)等の
+   既存トークンのみを使う。新しい色は導入しない。 */
 .help-article h1, .help-article h2, .help-article h3,
 .help-article h4, .help-article h5, .help-article h6 {
-  font-family: var(--font-body);
+  font-family: var(--font-heading, var(--font-body));
   font-weight: 700;
   color: var(--ink);
   line-height: 1.4;
@@ -1968,5 +1970,15 @@ mark.help-search-hit.current { background: var(--accent-ink); color: var(--paper
 .settings-nav-item.active:hover,
 .help-toc-item.active:hover { background: var(--accent-soft); }
 
-/* 何も書いていない文書に出す薄い案内(editor.js の EMPTY_DOC_HINT)。本文より薄い --ink-mute。 */
-#cm-host .cm-placeholder { color: var(--ink-mute); }
+/* 何も書いていない文書に出す薄い案内(editor.js の EMPTY_DOC_HINT)。本文より薄い --ink-mute。
+   文字は content で描く(本文のDOMに文字として入れない。editor.js の説明を参照)。
+   position: absolute にして、カーソルの位置や行の幅に影響させない。 */
+/* 属性は .cm-content に付くので、::before も .cm-content に付ける(attr() は、その疑似要素の
+   持ち主の属性しか読めない。最初の行に付けたら、文字が空になった)。 */
+#cm-host .cm-content[data-empty-hint]::before {
+  content: attr(data-empty-hint);
+  position: absolute;
+  color: var(--ink-mute);
+  pointer-events: none;
+  white-space: nowrap;
+}

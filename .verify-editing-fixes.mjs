@@ -258,18 +258,25 @@ async function pasteHtml(html, plain) {
 // ---- (7) 見た目: 空の文書の案内、ホバーと選択中の色、表のボタン ----
 {
   const page = await open("");
-  const hint = await page.evaluate(() => document.querySelector("#cm-host .cm-placeholder")?.textContent ?? null);
+  // 案内は、本文の枠の ::before に描かれる(本文のDOMの文字にはしない)。
+  const shownHint = () => page.evaluate(() => {
+    const el = document.querySelector("#cm-host .cm-content[data-empty-hint]");
+    return el ? getComputedStyle(el, "::before").content : null;
+  });
+  const hint = await shownHint();
   ok("(7) 何も書いていない文書に、薄い案内が出る", !!hint && hint.includes("F1"), hint);
+  const domText = await page.evaluate(() => document.querySelector("#cm-host .cm-content").textContent);
+  ok("(7) 案内は本文の文字としては置かれない(画面の文字を読む処理から本文に見えない)", domText.trim() === "", domText);
   await page.click(".cm-content");
   await page.keyboard.type("a");
   await page.waitForTimeout(150);
-  ok("(7) 1文字打つと案内が消える", await page.evaluate(() => !document.querySelector("#cm-host .cm-placeholder")));
+  ok("(7) 1文字打つと案内が消える", (await shownHint()) === null);
   ok("(7) 案内の文字は文書の内容に含まれない", (await value(page)).trim() === "a");
   await page.close();
 }
 {
   const page = await open("x\n", "a.js");
-  ok("(7) コードの文書には、Markdown向けの案内を出さない", await page.evaluate(() => !document.querySelector("#cm-host .cm-placeholder")));
+  ok("(7) コードの文書には、Markdown向けの案内を出さない", await page.evaluate(() => !document.querySelector("#cm-host .cm-content[data-empty-hint]")));
   await page.close();
 }
 {
