@@ -1585,11 +1585,39 @@ function handleEnter(view) {
 
 // 本体向けAPI: エディタを生成して操作関数を返す
 // ---- Markdownテーブル ----
+// 表の行の中で、セルの区切りになっている「|」の位置。「\|」(セルの中に書いた縦線)は区切りではない。
+//
+// 2026-11 の点検まで、行を単純に「|」で割っていた。セルに「a \| b」と書いた表は、カーソルが
+// 表を離れたときの自動整形で列が1つ増えた形に書き換えられ、保存すると元に戻せなかった。
+// 構文木(lezer-markdown)とGFMの仕様はどちらも「\|」だけをセル内の縦線として扱うので、
+// それに合わせる(コードの中の「|」は、GFMでも区切りとして扱われる)。
+// セルを割る・セルの位置を求める・何列目にいるかを数える、のすべてでこの1つを使うこと。
+function cellSeparators(text) {
+  const out = [];
+  for (let i = 0; i < text.length; i++) {
+    const ch = text.charCodeAt(i);
+    if (ch === 92 /* \ */) { i++; continue; }
+    if (ch === 124 /* | */) out.push(i);
+  }
+  return out;
+}
+// 行頭からその位置までに区切りがいくつあるか(=何列目にいるかの元)。
+function separatorsBefore(lineText, offset) {
+  let n = 0;
+  for (const p of cellSeparators(lineText)) { if (p < offset) n++; else break; }
+  return n;
+}
 function splitCells(t) {
-  let s = t.trim();
-  if (s.startsWith("|")) s = s.slice(1);
-  if (s.endsWith("|")) s = s.slice(0, -1);
-  return s.split("|").map(c => c.trim());
+  const s = t.trim();
+  const seps = cellSeparators(s);
+  const cells = [];
+  let start = 0;
+  for (const p of seps) { cells.push(s.slice(start, p)); start = p + 1; }
+  cells.push(s.slice(start));
+  // 行頭・行末の「|」の外側にできる空の要素は、セルではない。
+  if (seps.length && seps[0] === 0) cells.shift();
+  if (seps.length && seps[seps.length - 1] === s.length - 1 && cells.length) cells.pop();
+  return cells.map(c => c.trim());
 }
 // 構文木のTableノード(from/toを持つオブジェクト)から表データを組み立てる
 function tableFromNode(state, node) {
@@ -1650,6 +1678,7 @@ const escHtml = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>
 // セル内インライン記法(太字/斜体/打消/ハイライト/コード/リンク/内部リンク)のみ対応
 function renderInline(s) {
   let h = escHtml(s);
+  h = h.replace(/\\\|/g, "|"); // 「\|」はセルの中の縦線。表示では「|」だけにする
   h = h.replace(/`([^`]+)`/g, "<code>$1</code>");
   h = h.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
   h = h.replace(/\*([^*]+)\*/g, "<i>$1</i>");
@@ -1661,9 +1690,12 @@ function renderInline(s) {
 // 生テキスト上のセル位置(行内のc番目セルの末尾)を求める
 function cellPos(state, t, rowIdx, c) {
   const line = state.doc.line(t.startLine + rowIdx);
-  let i = line.text.indexOf("|") + 1, cell = 0;
-  while (cell < c) { const p = line.text.indexOf("|", i); if (p < 0) break; i = p + 1; cell++; }
-  let j = line.text.indexOf("|", i); if (j < 0) j = line.text.length;
+  // 区切りは cellSeparators で数える(「\|」を区切りと数えると、隣のセルを選んでしまう)。
+  const seps = cellSeparators(line.text);
+  const lead0 = seps.length && line.text.slice(0, seps[0]).trim() === "" ? 1 : 0; // 行頭の「|」の分
+  const startSep = seps[lead0 + c - 1];
+  const i = lead0 + c === 0 ? 0 : (startSep === undefined ? (seps.length ? seps[seps.length - 1] + 1 : 0) : startSep + 1);
+  let j = seps.find((p) => p >= i); if (j === undefined) j = line.text.length;
   const seg = line.text.slice(i, j);
   const lead = seg.match(/^\s*/)[0].length, trail = seg.match(/\s*$/)[0].length;
   return { from: line.from + i + lead, to: line.from + j - trail };
@@ -2502,7 +2534,7 @@ function handleTableKey(view, ev) {
   const rowIdx = line.number - t.startLine; // 0=見出し 1=区切り 2以降=ボディ
   const cols = Math.max(t.header.length, ...(t.body.length ? t.body.map(r => r.length) : [0]), 1);
   const before = line.text.slice(0, pos - line.from);
-  const c = Math.min(cols - 1, Math.max(0, (before.match(/\|/g) || []).length - 1));
+  const c = Math.min(cols - 1, Math.max(0, separatorsBefore(line.text, before.length) - 1));
   if (ev.key === "Tab") {
     let r = rowIdx === 1 ? 2 : rowIdx, nc = c + (ev.shiftKey ? -1 : 1), nr = r;
     if (nc >= cols) { nc = 0; nr = r === 0 ? 2 : r + 1; }
@@ -2924,10 +2956,44 @@ const smartTypingInputHandler = Prec.highest(EditorView.inputHandler.of((view, f
 // 利便性は失うが、ツールバー/ショートカットの「ハイライト」操作(applyMdAction「highlight」→
 // wrapSel("==")、こちらは選択範囲を明示的に"=="で囲むだけなので誤発火しようがない)で
 // "==highlight=="を挿入する経路は従来どおり使える)。
+//
+// 【閉じ側が余って残る誤り(2026-11 の点検)】 以前は「直後に同じ記号があれば乗り越える、
+// 無ければ対で入れる」だけだったので、強調のつもりでない記号にも閉じ側が付き、行末に残っていた。
+//   「file_name.txt」→「file_name.txt_」   「2 * 3 = 6」→「2 * 3 = 6*」   「10~20」→「10~20~」
+//   文の途中から「**太字** と打つ」→「**太字***」(2つ目の*が乗り越えになり、閉じ側が1つしか無い)
+// 次の4つの決まりで防ぐ。どれも「強調の開き側になりえない場所では対にしない」という考え方。
+//   1. 直前が半角の英数字なら対にしない(単語の途中の _ や、掛け算・範囲の * ~)。
+//      日本語は語の間に空白を置かないので、全角の文字の直後は従来どおり対にする。
+//   2. 空の対(*|*)の中でもう一度打ったら、乗り越えずに両側へ足す(**|**)。太字を打てるようにする。
+//   3. 直前に同じ記号が並んでいて直後に閉じ側が無いなら、手で打っている途中なので足さない。
+//   4. 空の対の中で空白を打ったら、閉じ側を消す(記号の直後が空白なら強調ではない)。
 const MD_PAIR_CHARS = { "*": "*", "_": "_", "~": "~" };
+// その位置の前後に、記号chがいくつ並んでいるか。
+function markerRuns(state, pos, ch) {
+  const line = state.doc.lineAt(pos);
+  const off = pos - line.from;
+  let before = 0, after = 0;
+  while (off - before - 1 >= 0 && line.text[off - before - 1] === ch) before++;
+  while (off + after < line.text.length && line.text[off + after] === ch) after++;
+  return { before, after };
+}
 const mdAutoPairInputHandler = EditorView.inputHandler.of((view, from, to, text) => {
   const toggles = view.state.field(extTogglesField, false) ?? DEFAULT_EXT_TOGGLES;
   if (toggles.autoPairMarkdown === false) return false;
+  if (text === " " && from === to && from > 0) {
+    // 決まり4: 空の対の中の空白。
+    const ch = view.state.sliceDoc(from - 1, from);
+    if (!(ch in MD_PAIR_CHARS)) return false;
+    const runs = markerRuns(view.state, from, ch);
+    if (runs.after === 0 || runs.before !== runs.after) return false;
+    if (inCodeContext(view.state, from)) return false;
+    view.dispatch({
+      changes: { from, to: from + runs.after, insert: " " },
+      selection: { anchor: from + 1 },
+      userEvent: "input.type",
+    });
+    return true;
+  }
   if (!(text in MD_PAIR_CHARS)) return false;
   if (inCodeContext(view.state, from)) return false; // コードブロック・インラインコード・数式内は対象外
   if (from === to && (text === "*" || text === "_")) {
@@ -2945,12 +3011,28 @@ const mdAutoPairInputHandler = EditorView.inputHandler.of((view, from, to, text)
     });
     return true;
   }
-  const after = view.state.sliceDoc(to, to + text.length);
-  if (after === text) {
+  const runs = markerRuns(view.state, from, text);
+  // 空の対の中か。前後に同じ数だけ並んでいても、それより手前にまだ閉じていない開き側があるなら、
+  // 閉じ側を打っている途中(「**重要*|*」)なので空の対ではない。開き側が残っているかは、
+  // 手前にある記号の並びの数が奇数かで見る(行頭の箇条書き記号は数えない)。
+  let emptyPair = runs.after > 0 && runs.before === runs.after;
+  if (emptyPair) {
+    const line = view.state.doc.lineAt(from);
+    const head = line.text.slice(0, from - line.from - runs.before).replace(/^\s*[*+-]\s/, "");
+    const esc = text.replace(/[*]/g, "\\$&");
+    const openRuns = (head.match(new RegExp(`${esc}+`, "g")) || []).length;
+    if (openRuns % 2 === 1) emptyPair = false;
+  }
+  if (runs.after > 0 && !emptyPair) {
     // カーソルの直後に既に同じ閉じマーカーがある → 追加せずその上を乗り越えるだけ(closeBrackets同様)
     view.dispatch({ selection: { anchor: to + text.length }, userEvent: "input.type" });
     return true;
   }
+  if (runs.after === 0) {
+    if (runs.before > 0) return false; // 決まり3: 手で打っている途中
+    if (/[A-Za-z0-9]/.test(view.state.sliceDoc(Math.max(0, from - 1), from))) return false; // 決まり1
+  }
+  // ここへ来るのは、新しく開く場合か、空の対の中(決まり2。両側へ1つずつ足す)。
   view.dispatch({
     changes: { from, to, insert: text + MD_PAIR_CHARS[text] },
     selection: { anchor: from + text.length },
@@ -5262,7 +5344,10 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
       };
     },
     // ---- 検索・置換(仕様書 E-17〜E-19) ----
-    setSearchQuery: (opts) => view.dispatch({ effects: setSearchQuery.of(new SearchQuery(opts)) }),
+    // 正規表現がオフのときは literal を立てる。立てないと CodeMirror は検索語・置換語の
+    // 「\n」「\t」「\\」を改行・タブ・バックスラッシュとして読み替える(2026-11 の点検。
+    // 「C:\new」を探すと改行+ew を探しに行き、置換語の「\t」がタブになっていた)。
+    setSearchQuery: (opts) => view.dispatch({ effects: setSearchQuery.of(new SearchQuery({ ...opts, literal: !opts.regexp })) }),
     findNext: () => findNext(view),
     findPrevious: () => findPrevious(view),
     replaceNext: () => replaceNext(view),
@@ -5412,7 +5497,7 @@ function selectStyleRangeAtCursor(view) {
     const rowIdx = line.number - t.startLine;
     const cols = Math.max(t.header.length, ...(t.body.length ? t.body.map((r) => r.length) : [0]), 1);
     const before = line.text.slice(0, pos - line.from);
-    const c = Math.min(cols - 1, Math.max(0, (before.match(/\|/g) || []).length - 1));
+    const c = Math.min(cols - 1, Math.max(0, separatorsBefore(line.text, before.length) - 1));
     selectCell(view, t, rowIdx, c);
     return;
   }
@@ -5597,7 +5682,7 @@ function tableInfoFromPos(state, t, pos) {
   const rowIdx = line.number - t.startLine; // 0=見出し 1=区切り 2以降=ボディ
   const cols = Math.max(t.header.length, ...(t.body.length ? t.body.map((r) => r.length) : [0]), 1);
   const before = line.text.slice(0, pos - line.from);
-  const col = Math.min(cols - 1, Math.max(0, (before.match(/\|/g) || []).length - 1));
+  const col = Math.min(cols - 1, Math.max(0, separatorsBefore(line.text, before.length) - 1));
   const rowKind = rowIdx <= 1 ? "header" : "body";
   const bodyIndex = rowIdx <= 1 ? -1 : rowIdx - 2;
   return { t, rowKind, bodyIndex, col, cols };
