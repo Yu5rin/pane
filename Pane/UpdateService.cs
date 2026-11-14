@@ -799,6 +799,8 @@ internal static class UpdateService
 
         bool exeMoved = false;
         bool distMoved = false;
+        bool newExeStarted = false;
+        bool newDistStarted = false;
         try
         {
             Logger.Write($"更新の適用: {installFolder} を入れ替える");
@@ -817,7 +819,9 @@ internal static class UpdateService
                 TrySetJustMovedTimestamp(distBackup, isDirectory: true);
             }
 
+            newExeStarted = true;
             File.Copy(newExe, currentExe);
+            newDistStarted = true;
             CopyDirectory(newDist, currentDist);
             WarmUpDist(currentDist);
 
@@ -840,11 +844,14 @@ internal static class UpdateService
         catch (Exception ex)
         {
             Logger.WriteException("更新の適用に失敗したため元に戻す", ex);
-            // ロールバック。新しく置いたものを消してから、退避したものを戻す。
-            TryDelete(currentExe);
-            TryDeleteDirectory(currentDist);
-            if (exeMoved) TryMove(exeBackup, currentExe);
-            if (distMoved) TryMoveDirectory(distBackup, currentDist);
+            // ロールバック。新しく置きかけたものを消してから、退避したものを戻す。
+            // 置き始める前に失敗したのなら、今あるものは手つかずの正しいものなので消さない
+            // (UpdateRollbackLogic の説明を参照)。
+            UpdateRollbackLogic.Plan plan = UpdateRollbackLogic.Decide(exeMoved, distMoved, newExeStarted, newDistStarted);
+            if (plan.DeleteCurrentExe) TryDelete(currentExe);
+            if (plan.DeleteCurrentDist) TryDeleteDirectory(currentDist);
+            if (plan.RestoreExe) TryMove(exeBackup, currentExe);
+            if (plan.RestoreDist) TryMoveDirectory(distBackup, currentDist);
             throw;
         }
     }
