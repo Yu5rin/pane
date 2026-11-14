@@ -102,7 +102,10 @@ html[data-theme="light"][data-light-theme="sepia"] {
   --code-fn: #6B5B14;
   --code-str: #2E6E4E;
   --code-num: #8A5A00;
-  --code-cmt: #7A6A55;
+  /* コメントの色。元の配色の値では背景との差が足りず読めなかった(2026-11 の点検。
+     コードブロックの --code-bg とコードモードの --paper の両方に対して 4.5:1 未満)。
+     元の色相を保ったまま、両方に対して 4.5:1 以上になるところまで寄せた値。旧値: #7A6A55 */
+  --code-cmt: #70624E;
   --code-type: #5B4B8A;
   --code-prop: #7A4A1E;
   --code-op: var(--ink);
@@ -282,7 +285,10 @@ html[data-theme="light"][data-light-theme="solarized-light"] {
   --code-fn: #515593;
   --code-str: #207972;
   --code-num: #207972;
-  --code-cmt: #657B83;
+  /* コメントの色。元の配色の値では背景との差が足りず読めなかった(2026-11 の点検。
+     コードブロックの --code-bg とコードモードの --paper の両方に対して 4.5:1 未満)。
+     元の色相を保ったまま、両方に対して 4.5:1 以上になるところまで寄せた値。旧値: #657B83 */
+  --code-cmt: #586B72;
   --code-type: #886700;
   --code-prop: #1D689E;
   --code-op: var(--ink);
@@ -373,7 +379,10 @@ html[data-theme="dark"][data-dark-theme="nord"] {
   --code-fn: #88C0D0;
   --code-str: #A3BE8C;
   --code-num: #B48EAD;
-  --code-cmt: #4C566A;
+  /* コメントの色。元の配色の値では背景との差が足りず読めなかった(2026-11 の点検。
+     コードブロックの --code-bg とコードモードの --paper の両方に対して 4.5:1 未満)。
+     元の色相を保ったまま、両方に対して 4.5:1 以上になるところまで寄せた値。旧値: #4C566A */
+  --code-cmt: #979DA9;
   --code-type: #8FBCBB;
   --code-prop: #D8DEE9;
   --code-op: #81A1C1;
@@ -459,7 +468,10 @@ html[data-theme="dark"][data-dark-theme="dracula"] {
   --code-fn: #50FA7B;
   --code-str: #F1FA8C;
   --code-num: #BD93F9;
-  --code-cmt: #6272A4;
+  /* コメントの色。元の配色の値では背景との差が足りず読めなかった(2026-11 の点検。
+     コードブロックの --code-bg とコードモードの --paper の両方に対して 4.5:1 未満)。
+     元の色相を保ったまま、両方に対して 4.5:1 以上になるところまで寄せた値。旧値: #6272A4 */
+  --code-cmt: #8390B7;
   --code-type: #8BE9FD;
   --code-prop: #8BE9FD;
   --code-op: #FF79C6;
@@ -559,7 +571,10 @@ html[data-theme="dark"][data-dark-theme="solarized-dark"] {
   --code-fn: #898DD0;
   --code-str: #2AA198;
   --code-num: #2AA198;
-  --code-cmt: #586E75;
+  /* コメントの色。元の配色の値では背景との差が足りず読めなかった(2026-11 の点検。
+     コードブロックの --code-bg とコードモードの --paper の両方に対して 4.5:1 未満)。
+     元の色相を保ったまま、両方に対して 4.5:1 以上になるところまで寄せた値。旧値: #586E75 */
+  --code-cmt: #809196;
   --code-type: #B58900;
   --code-prop: #268BD2;
   --code-op: var(--ink);
@@ -787,7 +802,10 @@ html[data-theme="dark"][data-dark-theme="night"] {
   --code-fn: #D7BA7D;
   --code-str: #DE9C72;
   --code-num: #9FBF8F;
-  --code-cmt: #6A7280;
+  /* コメントの色。元の配色の値では背景との差が足りず読めなかった(2026-11 の点検。
+     コードブロックの --code-bg とコードモードの --paper の両方に対して 4.5:1 未満)。
+     元の色相を保ったまま、両方に対して 4.5:1 以上になるところまで寄せた値。旧値: #6A7280 */
+  --code-cmt: #A0A5AE;
   --code-type: #7FB4CA;
   --code-prop: #8FA8C4;
   --code-op: var(--ink);

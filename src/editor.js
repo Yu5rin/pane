@@ -1192,7 +1192,15 @@ const livePreview = ViewPlugin.fromClass(class {
               // depthぶんのマーカーをまとめて隠す(内側の">"も含めて画面に見えないようにする)
               marks.push({ from: line.from, to: line.from + consumed, deco: Decoration.replace({}) });
             }
-            const cls = calloutType ? `tok-quote cm-callout cm-callout-${calloutType}` : "tok-quote";
+            // Calloutの帯と背景は、行そのもの(Decoration.line)に付ける。以前は行の中のspanを
+            // display:block にして付けていたため、題名の行(ウィジェットに置き換わる)には帯が付かず、
+            // 本文の行はspanの外に行の高さが残って、題名と本文が離れた別々の部品に見えていた
+            // (2026-11 の点検)。行に付ければ、題名から最後の行までが1つの箱としてつながる。
+            if (calloutType) {
+              const edge = (ln === markerLn ? " cm-callout-first" : "") + (ln === lastLn ? " cm-callout-last" : "");
+              marks.push({ from: line.from, to: line.from, deco: Decoration.line({ class: `cm-callout-line cm-callout-${calloutType}${edge}` }), line: true });
+            }
+            const cls = calloutType ? "tok-quote cm-callout" : "tok-quote";
             if (depth >= 2) {
               // 2段目以降は深さに応じて左の罫線を重ねて表示する(仕様書 M-03)。
               // .tok-quote のborder-leftは1本分の見た目のため、多段では
@@ -1907,7 +1915,7 @@ const tableBlocksField = StateField.define({
 });
 const tableField = StateField.define({
   create: (state) => buildTableDeco(state, state.field(tableBlocksField)),
-  update: (v, tr) => (tr.state.field(tableBlocksField) !== tr.startState.field(tableBlocksField) || tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect)))
+  update: (v, tr) => (blocksChanged(tr, tableBlocksField) || tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect)))
     ? buildTableDeco(tr.state, tr.state.field(tableBlocksField))
     : v,
   provide: (f) => EditorView.decorations.from(f),
@@ -1962,7 +1970,7 @@ function buildTocDeco(state, paras) {
 }
 const tocField = StateField.define({
   create: (state) => buildTocDeco(state, state.field(tocParasField)),
-  update: (v, tr) => (tr.state.field(tocParasField) !== tr.startState.field(tocParasField) || syntaxTreeGrew(tr) || tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect)))
+  update: (v, tr) => (blocksChanged(tr, tocParasField) || syntaxTreeGrew(tr) || tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect)))
     ? buildTocDeco(tr.state, tr.state.field(tocParasField))
     : v,
   provide: (f) => EditorView.decorations.from(f),
@@ -2017,6 +2025,13 @@ function windowContainsTrigger(doc, from, to, pad, triggers) {
 // ```math・生HTML)は、開いたときに解析が届いていた範囲までしか拾えなかった。開いた文書の後半にある
 // 表が記法のまま表示され、クリックしても直らなかった(2026-11 の点検。.verify-late-blocks.mjs)。
 // 木の長さが伸びたときだけ作り直すので、解析が済んだあとの入力では余計な走査は増えない。
+// 一覧(表・目次・図・生HTML)が作り直されたか。切り替えの前後どちらかの状態に一覧が無いことがある
+// (Markdownとコードモードの切り替えで、ライブプレビューの拡張ごと付け外しされる)ので、
+// 無ければ undefined として比べる。field() をそのまま呼ぶと「Field is not present in this state」で
+// 落ち、モードの切り替えが途中で止まる(後半の表が描画されない不具合を直した直後に、自分で入れた誤り)。
+function blocksChanged(tr, field) {
+  return tr.state.field(field, false) !== tr.startState.field(field, false);
+}
 function syntaxTreeGrew(tr) {
   return syntaxTree(tr.state).length > syntaxTree(tr.startState).length;
 }
@@ -2164,7 +2179,7 @@ function buildMermaidBlockDeco(state, blocks) {
 }
 const mermaidBlockDecoField = StateField.define({
   create: (state) => buildMermaidBlockDeco(state, state.field(mermaidBlocksField)),
-  update: (v, tr) => (tr.state.field(mermaidBlocksField) !== tr.startState.field(mermaidBlocksField) || tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect) || e.is(themeRefreshEffect) || e.is(setExtToggles)))
+  update: (v, tr) => (blocksChanged(tr, mermaidBlocksField) || tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect) || e.is(themeRefreshEffect) || e.is(setExtToggles)))
     ? buildMermaidBlockDeco(tr.state, tr.state.field(mermaidBlocksField))
     : v,
   provide: (f) => EditorView.decorations.from(f),
@@ -2218,7 +2233,7 @@ function buildCodeMathBlockDeco(state, blocks) {
 }
 const codeMathBlockDecoField = StateField.define({
   create: (state) => buildCodeMathBlockDeco(state, state.field(codeMathBlocksField)),
-  update: (v, tr) => (tr.state.field(codeMathBlocksField) !== tr.startState.field(codeMathBlocksField) || tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect) || e.is(setExtToggles)))
+  update: (v, tr) => (blocksChanged(tr, codeMathBlocksField) || tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect) || e.is(setExtToggles)))
     ? buildCodeMathBlockDeco(tr.state, tr.state.field(codeMathBlocksField))
     : v,
   provide: (f) => EditorView.decorations.from(f),
@@ -2514,7 +2529,7 @@ const htmlBlockDecoField = StateField.define({
   create: (state) => buildHtmlBlockDeco(state, state.field(htmlBlocksField)),
   // setRemoteConsent/setExtToggles(外部リソースの許可状況)が変わったときも作り直す必要がある
   // (プレースホルダ→実際のiframe/imgへの切替、または設定ONで最初から読み込む場合)。
-  update: (v, tr) => (tr.state.field(htmlBlocksField) !== tr.startState.field(htmlBlocksField) || tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect) || e.is(setRemoteConsent) || e.is(setExtToggles)))
+  update: (v, tr) => (blocksChanged(tr, htmlBlocksField) || tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect) || e.is(setRemoteConsent) || e.is(setExtToggles)))
     ? buildHtmlBlockDeco(tr.state, tr.state.field(htmlBlocksField))
     : v,
   provide: (f) => EditorView.decorations.from(f),
