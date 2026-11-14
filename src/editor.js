@@ -900,6 +900,16 @@ const livePreview = ViewPlugin.fromClass(class {
     requestAnimationFrame(() => { if (!view.destroyed) view.dispatch({ effects: [] }); });
   }
   update(u) {
+    // 日本語入力の変換中は作り直さず、今ある装飾の位置だけを文書の変更に合わせてずらす。
+    // 変換中に作り直すと、未確定の文字が入るたびに、カーソルの隣にある記法(** や ` など)の
+    // 表示/非表示やウィジェットが差し替わる。ブラウザは変換中の文字を置いているDOMを見失い、
+    // 確定した文字が記法の内側に入ったり、消えたり、二重になったりした(2026-11 の点検。
+    // 「これは**太字**」の直後で変換すると「これは**太字日本語**」になった)。
+    // 確定したあとの作り直しは、createEditor の compositionend が空の更新を流して起こす。
+    if (u.view.composing || u.view.compositionStarted) {
+      if (u.docChanged) this.decorations = this.decorations.map(u.changes);
+      return;
+    }
     if (u.docChanged || u.selectionSet || u.viewportChanged || u.focusChanged || u.transactions.length)
       this.decorations = this.build(u.view);
   }
@@ -3132,8 +3142,44 @@ const codeCopyHoverPlugin = ViewPlugin.fromClass(class {
 // 不具合5の修正: focusField/focusNotifier/emojiCompletionはここには含めない(常設拡張として
 // buildExtensions()側に移した。理由はfocusField定義部・emojiCompletionSource定義部の
 // コメント参照)。
+// ---- 行末の、隠れている閉じ記号を飛び越える ----
+// 太字・斜体・コード・リンクなどで終わる行は、カーソルがその装飾に触れていない間、閉じ側の記号
+// (「**」「`」「](URL)」)を隠している。隠れた記号は幅が無いので、Endキーや行末のクリックで
+// 移動すると、カーソルは記号の手前(「**太字|**」)に入る。そこで打った文字は太字の中に入り、
+// 「太字で終わる行の続きを書いたら、続きまで太字になる」ことになっていた(2026-11 の点検)。
+// 外から移動してきて、カーソルの先が行末まで閉じ記号だけなら、行末へ進める。
+// 矢印キーで装飾の中を1文字ずつ動いているとき(すでに記号が見えている)は何もしない。
+const TAIL_MARK_NAMES = new Set(["EmphasisMark", "CodeMark", "StrikethroughMark", "SuperscriptMark", "SubscriptMark", "LinkMark", "URL"]);
+const TAIL_STYLE_NAMES = new Set(["StrongEmphasis", "Emphasis", "Strikethrough", "InlineCode", "Link", "Superscript", "Subscript"]);
+const skipHiddenTailMarks = EditorState.transactionFilter.of((tr) => {
+  if (!tr.selection || tr.docChanged || !tr.isUserEvent("select")) return tr;
+  const sel = tr.newSelection;
+  if (sel.ranges.length !== 1 || !sel.main.empty) return tr;
+  const state = tr.startState, pos = sel.main.head;
+  const line = state.doc.lineAt(pos);
+  if (pos === line.to || pos === line.from) return tr;
+  const tree = syntaxTree(state);
+  if (tree.length < line.to) return tr;
+  const mark = tree.resolveInner(pos, 1);
+  if (!TAIL_MARK_NAMES.has(mark.name) || mark.from !== pos) return tr;
+  // 触れていなかった(=記号が隠れていた)装飾か。入れ子は一番外側で見る。
+  let top = null;
+  for (let n = mark.parent; n && TAIL_STYLE_NAMES.has(n.name); n = n.parent) top = n;
+  if (!top || top.to !== line.to || top.from >= pos) return tr;
+  const before = state.selection.main;
+  if (before.from <= top.to && before.to >= top.from) return tr;
+  // カーソルの先が、行末まで閉じ記号だけでできているか。
+  let covered = pos;
+  tree.iterate({ from: pos, to: line.to, enter: (n) => {
+    if (TAIL_MARK_NAMES.has(n.name) && n.from === covered) { covered = n.to; return false; }
+    return n.from <= pos; // 祖先(装飾そのもの)へは降りる。それ以外の中身には入らない
+  } });
+  if (covered !== line.to) return tr;
+  return [tr, { selection: { anchor: line.to }, sequential: true }];
+});
+
 const livePreviewExt = () => [
-  livePreview, codeCopyHotBlockField, tableBlocksField, tableField, tableAutoFormat,
+  livePreview, skipHiddenTailMarks, codeCopyHotBlockField, tableBlocksField, tableField, tableAutoFormat,
   frontmatterField, tocParasField, tocField, extTogglesField,
   // 外部リソース読み込み同意(remoteConsentField、上記コメント参照)。extTogglesFieldと違い
   // setValue()側では復元しない(文書が入れ替わるたび既定のfalse/空集合に戻すのが仕様のため)。
@@ -4800,7 +4846,12 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
         }),
         EditorView.domEventHandlers({
           compositionstart: () => { composing = true; onCompositionChange?.(true); },
-          compositionend: () => { composing = false; onCompositionChange?.(false); },
+          compositionend: (_e, v) => {
+            composing = false; onCompositionChange?.(false);
+            // 変換中に止めていたライブプレビューの装飾を作り直す(livePreview.update の説明を参照)。
+            // CodeMirrorが確定の後始末を終えるのを待ってから流す。
+            setTimeout(() => { if (!v.destroyed && !v.composing) v.dispatch({ effects: [] }); }, 80);
+          },
           // スマートペースト(仕様書 第2.9.3節): HTML形式のクリップボードをMarkdownへ変換して
           // 挿入する。CMの既定貼り付け処理より先に評価し、変換しない場合は既定動作に委ねる。
           paste: (e) => { if (onPaste && onPaste(e)) { e.preventDefault(); return true; } return false; },

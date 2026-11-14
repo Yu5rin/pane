@@ -116,6 +116,42 @@ async function typed(keys, start = "") {
   ok("(3) 空の対の中でもう一度打つと両側に足される", bold === "a **bo**", bold);
 }
 
+// ---- (4) 日本語入力(変換の途中で装飾を作り直さない) ----
+// 太字・斜体・コードの直後で変換を始めると、未確定の文字が入るたびにカーソル位置の記法の
+// 表示/非表示が切り替わり、ブラウザが変換中の文字を見失って、確定した文字が消えたり二重になった。
+async function compose(page, steps, commit) {
+  const cdp = await page.context().newCDPSession(page);
+  for (const t of steps) {
+    await cdp.send("Input.imeSetComposition", { text: t, selectionStart: t.length, selectionEnd: t.length });
+    await page.waitForTimeout(60);
+  }
+  await cdp.send("Input.insertText", { text: commit });
+  await page.waitForTimeout(250);
+}
+{
+  const cases = [
+    ["太字の直後", "これは**太字**", "これは**太字**日本語"],
+    ["斜体の直後", "これは*斜体*", "これは*斜体*日本語"],
+    ["コードの直後", "これは`code`", "これは`code`日本語"],
+    ["リンクの直後", "これは[リンク](https://example.com)", "これは[リンク](https://example.com)日本語"],
+  ];
+  for (const [label, start, want] of cases) {
+    const page = await open(start + "\n\n次の段落\n");
+    await page.click(".cm-content");
+    await page.keyboard.press("Control+Home");
+    await page.keyboard.press("End");
+    await compose(page, ["に", "にほ", "にほん", "にほんご", "日本語"], "日本語");
+    const got = (await value(page)).split("\n")[0];
+    ok(`(4) ${label}で変換して確定した文字が、そのまま入る`, got === want, got);
+    // 確定したあとは、カーソルが行にある間は記法が見え、離れると隠れる(装飾が止まったままになっていない)。
+    await page.keyboard.press("Control+End");
+    await page.waitForTimeout(250);
+    const firstLine = await page.evaluate(() => document.querySelector(".cm-content .cm-line").textContent);
+    ok(`(4) ${label}: 確定して行を離れると記法が隠れる`, !/[*`\]]/.test(firstLine), firstLine);
+    await page.close();
+  }
+}
+
 ok("ページエラー0件", errors.length === 0, errors);
 console.log(`--- 集計: NG=${ng}`);
 await browser.close();
