@@ -1282,6 +1282,8 @@ window.addEventListener("beforeprint", enterExportLayout);
 window.addEventListener("afterprint", exitExportLayout);
 
 const editor = createEditor(host, {
+  // 裏の解析が進んだら、アウトラインを描き直す(sidebar.js側でまとめて1回にする)。
+  onTreeGrew() { sidebar.refresh(); },
   onChange() {
     // 実機不具合の修正: 以前はここで無条件にsetDirty(true)していたため、入力してから
     // Ctrl+Z等で元の内容にぴったり戻しても「未保存」表示が残ったままだった。

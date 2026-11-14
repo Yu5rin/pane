@@ -1859,13 +1859,13 @@ function remapTableBlocks(tables, tr) {
 const tableBlocksField = StateField.define({
   create: (state) => findAllTables(state),
   update: (v, tr) => {
-    if (!tr.docChanged) return v;
+    if (!tr.docChanged) return syntaxTreeGrew(tr) ? findAllTables(tr.state) : v;
     return blockListNeedsRecompute(v, tr, ["|"]) ? findAllTables(tr.state) : remapTableBlocks(v, tr);
   },
 });
 const tableField = StateField.define({
   create: (state) => buildTableDeco(state, state.field(tableBlocksField)),
-  update: (v, tr) => (tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect)))
+  update: (v, tr) => (tr.state.field(tableBlocksField) !== tr.startState.field(tableBlocksField) || tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect)))
     ? buildTableDeco(tr.state, tr.state.field(tableBlocksField))
     : v,
   provide: (f) => EditorView.decorations.from(f),
@@ -1902,7 +1902,7 @@ function findTocParagraphs(state) {
 const tocParasField = StateField.define({
   create: (state) => findTocParagraphs(state),
   update: (v, tr) => {
-    if (!tr.docChanged) return v;
+    if (!tr.docChanged) return syntaxTreeGrew(tr) ? findTocParagraphs(tr.state) : v;
     return blockListNeedsRecompute(v, tr, ["toc"]) ? findTocParagraphs(tr.state) : remapBlockRanges(v, tr.changes);
   },
 });
@@ -1920,7 +1920,7 @@ function buildTocDeco(state, paras) {
 }
 const tocField = StateField.define({
   create: (state) => buildTocDeco(state, state.field(tocParasField)),
-  update: (v, tr) => (tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect)))
+  update: (v, tr) => (tr.state.field(tocParasField) !== tr.startState.field(tocParasField) || syntaxTreeGrew(tr) || tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect)))
     ? buildTocDeco(tr.state, tr.state.field(tocParasField))
     : v,
   provide: (f) => EditorView.decorations.from(f),
@@ -1968,6 +1968,15 @@ function windowContainsTrigger(doc, from, to, pad, triggers) {
   const wTo = Math.min(doc.length, to + pad);
   const text = doc.sliceString(wFrom, wTo).toLowerCase();
   return triggers.some((s) => text.includes(s));
+}
+// 構文木が、文書の変更なしに先へ伸びたか。
+// CodeMirrorは文書を作った時点では先頭の約3,000文字までしか解析せず、残りは裏で少しずつ進める。
+// その進み具合は文書の変更ではないので、tr.docChanged だけを見て作り直す一覧(表・[toc]・Mermaid・
+// ```math・生HTML)は、開いたときに解析が届いていた範囲までしか拾えなかった。開いた文書の後半にある
+// 表が記法のまま表示され、クリックしても直らなかった(2026-11 の点検。.verify-late-blocks.mjs)。
+// 木の長さが伸びたときだけ作り直すので、解析が済んだあとの入力では余計な走査は増えない。
+function syntaxTreeGrew(tr) {
+  return syntaxTree(tr.state).length > syntaxTree(tr.startState).length;
 }
 function blockListNeedsRecompute(existing, tr, triggers) {
   const allTriggers = triggers.length ? [...triggers, ...FENCE_MARK_TRIGGERS] : FENCE_MARK_TRIGGERS;
@@ -2090,7 +2099,7 @@ const mermaidBlocksField = StateField.define({
   // 文書サイズに比例するコストがかかるため、Mermaidフェンスと無関係な変更(既存ブロックに
   // 触れず"```"も"mermaid"も挿入されない)では辿り直さない(§8.2・第8.4節、mathBlocksFieldと同じ考え方)。
   update: (v, tr) => {
-    if (!tr.docChanged) return v;
+    if (!tr.docChanged) return syntaxTreeGrew(tr) ? findMermaidBlocks(tr.state) : v;
     return blockListNeedsRecompute(v, tr, ["```", "mermaid"]) ? findMermaidBlocks(tr.state) : remapBlockRanges(v, tr.changes);
   },
 });
@@ -2113,7 +2122,7 @@ function buildMermaidBlockDeco(state, blocks) {
 }
 const mermaidBlockDecoField = StateField.define({
   create: (state) => buildMermaidBlockDeco(state, state.field(mermaidBlocksField)),
-  update: (v, tr) => (tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect) || e.is(themeRefreshEffect) || e.is(setExtToggles)))
+  update: (v, tr) => (tr.state.field(mermaidBlocksField) !== tr.startState.field(mermaidBlocksField) || tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect) || e.is(themeRefreshEffect) || e.is(setExtToggles)))
     ? buildMermaidBlockDeco(tr.state, tr.state.field(mermaidBlocksField))
     : v,
   provide: (f) => EditorView.decorations.from(f),
@@ -2149,7 +2158,7 @@ const codeMathBlocksField = StateField.define({
   // mermaidBlocksFieldと同じ考え方(§8.2・第8.4節): ```mathフェンスと無関係な変更では
   // 構文木を辿り直さない。
   update: (v, tr) => {
-    if (!tr.docChanged) return v;
+    if (!tr.docChanged) return syntaxTreeGrew(tr) ? findCodeMathBlocks(tr.state) : v;
     return blockListNeedsRecompute(v, tr, ["```", "math"]) ? findCodeMathBlocks(tr.state) : remapBlockRanges(v, tr.changes);
   },
 });
@@ -2167,7 +2176,7 @@ function buildCodeMathBlockDeco(state, blocks) {
 }
 const codeMathBlockDecoField = StateField.define({
   create: (state) => buildCodeMathBlockDeco(state, state.field(codeMathBlocksField)),
-  update: (v, tr) => (tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect) || e.is(setExtToggles)))
+  update: (v, tr) => (tr.state.field(codeMathBlocksField) !== tr.startState.field(codeMathBlocksField) || tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect) || e.is(setExtToggles)))
     ? buildCodeMathBlockDeco(tr.state, tr.state.field(codeMathBlocksField))
     : v,
   provide: (f) => EditorView.decorations.from(f),
@@ -2438,7 +2447,7 @@ const htmlBlocksField = StateField.define({
   // 開始行は必ず"<"を含むため、それが挿入されず既存ブロックにも触れない変更では
   // 構文木を辿り直さない。
   update: (v, tr) => {
-    if (!tr.docChanged) return v;
+    if (!tr.docChanged) return syntaxTreeGrew(tr) ? findHtmlBlocks(tr.state) : v;
     return blockListNeedsRecompute(v, tr, ["<"]) ? findHtmlBlocks(tr.state) : remapBlockRanges(v, tr.changes);
   },
 });
@@ -2463,7 +2472,7 @@ const htmlBlockDecoField = StateField.define({
   create: (state) => buildHtmlBlockDeco(state, state.field(htmlBlocksField)),
   // setRemoteConsent/setExtToggles(外部リソースの許可状況)が変わったときも作り直す必要がある
   // (プレースホルダ→実際のiframe/imgへの切替、または設定ONで最初から読み込む場合)。
-  update: (v, tr) => (tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect) || e.is(setRemoteConsent) || e.is(setExtToggles)))
+  update: (v, tr) => (tr.state.field(htmlBlocksField) !== tr.startState.field(htmlBlocksField) || tr.docChanged || tr.selection || tr.effects.some(e => e.is(focusEffect) || e.is(setRemoteConsent) || e.is(setExtToggles)))
     ? buildHtmlBlockDeco(tr.state, tr.state.field(htmlBlocksField))
     : v,
   provide: (f) => EditorView.decorations.from(f),
@@ -4389,7 +4398,7 @@ export const DEFAULT_FONT_SIZE = 15;
 const MIN_FONT_SIZE = 8;
 const MAX_FONT_SIZE = 40;
 
-export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionChange, onRender, onPaste, onCopy, onSelectionChange } = {}) {
+export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionChange, onRender, onPaste, onCopy, onSelectionChange, onTreeGrew } = {}) {
   const editable = new Compartment();
   const themeComp = new Compartment();
   // Undo履歴(@codemirror/commandsのhistory())をCompartmentに載せる(ラウンド2で見つかった
@@ -4689,6 +4698,9 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
           // 文書全体を文字列化する無駄なコストになっていたため引数を渡すのをやめる。
           // 本文の文字列が必要な呼び出し元はeditor.getValue()を都度呼ぶこと。
           if (u.docChanged && onChange) onChange();
+          // 裏の解析が進んで構文木が伸びた(文書は変わっていない)。大きな文書では、開いた直後の
+          // アウトラインが解析の届いた所までしか並ばなかったので、伸びたことを知らせて描き直させる。
+          if (!u.docChanged && onTreeGrew && syntaxTree(u.state).length > syntaxTree(u.startState).length) onTreeGrew();
           // 検索パネルの件数自動更新(バグ2の修正)。この常設リスナーはbuildExtensions()の
           // 戻り値としてどのEditorState(=どのタブ)にも常に含まれるため、docChangeListeners
           // に登録した購読者はタブ切替をまたいでも呼ばれ続ける。
