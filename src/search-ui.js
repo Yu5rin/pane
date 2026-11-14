@@ -15,17 +15,19 @@ export function createSearchUI(editor, container) {
   panel.id = "search-panel";
   panel.className = "search-panel";
   panel.hidden = true;
+  // 記号は文字ではなくSVGで描く(線幅1.75・16px。仕様書 第10.1節)。以前は「↑ ↓ ✕」の文字で、
+  // フォントによって太さも大きさも他のアイコンと揃わなかった(2026-11 の点検)。
   panel.innerHTML = `
     <div class="search-row">
       <input id="search-query" type="text" placeholder="検索" autocomplete="off">
       <span id="search-count" class="search-count"></span>
-      <button id="search-prev" type="button" title="前を検索(Shift+F3)">&#x2191;</button>
-      <button id="search-next" type="button" title="次を検索(F3)">&#x2193;</button>
+      <button id="search-prev" type="button" title="前を検索(Shift+F3)" aria-label="前を検索"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 15l-6-6-6 6"/></svg></button>
+      <button id="search-next" type="button" title="次を検索(F3)" aria-label="次を検索"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
       <label class="search-toggle" data-tip="search-case"><input id="search-case" type="checkbox">Aa</label>
       <label class="search-toggle" data-tip="search-word"><input id="search-word" type="checkbox">単語</label>
       <label class="search-toggle" data-tip="search-regex"><input id="search-regex" type="checkbox">.*</label>
       <button id="search-toggle-replace" type="button" title="置換を表示">置換</button>
-      <button id="search-close" type="button" title="閉じる(Esc)">&#x2715;</button>
+      <button id="search-close" type="button" title="閉じる(Esc)" aria-label="閉じる"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
     </div>
     <div class="search-row" id="replace-row" hidden>
       <input id="replace-query" type="text" placeholder="置換後の文字列" autocomplete="off">

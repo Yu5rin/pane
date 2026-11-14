@@ -55,9 +55,9 @@ shell.innerHTML = `
     <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M7 12A5 5 0 1 0 7 2a5 5 0 0 0 0 10Zm7 3-3.5-3.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
     <input id="help-search-input" placeholder="説明書内を検索…" autocomplete="off">
     <span id="help-search-count" class="help-search-count"></span>
-    <button id="help-search-prev" class="help-search-nav-btn" title="前へ(Shift+Enter)" aria-label="前を検索">▲</button>
-    <button id="help-search-next" class="help-search-nav-btn" title="次へ(Enter)" aria-label="次を検索">▼</button>
-    <button id="help-search-close" class="help-search-nav-btn" title="閉じる(Esc)" aria-label="検索を閉じる">×</button>
+    <button id="help-search-prev" class="help-search-nav-btn" title="前へ(Shift+Enter)" aria-label="前を検索"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 15l-6-6-6 6"/></svg></button>
+    <button id="help-search-next" class="help-search-nav-btn" title="次へ(Enter)" aria-label="次を検索"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+    <button id="help-search-close" class="help-search-nav-btn" title="閉じる(Esc)" aria-label="検索を閉じる"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
   </div>
   <div class="help-body">
     <nav class="help-sidebar" id="help-toc" aria-label="目次"></nav>

@@ -2,6 +2,9 @@
 //   (1) 検索・置換: 正規表現がオフなら「\n」「\t」をそのままの文字として扱う
 //   (2) 表: セルに書いた「\|」を列の区切りと数えない(表から離れたときの自動整形で列が増えない)
 //   (3) 記号の自動補完: 強調のつもりでない * _ ~ に閉じ側を付けない
+//   (4) 日本語入力: 太字などの直後で変換しても、直前の文字が消えない。行末の隠れた閉じ記号の手前で止まらない
+//   (5) 書式つきの貼り付け: divで包まれた本文・入れ子のリスト・表のセルの「|」
+//   (6) Shiftと数字のショートカット、コードモードでのMarkdown用コマンド、コマンドパレット
 import pw from "playwright";
 const { chromium } = pw;
 const PORT = 8223;
@@ -150,6 +153,105 @@ async function compose(page, steps, commit) {
     ok(`(4) ${label}: 確定して行を離れると記法が隠れる`, !/[*`\]]/.test(firstLine), firstLine);
     await page.close();
   }
+}
+
+// ---- (5) 書式つきの貼り付け(段落・見出し・入れ子のリスト・表が崩れない) ----
+async function pasteHtml(html, plain) {
+  const page = await open("");
+  await page.click(".cm-content");
+  await page.evaluate(({ html, plain }) => {
+    const dt = new DataTransfer();
+    dt.setData("text/html", html);
+    dt.setData("text/plain", plain);
+    document.querySelector(".cm-content").dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  }, { html, plain });
+  await page.waitForTimeout(300);
+  const v = await value(page);
+  await page.close();
+  return v.trim();
+}
+{
+  const page1 = await pasteHtml("<div><h2>題</h2><p>一つ目の段落。</p><p>二つ目の<b>段落</b>。</p><ul><li>項目A</li><li>項目B</li></ul></div>", "x");
+  ok("(5) divで包まれた本文でも、見出し・段落・リストが分かれたまま入る",
+    page1 === "## 題\n\n一つ目の段落。\n\n二つ目の**段落**。\n\n- 項目A\n- 項目B", page1);
+  const nested = await pasteHtml("<ul><li>親<ul><li>子1</li><li>子2</li></ul></li><li>次</li></ul>", "x");
+  ok("(5) 入れ子のリストが、字下げされた子の項目として入る", nested === "- 親\n    - 子1\n    - 子2\n- 次", nested);
+  const table = await pasteHtml("<table><tr><th>名前</th><th>値</th></tr><tr><td>a|b</td><td>1<br>2</td></tr></table>", "x");
+  ok("(5) 表のセルの「|」と改行で表が崩れない", table.split("\n").length === 3 && table.includes("a\\|b"), table);
+}
+
+{
+  // 表のセルへ複数行を貼っても、表の行が途中で切れない。
+  const page = await open("上の段落\n\n| 名前 | 説明 |\n| --- | --- |\n| a | b |\n\n下\n");
+  await page.click("#cm-host table tbody td");
+  await page.waitForTimeout(200);
+  await page.evaluate(() => {
+    const dt = new DataTransfer();
+    dt.setData("text/plain", "1行目\n2行目\n3行目");
+    document.querySelector(".cm-content").dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  });
+  await page.waitForTimeout(300);
+  const v = await value(page);
+  const rows = v.split("\n").filter((l) => l.startsWith("|"));
+  ok("(5) 表のセルへ複数行を貼っても、表は3行のまま(改行は空白になる)", rows.length === 3 && /1行目 2行目 3行目/.test(v), v);
+  await page.close();
+}
+{
+  // アウトラインは、見出しの記法(** や `)を取り除いた文字を並べる。
+  const page = await open("# **重要** な `設定`\n\n本文\n\n## [リンク](https://example.com) の章\n\n本文\n");
+  await page.click(".cm-content");
+  await page.keyboard.press("Control+Shift+L");
+  await page.waitForTimeout(500);
+  const labels = await page.$$eval("#sidebar .outline-item, #sidebar [data-slug]", (els) => els.map((e) => e.textContent.trim()));
+  ok("(5) アウトラインの見出しに記号が残らない", labels.length >= 2 && labels.every((t) => !/[*`\]]/.test(t)) && labels.some((t) => t.includes("重要 な 設定")), labels);
+  await page.close();
+}
+
+// ---- (6) ショートカットとモード ----
+{
+  // Shift と数字の組み合わせ。Shiftを押していると e.key は記号になるので、物理キーで見る必要がある。
+  const page = await open("# 見出し\n\n本文\n");
+  await page.click(".cm-content");
+  const sidebarOpen = () => page.evaluate(() => { const el = document.getElementById("sidebar"); return !!el && !el.hidden && getComputedStyle(el).display !== "none" && el.getBoundingClientRect().width > 0; });
+  const before = await sidebarOpen();
+  await page.keyboard.press("Control+Shift+Digit1");
+  await page.waitForTimeout(300);
+  ok("(6) Ctrl+Shift+1 でアウトラインが開く", !before && await sidebarOpen(), { before, after: await sidebarOpen() });
+  await page.click(".cm-content");
+  await page.keyboard.press("Control+End");
+  await page.keyboard.down("Shift"); await page.keyboard.press("Home"); await page.keyboard.up("Shift");
+  await page.keyboard.press("Alt+Shift+Digit5");
+  await page.waitForTimeout(200);
+  const struck = await value(page);
+  ok("(6) Alt+Shift+5 で取り消し線が付く", struck.includes("~~"), struck);
+  await page.close();
+}
+{
+  // Markdownの記法を書き込むコマンドは、コードモードでは動かない。
+  const page = await open('{\n  "a": 1\n}\n', "data.json");
+  await page.click(".cm-content");
+  await page.keyboard.press("Control+End");
+  for (const k of ["Control+B", "Control+Digit1", "Control+K", "Control+Shift+K", "Control+T"]) await page.keyboard.press(k);
+  await page.waitForTimeout(200);
+  const json = await value(page);
+  ok("(6) コードモードでは Ctrl+B・Ctrl+1 などがMarkdownの記法を書き込まない", json.trim() === '{\n  "a": 1\n}', json);
+  await page.close();
+}
+{
+  // コマンドパレット: 実行できない項目を並べない(選ぶと落ちていた)。メニュー名でも探せる。
+  const page = await open("本文\n");
+  await page.click(".cm-content");
+  await page.keyboard.press("Control+Shift+P");
+  await page.waitForSelector("#palette-input", { timeout: 3000 });
+  await page.fill("#palette-input", "最近使った");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(200);
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Control+Shift+P");
+  await page.fill("#palette-input", "表示");
+  const n = await page.$$eval("#palette-list li:not(.palette-empty)", (els) => els.length);
+  ok("(6) コマンドパレットで「表示」と打つと、表示メニューの項目が並ぶ", n >= 5, n);
+  await page.close();
 }
 
 ok("ページエラー0件", errors.length === 0, errors);

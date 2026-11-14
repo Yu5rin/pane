@@ -53,6 +53,21 @@ ok("(前提) 読み込み完了後にinitial-render-readyを送信", sentReady);
 // (a) 説明書が表示されている(本文に見出し・段落が実際に描画されている)
 const articleText = await page.$eval("#help-article", (e) => e.textContent || "");
 const h1Text = await page.$eval("#help-article h1", (e) => e.textContent || "").catch(() => "");
+
+// 太字の記号(**)が、そのまま文字として画面に出ていないこと。
+// 「**「設定名」**を」のように、かぎ括弧や句点と隣り合う ** は、Markdownの決まりでは太字の
+// 開き・閉じとして扱われないことがあり、記号のまま表示される(2026-11 の点検で13か所)。
+// 原稿では ** をかぎ括弧の内側に、句点を ** の外側に置く。コードの中の ** は記法の説明なので除く。
+const rawBold = await page.evaluate(() => {
+  const out = [];
+  const w = document.createTreeWalker(document.getElementById("help-article"), NodeFilter.SHOW_TEXT);
+  for (let n = w.nextNode(); n; n = w.nextNode()) {
+    if (n.parentElement.closest("code,pre")) continue;
+    if (n.textContent.includes("**")) out.push(n.textContent.trim().slice(0, 60));
+  }
+  return out;
+});
+ok(`取扱説明書に、記号のまま表示されている ** が無い ${JSON.stringify(rawBold)}`, rawBold.length === 0);
 ok(`(a) 本文が空でなく表示されている(${articleText.length}文字)`, articleText.length > 200);
 ok(`(a) 見出し(h1)が実際に描画されている("${h1Text.trim()}")`, h1Text.trim().length > 0);
 

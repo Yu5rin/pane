@@ -372,11 +372,24 @@ input, textarea { font-family: inherit; color: var(--ink); }
 *::-webkit-scrollbar-corner { background: transparent; }
 kbd { font-family: var(--font-mono); font-size: 11px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 1px 5px; background: var(--surface); }
 
+/* 入力欄・チェックボックス・スクロールバーなど、ブラウザが描く部品の明暗をテーマに合わせる。
+   指定が無いと、暗いテーマでもチェックボックスが白い箱のまま浮いて見える(タスクリスト・
+   検索の切り替え・設定。2026-11 の点検)。 */
+html[data-theme="light"] { color-scheme: light; }
+html[data-theme="dark"] { color-scheme: dark; }
+/* 入力欄の案内の文字。指定が無いとブラウザ既定の灰色になり、テーマに関係なく同じ色で、
+   暗いテーマでは読めない(night 2.46 / nord 2.71)。--ink-mute なら全テーマで 4.66 以上。 */
+::placeholder { color: var(--ink-mute); opacity: 1; }
+
 /* ボタン */
 .btn { border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: var(--radius); padding: 9px 16px; font-size: 14px; font-weight: 500; transition: background .15s, border-color .15s, color .15s; }
 .btn.primary { background: var(--accent-ink); border-color: var(--accent-ink); color: #fff; }
 html[data-theme="dark"] .btn.primary { color: #0E1513; }
 .btn.danger { color: var(--danger); border-color: var(--line); }
+/* 暗いテーマでは --danger のままだとボタンの地(--surface)との差が足りない
+   (nord 3.46 / dracula 4.06 / solarized-dark 4.47。2026-11 の点検)。--danger はテーマごとに
+   上書きしていないので、白へ30%寄せて、暗い5テーマすべてで 4.8:1 以上にする。 */
+html[data-theme="dark"] .btn.danger { color: color-mix(in srgb, var(--danger) 70%, #fff); }
 .btn.tiny { padding: 5px 10px; font-size: 12px; border-radius: 8px; }
 .btn.block { width: 100%; }
 .icon-btn { display: inline-flex; align-items: center; justify-content: center; gap: 4px; }
@@ -712,8 +725,11 @@ html[data-theme="dark"] #theme-moon { display: none; }
 /* グローバル検索欄(仕様書 S-04): タブ列(.sidebar-tabs)のすぐ下・本体領域(.sidebar-body)の
    直前に常時表示する。トグル(.search-toggle)は検索・置換パネル(検索・置換パネルの節を参照)と
    同じ見た目・クラスを再利用する。 */
-.sidebar-search { display: flex; align-items: center; gap: 4px; padding: 6px; border-bottom: 1px solid var(--rule); flex: none; }
-.sidebar-search-input { flex: 1; min-width: 0; box-sizing: border-box; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font: inherit; font-size: 12px; background: var(--paper); color: var(--ink); }
+/* 入力欄は1段目いっぱいに取り、切り替え(Aa・単語・.*)は2段目へ折り返す。
+   1段に並べると、サイドバーの既定の幅では入力欄が約80pxしか残らず、案内の文字が
+   「フォルダ内」で切れ、検索語も数文字しか見えなかった(2026-11 の点検)。 */
+.sidebar-search { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 6px; border-bottom: 1px solid var(--rule); flex: none; }
+.sidebar-search-input { flex: 1 0 100%; min-width: 0; box-sizing: border-box; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font: inherit; font-size: 12px; background: var(--paper); color: var(--ink); }
 .sidebar-search-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
 /* グローバル検索結果(G-02): ファイルごとにグループ化して表示する。行の高さ・hover・
@@ -776,6 +792,9 @@ body.export-layout .cm-scroller { overflow: visible !important; }
 .search-count { font-size: 11px; color: var(--ink-sub); min-width: 52px; text-align: center; font-family: var(--font-mono); flex: none; }
 .search-row button { border: none; background: transparent; color: var(--ink-sub); font: inherit; font-size: 12px; cursor: pointer; padding: 4px 8px; border-radius: 6px; flex: none; }
 .search-row button:hover { background: var(--accent-soft); color: var(--accent-ink); }
+/* SVGの記号だけのボタン(前へ・次へ・閉じる)。文字のボタンと高さがそろうように中央へ置く。 */
+.search-row button:has(> svg), .help-search-nav-btn:has(> svg) { display: inline-flex; align-items: center; justify-content: center; padding: 4px 5px; }
+.search-row button > svg, .help-search-nav-btn > svg { display: block; }
 .search-toggle { display: inline-flex; align-items: center; gap: 2px; font-size: 11px; color: var(--ink-sub); cursor: pointer; padding: 2px 4px; border-radius: 6px; flex: none; }
 .search-toggle:has(input:checked) { background: var(--accent-soft); color: var(--accent-ink); }
 #search-panel[hidden] { display: none; }
@@ -1065,9 +1084,9 @@ html[data-theme="dark"] .tok-mark { background: #8A7A2E; color: #F2EFDF; }
 }
 
 
-/* 検索ジャンプ */
-.search-row { display: flex; gap: 4px; align-items: stretch; }
-.search-row #search-box { flex: 1; min-width: 0; }
+/* ここにあった「検索ジャンプ」用の .search-row { align-items: stretch } と #search-box の指定は消した。
+   #search-box という部品はもう無く、stretch だけが検索・置換パネルの行(上の .search-row の
+   align-items: center)を上書きして、件数の表示を約6px上へずらしていた(2026-11 の点検)。 */
 .search-row .btn.tiny { padding: 0 8px; }
 /* ---- 検索ヒットのハイライト(本文) ----
    【旧実装との関係】 ここには以前から .cm-search-hit / .cm-search-hit-active の指定が
@@ -1657,6 +1676,10 @@ html[data-theme="dark"] .cm-search-ruler-mark.is-active {
   font-family: var(--font-body);
 }
 .color-picker-panel:focus { outline: none; }
+/* 中の部品を縮ませない。パネルは縦に並べる flex で高さに上限があるので、窓が低いと、
+   指定が無い部品(色を選ぶ四角)から先に潰れて見えなくなっていた(720x520 で再現。2026-11 の点検)。
+   収まらない分は、パネル自身の縦スクロール(overflow-y: auto)に任せる。 */
+.color-picker-panel > * { flex: none; }
 
 /* ユーザー要望1: プレビュー行をドラッグしてパネルを移動できるようにする。
    cursor: move で掴めることを示す(実際のドラッグ処理はcolor-picker.js側)。 */

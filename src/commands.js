@@ -240,6 +240,21 @@ export function buildCommands(ctx) {
     { id: "view.devtools", menu: "View", label: "開発者ツール", shortcut: "Shift+F12", run: app((c) => c.actions.openDevTools()), enabled: () => !!ctx.bridge },
   ];
 
+  // Markdownの記法を書き込むコマンドは、Markdownの文書でだけ使えるようにする。
+  // 以前はコードモード・プレーンテキストでも動き、JSONやソースコードの中で Ctrl+B を押すと
+  // 「****」が、Ctrl+1 を押すと「# 」が書き込まれていた(2026-11 の点検)。メニューでも灰色になる。
+  // 無効のときはキーを横取りしないので、コードモードの Ctrl+/(コメントの切り替え)などは
+  // エディタ本来の動きになる。インデント(Ctrl+[ / Ctrl+])はどのモードでも意味があるので残す。
+  const worksInAnyMode = new Set(["para.indent", "para.outdent"]);
+  const markdownOnly = new Set(["edit.newParagraph", "edit.softBreak", "edit.deleteTableRow", "edit.selectStyleRange", "view.sourceMode"]);
+  for (const cmd of commands) {
+    const isMarkdownOnly = markdownOnly.has(cmd.id)
+      || ((cmd.id.startsWith("para.") || cmd.id.startsWith("format.")) && !worksInAnyMode.has(cmd.id));
+    if (!isMarkdownOnly) continue;
+    const base = cmd.enabled;
+    cmd.enabled = (c) => ctx.getState().mode === "markdown" && (base ? base(c) : true);
+  }
+
   // キーバインドのカスタマイズ(仕様書 第2.10節 C-10)。設定画面(settings.js)で
   // 保存されたctx.getState().keyBindings(コマンドID→ショートカット文字列)があれば、
   // ここでコマンド定義の既定shortcutを差し替える。
@@ -799,7 +814,10 @@ export function initCommandPalette(root, commands, ctx) {
   }
   function open() {
     if (overlay) { close(); return; }
-    const available = commands.filter((c) => !c.contextOnly && !(c.grayed?.(ctx) ?? false) && (c.enabled ? c.enabled(ctx) : true));
+    // 実行できるものだけを並べる。run を持たない項目(「最近使ったファイル」のように、メニューでは
+    // 下の階層を開くだけのもの)を並べると、選んだときに「cmd.run is not a function」で落ちて
+    // パレットが閉じるだけになる(2026-11 の点検)。
+    const available = commands.filter((c) => typeof c.run === "function" && !c.contextOnly && !(c.grayed?.(ctx) ?? false) && (c.enabled ? c.enabled(ctx) : true));
     overlay = document.createElement("div");
     overlay.className = "palette-overlay";
     // role="dialog" aria-modal="true"は設定画面(settings.js)・独自ダイアログ(dialog.js)と
@@ -833,10 +851,16 @@ export function initCommandPalette(root, commands, ctx) {
         li.addEventListener("mousedown", (e) => { e.preventDefault(); close(); cmd.run(); });
         list.appendChild(li);
       });
+      // 矢印キーで選んでいる項目が一覧の外へ出ないようにする。
+      list.children[sel]?.scrollIntoView({ block: "nearest" });
     }
     function filter() {
       const q = input.value.trim().toLowerCase();
-      filtered = !q ? available : available.filter((c) => c.label.toLowerCase().includes(q) || (c.menu ?? "").toLowerCase().includes(q));
+      // メニューの名前は、画面に出している日本語(「ファイル」「表示」など)で探せるようにする。
+      // 以前は内部の英語の名前(File・View)としか比べておらず、「表示」と打っても絞り込めなかった。
+      filtered = !q ? available : available.filter((c) => c.label.toLowerCase().includes(q)
+        || (MENU_LABELS[c.menu] ?? c.menu ?? "").toLowerCase().includes(q)
+        || (c.shortcut || c.keyHint || "").toLowerCase().includes(q));
       sel = 0;
       render();
     }
@@ -1086,7 +1110,13 @@ function parseShortcut(s) {
 // 同様に物理キー(e.code)で判定する対象へ加える。
 const SYMBOL_CODE_MAP = { "`": "Backquote", "[": "BracketLeft", "]": "BracketRight", "\\": "Backslash", "-": "Minus", "=": "Equal", "0": "Digit0" };
 function matchesShortcut(e, combo) {
-  if (SYMBOL_CODE_MAP[combo.key]) {
+  if (/^[0-9]$/.test(combo.key)) {
+    // 数字はすべて物理キーで判定する。Shiftを押していると e.key は記号になる
+    // (日本語キーボードの Shift+1 は「!」、Shift+5 は「%」)ので、e.key で比べると
+    // Ctrl+Shift+1〜3(サイドバーの切り替え)や Alt+Shift+5(取り消し線)が一度も一致しなかった
+    // (2026-11 の点検。以前は「0」だけを物理キーで見ていた)。テンキーの数字も同じに扱う。
+    if (e.code !== `Digit${combo.key}` && e.code !== `Numpad${combo.key}`) return false;
+  } else if (SYMBOL_CODE_MAP[combo.key]) {
     if (e.code !== SYMBOL_CODE_MAP[combo.key]) return false;
   } else if (e.key.toLowerCase() !== combo.key) {
     return false;

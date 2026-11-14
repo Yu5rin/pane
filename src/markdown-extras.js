@@ -52,6 +52,23 @@ function slugify(text) {
 //   組み立てて呼ぶため、バックグラウンドパース自体が動かず、放っておいても木が伸びない
 //   (実測で425行の説明書のうち11見出しまでしか拾えず、目次が途中で切れていた)。
 //   このように「一度きりの変換で、確実に文書全体が要る」呼び出し側だけtrueにする。
+// 見出しの文字から、インラインの記法を取り除く。アウトラインと目次は文字だけを並べるので、
+// 「## **重要** な `設定`」が「**重要** な `設定`」と記号ごと出ていた(2026-11 の点検)。
+// 本文の描画とは別物の簡易な置き換えで、太字・斜体・取り消し線・ハイライト・コード・
+// リンク・画像と、見出しを閉じる「#」だけを扱う。
+export function plainHeadingText(text) {
+  return text
+    .replace(/\s+#+\s*$/, "")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/(\*\*|__)(.+?)\1/g, "$2")
+    .replace(/(~~|==)(.+?)\1/g, "$2")
+    .replace(/(^|[^\w*])\*([^*\s][^*]*?)\*(?!\w)/g, "$1$2")
+    .replace(/(^|[^\w_])_([^_\s][^_]*?)_(?!\w)/g, "$1$2")
+    .trim();
+}
+
 export function extractHeadings(state, maxLevel = outlineMaxLevel, { ensureFullParse = false } = {}) {
   const headings = [];
   const slugCount = new Map();
@@ -74,11 +91,13 @@ export function extractHeadings(state, maxLevel = outlineMaxLevel, { ensureFullP
         text = state.doc.sliceString(from, node.to).trim();
       }
       if (!text) return false;
+      // スラグは記法を含んだ元の文字から作る(これまでと同じ値を保つ。変えると、文書の中の
+      // 「[…](#…)」のリンクが切れる)。一覧に見せる文字だけ、記法を取り除く。
       let slug = slugify(text) || "section";
       const n = slugCount.get(slug) ?? 0;
       slugCount.set(slug, n + 1);
       if (n > 0) slug = `${slug}-${n}`;
-      headings.push({ level, text, from: node.from, to: node.to, slug });
+      headings.push({ level, text: plainHeadingText(text) || text, from: node.from, to: node.to, slug });
       return false; // 見出し内部(インライン装飾)へは降りない
     },
   });

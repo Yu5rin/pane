@@ -3193,8 +3193,30 @@ const skipHiddenTailMarks = EditorState.transactionFilter.of((tr) => {
   return [tr, { selection: { anchor: line.to }, sequential: true }];
 });
 
+// ---- 表のセルへ複数行を貼り付けたとき、表を壊さない ----
+// 表の1行は文書の1行なので、セルの途中へ改行を含む文字を貼ると、その行が途中で切れて
+// 表が崩れる(後ろの列が次の行へ落ち、以降が表でなくなる。2026-11 の点検)。
+// セルの中へ貼るときは、改行を空白に置き換えて1行にする。
+// 入口(キーでの貼り付け・右クリックの貼り付け・書式つきの貼り付け)ごとに直すと漏れるので、
+// 文書を書き換える直前のここ1か所で見る。行頭へ貼るとき・貼るものが表の行そのもの
+// (どの行も「|」で始まる)のときは、行を足したいのだと考えて何もしない。
+const tablePasteGuard = EditorState.transactionFilter.of((tr) => {
+  if (!tr.docChanged || !tr.isUserEvent("input.paste")) return tr;
+  const found = [];
+  tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => { found.push({ from: fromA, to: toA, text: inserted.toString() }); });
+  if (found.length !== 1) return tr;
+  const { from, to, text } = found[0];
+  if (!text.includes("\n")) return tr;
+  const state = tr.startState;
+  const line = state.doc.lineAt(from);
+  if (from === line.from || !tableNodeAt(state, from)) return tr;
+  if (text.split("\n").filter((l) => l.trim()).every((l) => l.trim().startsWith("|"))) return tr;
+  const flat = text.replace(/\s*\r?\n\s*/g, " ").trim();
+  return { changes: { from, to, insert: flat }, selection: { anchor: from + flat.length }, userEvent: "input.paste", scrollIntoView: true };
+});
+
 const livePreviewExt = () => [
-  livePreview, skipHiddenTailMarks, codeCopyHotBlockField, tableBlocksField, tableField, tableAutoFormat,
+  livePreview, skipHiddenTailMarks, tablePasteGuard, codeCopyHotBlockField, tableBlocksField, tableField, tableAutoFormat,
   frontmatterField, tocParasField, tocField, extTogglesField,
   // 外部リソース読み込み同意(remoteConsentField、上記コメント参照)。extTogglesFieldと違い
   // setValue()側では復元しない(文書が入れ替わるたび既定のfalse/空集合に戻すのが仕様のため)。
@@ -5456,7 +5478,8 @@ export function createEditor(parent, { onChange, onFocus, onBlur, onCompositionC
     // 内部アンカーもCtrlクリック相当としてジャンプさせる(右クリックメニューからの明示操作のため)。
     openLink: (href) => openOrJumpLink(view, href, true),
     // 選択範囲をテキストで置き換える(プレーンテキスト貼り付け・スマートペースト用)
-    pasteText: (text) => { view.dispatch(view.state.replaceSelection(text)); view.focus(); },
+    // userEvent を付ける(貼り付けを見ている処理(tablePasteGuard)が、この経路も拾えるように)。
+    pasteText: (text) => { view.dispatch({ ...view.state.replaceSelection(text), userEvent: "input.paste" }); view.focus(); },
     // themeRefreshEffectも併せて発行し、Mermaid図(mermaidBlockDecoField)をdark/lightに
     // 合わせて再描画させる(既存のMathWidgetはCSS変数のみで配色するため再描画不要だが、
     // MermaidはSVG自体をtheme:"dark"/"default"で作り直す必要があるため)。
