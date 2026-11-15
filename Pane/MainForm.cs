@@ -729,6 +729,25 @@ internal sealed class MainForm : Form
         return saved;
     }
 
+    /// <summary>
+    /// 通知領域の「Paneを終了」(仕様書 T-04)から、このウィンドウを閉じる。
+    /// 保存していない変更があれば、ウィンドウを前に出してから、いつもどおり保存するかを尋ねる。
+    /// キャンセルされたら閉じずに false を返す(呼び出し側は終了をやめる)。
+    /// </summary>
+    internal async Task<bool> CloseForQuitAsync()
+    {
+        if (IsDisposed) return true;
+        if (IsDirty)
+        {
+            if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+            WindowChrome.ForceActivate(this);
+        }
+        if (!await ConfirmDiscardDirtyAsync()) return false;
+        _forceClose = true;
+        Close();
+        return true;
+    }
+
     private async void OnFormClosingAsync(object? sender, FormClosingEventArgs e)
     {
         if (_forceClose) return;

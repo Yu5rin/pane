@@ -143,12 +143,41 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// 未実施の)間だけtrue。名前付きパイプ経由で最初の要求が来た時点でfalseになる。</summary>
     private bool _initialOpenPending;
 
+    /// <summary>通知領域のアイコン(仕様書 T-01〜T-04)。作れなかったときはnull(無くても動く)。</summary>
+    private readonly TrayIcon? _trayIcon;
+
+    /// <summary>通知領域の「Paneを終了」が選ばれ、ウィンドウを順に閉じている最中か。
+    /// この間に最後のウィンドウが閉じられたら、常駐の設定にかかわらず終わる(TrayIconLogic.ShouldStayResident)。</summary>
+    private bool _quitRequested;
+
+    /// <summary>終了の後始末(ExitApplication)を始めたか。2回走らせないため。</summary>
+    private bool _exiting;
+
     public PaneApplicationContext(string? cliInitialPath, bool preload = false, bool stayResident = false)
     {
         _settings = SettingsService.Load();
         _preload = preload;
         _stayResident = preload || stayResident;
         _ui = SynchronizationContext.Current;
+
+        // 通知領域のアイコン(仕様書 T-01)。ウィンドウより先に出す(ログオン時の起動で、ウィンドウを
+        // 1枚も出さずに待っている間も見えるように)。作れなくてもPane自体は動かす。
+        try
+        {
+            _trayIcon = new TrayIcon(new TrayIcon.Actions(
+                DocumentWindows: () => _windows.Where(w => !w.IsDisposed).Cast<Form>().ToList(),
+                OpenDocument: OpenFromTray,
+                OpenFileDialog: OpenFileFromTray,
+                OpenSettings: category => OpenSettingsWindow(ActiveOwner(), category),
+                OpenHelp: () => OpenHelpWindow(ActiveOwner()),
+                Quit: QuitFromTray));
+            _trayIcon.Visible = _settings.ShowTrayIcon;
+        }
+        catch (Exception ex)
+        {
+            Logger.WriteException("通知領域のアイコンを作れなかった(アイコン無しで続ける)", ex);
+            _trayIcon = null;
+        }
 
         // 設定ウィンドウの事前生成(体感速度対策)。本来の合図は最初の本体ウィンドウが使える
         // 状態になったこと(OpenWindowでReadyToUseを購読する)で、このタイマーはそれが来なかった
@@ -535,6 +564,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
 
         _windows.Add(form);
         form.Show();
+        _trayIcon?.Refresh();
 
         if (measureAdditionalWindow)
         {
@@ -1221,6 +1251,74 @@ internal sealed class PaneApplicationContext : ApplicationContext
         {
             window.PostCapabilities();
         }
+        // 設定「通知領域にアイコンを表示する」を、再起動せずにすぐ反映する。
+        if (_trayIcon is not null) _trayIcon.Visible = SettingsService.Load().ShowTrayIcon;
+    }
+
+    // ---- 通知領域のアイコンから頼まれる処理(仕様書 T-02〜T-04) ----
+
+    /// <summary>設定などの補助ウィンドウの持ち主にするウィンドウ。最後に使っていた本体ウィンドウ、無ければnull。</summary>
+    private Form? ActiveOwner() => _windows.LastOrDefault(w => !w.IsDisposed);
+
+    /// <summary>
+    /// 新しい文書(path=null)またはファイルを開く。2つ目の起動からの要求と同じ入口を通す
+    /// (ログオン時の起動で待っている間なら、復元の確認と前回のセッションの復元から始まる。
+    /// 自動の入れ替えの最中なら、入れ替えたあとの新しいPaneで開く。同じファイルは2枚開かない)。
+    /// </summary>
+    private void OpenFromTray(string? path) => OpenWindowFromPipeRequest(path);
+
+    /// <summary>「開く…」。ファイルを選ぶ画面を出し、選ばれたら開く。</summary>
+    private void OpenFileFromTray()
+    {
+        using var dialog = new OpenFileDialog { Filter = OpenDialogFilterBuilder.Build() };
+        Form? owner = ActiveOwner();
+        DialogResult result = owner is null ? dialog.ShowDialog() : dialog.ShowDialog(owner);
+        if (result != DialogResult.OK) return;
+        OpenFromTray(dialog.FileName);
+    }
+
+    /// <summary>
+    /// 「Paneを終了」(仕様書 T-04)。ウィンドウを1枚ずつ閉じ、保存していない変更があれば
+    /// いつもどおり尋ねる。どこかで「キャンセル」されたら、そこで終了をやめる。
+    /// 全部閉じたら、常駐の設定にかかわらずプロセスを終える(以前は常駐を終わらせる手段が無かった)。
+    /// </summary>
+    private async void QuitFromTray()
+    {
+        if (_quitRequested || _exiting) return;
+        _quitRequested = true;
+        bool hadWindows = _windows.Any(w => !w.IsDisposed);
+        Logger.Write($"通知領域: Paneを終了する(ウィンドウ{_windows.Count}個を閉じる)");
+        foreach (MainForm window in _windows.ToList())
+        {
+            bool closed;
+            try { closed = await window.CloseForQuitAsync(); }
+            catch (Exception ex)
+            {
+                Logger.WriteException("通知領域: 終了のためにウィンドウを閉じられなかった", ex);
+                closed = false;
+            }
+            if (!closed)
+            {
+                _quitRequested = false;
+                Logger.Write("通知領域: 保存の確認でキャンセルされたので、終了をやめる");
+                return;
+            }
+        }
+        // ウィンドウがあった場合は、最後のウィンドウが閉じたところ(OnWindowClosed)で終わっている。
+        // 常駐中でウィンドウが1枚も無かった場合は、ここで終わる。
+        if (!hadWindows) ExitApplication();
+    }
+
+    /// <summary>
+    /// 通知領域のアイコンを消してからスレッドを終える。どの経路で終わっても(最後のウィンドウ・
+    /// 「Paneを終了」・更新の入れ替え)ここを通る。消さずに終わると、マウスを乗せるまで
+    /// アイコンが通知領域に残って見える。
+    /// </summary>
+    protected override void ExitThreadCore()
+    {
+        try { _trayIcon?.Dispose(); }
+        catch (Exception ex) { Logger.WriteException("通知領域のアイコンの後始末に失敗", ex); }
+        base.ExitThreadCore();
     }
 
     /// <summary>
@@ -1253,10 +1351,11 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// 中央に表示する。既に開いていれば新しく作らず前面に出してフォーカスするだけにする
     /// (同時に1つしか開かない)。
     /// </summary>
-    public void OpenSettingsWindow(Form owner) => OpenSettingsWindow(owner, null);
+    public void OpenSettingsWindow(Form? owner) => OpenSettingsWindow(owner, null);
 
+    /// <param name="owner">持ち主の本体ウィンドウ。通知領域から開くときは、ウィンドウが無ければnull。</param>
     /// <param name="category">開いた直後に表示するカテゴリ(SettingsWindow.Reveal参照)。</param>
-    public void OpenSettingsWindow(Form owner, string? category)
+    public void OpenSettingsWindow(Form? owner, string? category)
     {
         var sw = Stopwatch.StartNew();
         bool isNew = _settingsWindow is not { IsDisposed: false };
@@ -1387,7 +1486,7 @@ internal sealed class PaneApplicationContext : ApplicationContext
     /// 中央に表示する。既に開いていれば新しく作らず<see cref="WindowChrome.ForceActivate"/>で
     /// 前面に出すだけにする(同時に1つしか開かない)。<see cref="OpenSettingsWindow"/>と同じ構成。
     /// </summary>
-    public void OpenHelpWindow(Form owner)
+    public void OpenHelpWindow(Form? owner)
     {
         var sw = Stopwatch.StartNew();
         bool isNew = _helpWindow is not { IsDisposed: false };
@@ -1478,40 +1577,57 @@ internal sealed class PaneApplicationContext : ApplicationContext
             // 戻る(次にファイルを開くときもWebView2環境のキャッシュを保ったまま高速に開けるため)。
             // 次にOpenWindowFromPipeRequestが呼ばれたときも、既にウィンドウを一度見せた後なので
             // 復元確認は再実行しない(_initialOpenPendingは既にfalse)。
-            if (_stayResident || !quitOnLastWindowClosed)
+            // 常駐を続けるか。通知領域の「Paneを終了」で閉じた場合は、常駐の設定にかかわらず終わる。
+            if (TrayIconLogic.ShouldStayResident(_stayResident, quitOnLastWindowClosed, _quitRequested))
             {
                 string reason = _preload ? "preload起動" : _stayResident ? "常駐していたPaneの更新後の後継" : "quitOnLastWindowClosed=false";
                 Logger.Write($"最後のウィンドウが閉じられた({reason})。ExitThreadは呼ばず常駐状態へ戻る" +
                     "(設定画面が開いていればそのまま開いた状態を維持する)");
                 // 新しい版を用意してあれば、ここで入れ替える(U-10。作業中のウィンドウはもう無い)。
                 ScheduleAutoApplyCheck();
+                _trayIcon?.Refresh();
             }
             else
             {
-                // アプリ全体を終了する。設定画面・取扱説明書画面はどちらもウィンドウ数の勘定に
-                // 含めていないため(_windowsに含まれない)、開いたままExitThreadすると
-                // 取り残されてしまう。明示的に閉じてからスレッドを終了する。体感速度対策
-                // (インスタンス再利用)により通常のCloseは非表示化に読み替えられてしまうため、
-                // ここでは本当に破棄するCloseForRealを使う(事前生成の途中で終了した場合も含め、
-                // 確実に破棄する)。
-                _settingsPregenerateTimer.Stop();
-                _settingsPregenerateTimer.Dispose();
-                _helpPregenerateTimer.Stop();
-                _helpPregenerateTimer.Dispose();
-                _settingsWindow?.CloseForReal();
-                _helpWindow?.CloseForReal();
-                // 作成補助は保存していない変更があっても確かめずに閉じる。最後の本体ウィンドウを
-                // 閉じたのは利用者の操作で、確認のために見えないウィンドウを残すことはできないため。
-                _cssEditorWindow?.Dispose();
-                // 新しい版を用意してあれば、終わる前に入れ替える(U-10)。次に起動したときには新しい版になる。
-                if (DecideAutoApply(auxiliaryWindowShown: false) == UpdateRestartLogic.AutoApplyDecision.Apply
-                    && UpdateService.TryBeginApply())
-                {
-                    _ = AutoApplyAsync(stayResident: false);
-                    return;
-                }
-                ExitThread();
+                ExitApplication();
             }
         }
+        else
+        {
+            _trayIcon?.Refresh();
+        }
+    }
+
+    /// <summary>
+    /// アプリ全体を終了する(最後のウィンドウを閉じたとき、通知領域の「Paneを終了」)。
+    /// </summary>
+    private void ExitApplication()
+    {
+        if (_exiting) return;
+        _exiting = true;
+        Logger.Write("アプリを終了する");
+        // アプリ全体を終了する。設定画面・取扱説明書画面はどちらもウィンドウ数の勘定に
+        // 含めていないため(_windowsに含まれない)、開いたままExitThreadすると
+        // 取り残されてしまう。明示的に閉じてからスレッドを終了する。体感速度対策
+        // (インスタンス再利用)により通常のCloseは非表示化に読み替えられてしまうため、
+        // ここでは本当に破棄するCloseForRealを使う(事前生成の途中で終了した場合も含め、
+        // 確実に破棄する)。
+        _settingsPregenerateTimer.Stop();
+        _settingsPregenerateTimer.Dispose();
+        _helpPregenerateTimer.Stop();
+        _helpPregenerateTimer.Dispose();
+        _settingsWindow?.CloseForReal();
+        _helpWindow?.CloseForReal();
+        // 作成補助は保存していない変更があっても確かめずに閉じる。最後の本体ウィンドウを
+        // 閉じたのは利用者の操作で、確認のために見えないウィンドウを残すことはできないため。
+        _cssEditorWindow?.Dispose();
+        // 新しい版を用意してあれば、終わる前に入れ替える(U-10)。次に起動したときには新しい版になる。
+        if (DecideAutoApply(auxiliaryWindowShown: false) == UpdateRestartLogic.AutoApplyDecision.Apply
+            && UpdateService.TryBeginApply())
+        {
+            _ = AutoApplyAsync(stayResident: false);
+            return;
+        }
+        ExitThread();
     }
 }

@@ -50,6 +50,7 @@
     <Compile Include="../Pane/DistIntegrity.cs" Link="取り込み/DistIntegrity.cs" />
     <Compile Include="../Pane/RecycleBinLogic.cs" Link="取り込み/RecycleBinLogic.cs" />
     <Compile Include="../Pane/UpdateRollbackLogic.cs" Link="取り込み/UpdateRollbackLogic.cs" />
+    <Compile Include="../Pane/TrayIconLogic.cs" Link="取り込み/TrayIconLogic.cs" />
   </ItemGroup>
 
   <ItemGroup>
