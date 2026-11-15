@@ -358,6 +358,11 @@ const SETTINGS_REPLY = {
   // (保存すると設定画面が閉じてしまうため、save前のここで確認する)。
   const preloadCb = 'input[data-field="preloadOnStartup"]';
   ok("(D) preloadOnStartupにはdata-invertが付いていない(独立した設定)", !(await page.$eval(preloadCb, (e) => e.hasAttribute("data-invert"))));
+  // 通知領域にアイコンを表示する(仕様書 T-01、2026-11-15に追加)。既定オンで、チェックの向きはそのまま。
+  const trayCb = 'input[data-field="showTrayIcon"]';
+  ok("(D) 「通知領域にアイコンを表示する」が「一般」カテゴリにある", (await page.$(trayCb)) !== null);
+  ok("(D) showTrayIconは既定でチェックが付いている(反転していない)",
+    await page.$eval(trayCb, (e) => e.checked && !e.hasAttribute("data-invert")));
 
   // 初期状態: 設定値はtrue(常駐させない)なので、反転UIではチェックはOFFになっているはず。
   const initialChecked = await page.$eval(cb, (e) => e.checked);

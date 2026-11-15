@@ -38,6 +38,7 @@ internal static class SettingsBridge
             startupBehavior = settings.StartupBehavior,
             startupFolderPath = settings.StartupFolderPath,
             quitOnLastWindowClosed = settings.QuitOnLastWindowClosed,
+            showTrayIcon = settings.ShowTrayIcon,
             preloadOnStartup = settings.PreloadOnStartup,
             pregenerateWindows = settings.PregenerateWindows,
             showStatusBar = settings.ShowStatusBar,
@@ -461,6 +462,7 @@ internal static class SettingsBridge
                 settings.StartupFolderPath = startupFolderProp.ValueKind == JsonValueKind.String ? startupFolderProp.GetString() : null;
             }
             if (TryGetBool(s, "quitOnLastWindowClosed", out bool quitOnLastWindowClosed)) settings.QuitOnLastWindowClosed = quitOnLastWindowClosed;
+            if (TryGetBool(s, "showTrayIcon", out bool showTrayIcon)) settings.ShowTrayIcon = showTrayIcon;
             if (TryGetBool(s, "preloadOnStartup", out bool preloadOnStartup)) settings.PreloadOnStartup = preloadOnStartup;
             if (TryGetBool(s, "pregenerateWindows", out bool pregenerateWindows)) settings.PregenerateWindows = pregenerateWindows;
             if (TryGetBool(s, "showStatusBar", out bool showStatusBar)) settings.ShowStatusBar = showStatusBar;

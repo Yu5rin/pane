@@ -107,6 +107,10 @@ internal sealed class AppSettings
     /// (preload起動時と同じ扱い)。既定true。</summary>
     public bool QuitOnLastWindowClosed { get; set; } = true;
 
+    /// <summary>通知領域(タスクバーの右端)にPaneのアイコンを出すか(仕様書 T-01)。既定true。
+    /// 常駐中はウィンドウが1枚も無く、動いているのかが見えず、終わらせる手段も無かったため置いた。</summary>
+    public bool ShowTrayIcon { get; set; } = true;
+
     /// <summary>直近に開いていたファイルパス一覧(セッション復元用)。スクロール位置等は含めない。</summary>
     public List<string> OpenFilePaths { get; set; } = new();
 
