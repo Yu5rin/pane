@@ -1050,6 +1050,47 @@ function showAdBanner(text, { actionLabel, onAction, autoHideMs } = {}) {
 }
 adBannerClose.addEventListener("click", hideAdBanner);
 
+// ---- 更新のお知らせの「更新する」(仕様書 U-06) ----
+// 以前は、お知らせの「更新する」を押すと設定画面の「バージョン情報」が開くだけで、そこでもう一度
+// 「更新を確認」→「更新する」を押す必要があった(2026-11-15、利用者の指摘)。「更新する」と
+// 書いたボタンで更新が始まらないのは、名前と動きが食い違っている。
+// ここから直接、設定画面と同じ確認(再起動すること・保存していない文書があると更新できないこと)を
+// 出し、同じ要求(apply-update)を送る。ダウンロードと入れ替えはC#側の同じ処理が行い、
+// 進み具合はこの帯に出す。保存していない文書があるとき・書き込めない場所のときは、C#側が
+// 断って理由を返すので、それも帯に出す。
+let updateFromBannerInProgress = false;
+async function applyUpdateFromBanner(latestVersion) {
+  if (!bridge || updateFromBannerInProgress) return;
+  const version = latestVersion || "新しい版";
+  const ok = await paneConfirm({
+    title: "更新しますか?",
+    message: `${version} をダウンロードして入れ替えます。入れ替えのあとPaneは再起動し、開いていた文書を開き直します。` +
+      "保存していない文書があると更新できないので、先に保存してください。",
+    okLabel: "更新する",
+  });
+  if (!ok) {
+    // やめたときは、お知らせを出し直す(押したら消えて、二度と押せなくなるのを避ける)。
+    showAdBanner(`新しい版 ${version} があります`, { actionLabel: "更新する", onAction: () => applyUpdateFromBanner(latestVersion) });
+    return;
+  }
+  updateFromBannerInProgress = true;
+  showAdBanner("更新の準備をしています…");
+  bridge.postMessage({ type: "apply-update" });
+}
+function showUpdateProgress(msg) {
+  if (!updateFromBannerInProgress) return;
+  if (msg.stage === "error") {
+    updateFromBannerInProgress = false;
+    // 失敗の理由を出し、設定画面からやり直せるようにする(手動での入れ替えの案内もそこにある)。
+    showAdBanner(msg.message || "更新できませんでした。", {
+      actionLabel: "設定で確認",
+      onAction: () => bridge?.postMessage({ type: "open-settings-window", category: "versionInfo" }),
+    });
+    return;
+  }
+  showAdBanner(msg.message || "更新しています…");
+}
+
 // ---- 内容からの編集モード自動判定(仕様書 第1章の拡張)の適用ロジック ----
 // 実際にモード/言語を切り替える(自動切り替え・提案の「切り替える」どちらからも呼ばれる)。
 async function performAutoDetectSwitch(result) {
@@ -3039,13 +3080,17 @@ async function handleHostMessage(msg) {
       settingsUI?.handleSaveResult(msg);
       break;
     case "update-available":
-      // 起動時の更新確認(仕様書 U-06)で新しい版が見つかった。ここでは知らせるだけで、
-      // 更新そのものは利用者が設定画面で「更新する」を押したときにしか始まらない。
+      // 起動時の更新確認(仕様書 U-06)で新しい版が見つかった。自動では入れ替えず、
+      // 利用者が「更新する」を押したときにだけ始める。
       // 自動では消さない(autoHideMsを渡さない)。見逃すと次に気づくのは次の起動になるため。
       showAdBanner(msg.message || `新しい版 ${msg.latestVersion || ""} があります`, {
         actionLabel: "更新する",
-        onAction: () => bridge?.postMessage({ type: "open-settings-window", category: "versionInfo" }),
+        onAction: () => applyUpdateFromBanner(msg.latestVersion),
       });
+      break;
+    case "update-progress":
+      // 帯の「更新する」から始めた更新の進み具合(設定画面から始めたときは、設定画面の側へ届く)。
+      showUpdateProgress(msg);
       break;
     case "update-applied":
       // ウィンドウを閉じている間に、設定「新しい版を自動で入れる」(仕様書 U-10)で入れ替わった。
