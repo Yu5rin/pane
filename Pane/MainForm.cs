@@ -673,6 +673,15 @@ internal sealed class MainForm : Form
         _webViewRevealed = true;
         _webViewRevealFallbackTimer.Stop();
         _webView.Visible = true;
+        // 表示に切り替えた時点でこのウィンドウが前面にいるなら、キー入力の受け先を本文(WebView2)へ移す。
+        // ウィンドウが前面に出た瞬間(Shown・Activated)の _webView.Focus() は、WebView2がまだ
+        // 隠れている間なので空振りする。そのあと前面のまま表示に切り替わると、もう Activated は来ず、
+        // 文字が打てないままになる(通知領域の「新規作成」で見つかった。TrayIcon.Run の説明を参照)。
+        // 本文の中のどこにカーソルを置くか(先頭)は、JS側が先に済ませている(focusEditorAtStart)。
+        if (Form.ActiveForm == this)
+        {
+            _webView.Focus();
+        }
         Logger.Write(viaFallback
             ? $"WebView2を表示(フォールバック: {WebViewRevealFallbackMs}ms以内にinitial-render-readyが届かなかったため強制表示)"
             : "WebView2を表示(JS側からinitial-render-ready受信)");
