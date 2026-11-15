@@ -26,9 +26,13 @@ internal sealed class TrayIcon : IDisposable
     private readonly ContextMenuStrip _menu;
     private readonly Actions _actions;
 
+    /// <summary>UIスレッドの同期コンテキスト。メニューの項目は、メニューが閉じ切ってから実行する(<see cref="Run"/>)。</summary>
+    private readonly SynchronizationContext? _ui;
+
     public TrayIcon(Actions actions)
     {
         _actions = actions;
+        _ui = SynchronizationContext.Current;
         _menu = new ContextMenuStrip();
         // 中身は開くたびに作り直す(最近使ったファイル・開いているウィンドウ・テーマが変わるため)。
         _menu.Opening += (_, e) =>
@@ -153,12 +157,27 @@ internal sealed class TrayIcon : IDisposable
         }
     }
 
-    /// <summary>メニューの項目を実行する。失敗しても常駐しているPaneごと落とさない。</summary>
-    private static void Run(string label, Action run)
+    /// <summary>
+    /// メニューの項目を実行する。失敗しても常駐しているPaneごと落とさない。
+    ///
+    /// 【実機で起きたこと】(2026-11-15、v1.4.6) 右クリックの「新規作成」で開いたウィンドウに、
+    /// 文字が打てなかった(ウィンドウは手前に出るが、キー入力がどこにも届かない)。
+    /// 項目のClickは、メニューがまだ閉じ切っていないうちに呼ばれる。そこで新しいウィンドウを開いて
+    /// 前面に出しても、そのあとメニューが閉じるときに、開く前に前面にいたウィンドウ(メニューを出すために
+    /// 通知領域のアイコンが前面に出した、見えないウィンドウ)へ入力の受け先を戻してしまう。
+    /// メッセージの待ち行列に積んで、メニューが閉じ切ってから実行する。
+    /// 左クリック(メニューを出さない)は、この問題が起きないので、その場で実行している。
+    /// </summary>
+    private void Run(string label, Action run)
     {
-        Logger.Write($"通知領域のメニュー: {label.Replace("&&", "&")}");
-        try { run(); }
-        catch (Exception ex) { Logger.WriteException($"通知領域のメニューの実行に失敗({label})", ex); }
+        void Execute()
+        {
+            Logger.Write($"通知領域のメニュー: {label.Replace("&&", "&")}");
+            try { run(); }
+            catch (Exception ex) { Logger.WriteException($"通知領域のメニューの実行に失敗({label})", ex); }
+        }
+        if (_ui is null) { Execute(); return; }
+        _ui.Post(_ => Execute(), null);
     }
 
     public void Dispose()
