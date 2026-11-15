@@ -389,16 +389,56 @@ const sectionText = (page) =>
   ok("(F) 「更新する」ボタンが出る",
     (await page.$eval("#ad-banner-action", (el) => el.textContent)) === "更新する");
 
-  // 押すと設定画面の「バージョン情報」を開くよう頼む(勝手に更新は始めない)。
+  // 押すと、その場で確認を出し、「更新する」を選んだら更新を始める(2026-11-15、利用者の指摘)。
+  // 以前は設定の「バージョン情報」が開くだけで、そこでもう一度押す必要があった。
+  const banner = () => page.evaluate(() => ({
+    hidden: document.getElementById("ad-banner").hidden,
+    text: document.getElementById("ad-banner-text").textContent,
+    action: document.getElementById("ad-banner-action").hidden ? null : document.getElementById("ad-banner-action").textContent,
+  }));
+  const applySent = () => page.evaluate(() => window.__sent.filter((m) => m.type === "apply-update").length);
   await page.click("#ad-banner-action");
   await page.waitForTimeout(200);
-  const opened = await page.evaluate(() =>
-    window.__sent.filter((m) => m.type === "open-settings-window").pop());
-  ok(`(F) 「更新する」で設定のバージョン情報を開く ${JSON.stringify(opened)}`,
-    !!opened && opened.category === "versionInfo");
-  ok("(F) 帯からapply-updateは送らない(勝手に更新を始めない)",
-    !(await page.evaluate(() => window.__sent.some((m) => m.type === "apply-update"))));
-  ok("(F) 押すと帯が閉じる", await page.$eval("#ad-banner", (el) => el.hidden));
+  const confirmTitle = await page.$eval(".pane-dialog-title", (el) => el.textContent).catch(() => null);
+  ok(`(F) 「更新する」でまず確認が出る "${confirmTitle}"`, confirmTitle === "更新しますか?");
+  ok("(F) 確認の前には、まだ更新を始めない", (await applySent()) === 0);
+  ok("(F) 設定画面は開かない", !(await page.evaluate(() => window.__sent.some((m) => m.type === "open-settings-window"))));
+
+  // 確認で「キャンセル」: 更新は始めず、お知らせを出し直す(押せなくならない)。
+  await page.locator(".pane-dialog-btn").filter({ hasText: "キャンセル" }).click();
+  await page.waitForTimeout(200);
+  ok("(F) キャンセルしたら更新を始めない", (await applySent()) === 0);
+  const afterCancel = await banner();
+  ok(`(F) キャンセルしたらお知らせが残り、もう一度押せる ${JSON.stringify(afterCancel)}`,
+    !afterCancel.hidden && afterCancel.action === "更新する" && afterCancel.text.includes("v1.0.6"));
+
+  // 確認で「更新する」: apply-update を1回だけ送り、進み具合を帯に出す。
+  await page.click("#ad-banner-action");
+  await page.waitForTimeout(200);
+  await page.locator(".pane-dialog-btn").filter({ hasText: "更新する" }).click();
+  await page.waitForTimeout(200);
+  ok("(F) 確認で「更新する」を選ぶと、更新を始める(apply-updateを1回送る)", (await applySent()) === 1);
+  await page.evaluate(() => window.__reply({ type: "update-progress", stage: "downloading", message: "ダウンロード中… 40%", percent: 40 }));
+  await page.waitForTimeout(100);
+  const progress = await banner();
+  ok(`(F) 進み具合が帯に出る ${JSON.stringify(progress)}`, !progress.hidden && progress.text === "ダウンロード中… 40%" && progress.action === null);
+  // 進んでいる間に、もう一度お知らせが届いて押されても、二重には始めない。
+  await page.evaluate(() => window.__reply({ type: "update-available", latestVersion: "v1.0.6", message: "新しい版 v1.0.6 があります。" }));
+  await page.waitForTimeout(100);
+  await page.click("#ad-banner-action");
+  await page.waitForTimeout(200);
+  ok("(F) 更新の途中で押しても、確認も更新も重ねて始めない",
+    (await applySent()) === 1 && !(await page.$(".pane-dialog-overlay")));
+
+  // 失敗(保存していない文書がある等): 理由を帯に出し、設定画面で確かめられるようにする。
+  await page.evaluate(() => window.__reply({ type: "update-progress", stage: "error", message: "保存されていない変更があります。更新には再起動が必要なので、先に保存してください。" }));
+  await page.waitForTimeout(100);
+  const failed = await banner();
+  ok(`(F) 失敗したら理由を帯に出す ${JSON.stringify(failed)}`, !failed.hidden && failed.text.includes("保存されていない変更") && failed.action === "設定で確認");
+  await page.click("#ad-banner-action");
+  await page.waitForTimeout(150);
+  const opened = await page.evaluate(() => window.__sent.filter((m) => m.type === "open-settings-window").pop());
+  ok(`(F) 失敗のあと「設定で確認」で設定のバージョン情報を開く ${JSON.stringify(opened)}`, opened?.category === "versionInfo");
 
   // 「閉じる」でも消える。
   await page.evaluate(() => window.__reply({
